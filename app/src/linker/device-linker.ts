@@ -194,6 +194,24 @@ export class DeviceLinker {
       return;
     }
 
+    if (event.type === "alerts.state") {
+      const alertsPatch: Record<string, unknown> = {};
+      for (const alert of event.alerts) {
+        alertsPatch[alert.id] = {
+          state: alert.state,
+          severity: alert.severity,
+          above_threshold_since_ts: alert.aboveThresholdSinceTs,
+          alert_since_ts: alert.alertSinceTs,
+          alert_silenced_until_ts: alert.alertSilencedUntilTs,
+        };
+      }
+      applyStatePatch({ alerts: alertsPatch }, event.source);
+      if (event.source === "ble/eventRx" || event.source === "ble/snapshot") {
+        markBleMessageSeen(Date.now());
+      }
+      return;
+    }
+
     if (event.type === "unknown") {
       logLine(`rx ${event.msgType} (${event.source})`);
     }

@@ -270,11 +270,17 @@ Payload:
 {
   "version": 17,
   "patch": {
-    "anchor.defaultSetMode": "offset",
-    "anchor.offset.distanceM": 8.0,
-    "anchor.offset.angleDeg": 210.0,
-    "zone.type": "circle",
-    "zone.circle.radiusM": 45.0,
+    "anchor.autoMode.minForwardSogKn": 0.8,
+    "anchor.autoMode.stallMaxSogKn": 0.3,
+    "anchor.autoMode.reverseMinSogKn": 0.4,
+    "anchor.autoMode.confirmSeconds": 20,
+    "alerts.anchor_distance.max_distance_m": 35.0,
+    "alerts.boating_area.polygon": [
+      { "lat": 54.3194, "lon": 10.1388 },
+      { "lat": 54.3212, "lon": 10.1388 },
+      { "lat": 54.3212, "lon": 10.1418 },
+      { "lat": 54.3194, "lon": 10.1418 }
+    ],
     "triggers.wind_above.enabled": true,
     "triggers.wind_above.thresholdKn": 30.0,
     "triggers.wind_above.holdMs": 15000,
@@ -322,25 +328,11 @@ Notes:
     }
   },
   "anchor": {
-    "defaultSetMode": "current",
-    "offset": { "distanceM": 0.0, "angleDeg": 0.0 },
     "autoMode": {
-      "enabled": true,
       "minForwardSogKn": 0.8,
       "stallMaxSogKn": 0.3,
       "reverseMinSogKn": 0.4,
       "confirmSeconds": 20
-    }
-  },
-  "zone": {
-    "type": "circle",
-    "circle": { "radiusM": 45.0 },
-    "polygon": {
-      "points": [
-        { "lat": 54.3201, "lon": 10.1402 },
-        { "lat": 54.3202, "lon": 10.1403 },
-        { "lat": 54.3203, "lon": 10.1401 }
-      ]
     }
   },
   "triggers": {
@@ -384,17 +376,12 @@ Notes:
 | `network.wifi.security` | enum | `wpa2` | `open`, `wpa2`, `wpa3` |
 | `network.wifi.hidden` | boolean | `false` | none |
 | `network.wifi.country` | string | `""` | ISO 3166-1 alpha-2 upper-case |
-| `anchor.defaultSetMode` | enum | `current` | `current`, `offset`, `auto`, `manual` |
-| `anchor.offset.distanceM` | number | `0` | `>= 0`, meters |
-| `anchor.offset.angleDeg` | number | `0` | `[0,360)` |
-| `anchor.autoMode.enabled` | boolean | `true` | none |
 | `anchor.autoMode.minForwardSogKn` | number | `0.8` | `>= 0` |
 | `anchor.autoMode.stallMaxSogKn` | number | `0.3` | `>= 0` |
 | `anchor.autoMode.reverseMinSogKn` | number | `0.4` | `>= 0` |
 | `anchor.autoMode.confirmSeconds` | integer | `20` | `1..300` |
-| `zone.type` | enum | `circle` | `circle`, `polygon` |
-| `zone.circle.radiusM` | number | `45` | `> 0` |
-| `zone.polygon.points` | array | `[]` | each point must contain finite `lat`, `lon`; minimum 3 points when active |
+| `alerts.anchor_distance.max_distance_m` | number | `35` | `>= 0`, meters |
+| `alerts.boating_area.polygon` | array | fixed polygon | each point must contain finite `lat`, `lon`; minimum 3 points |
 | `outputs.localSiren.enabled` | boolean | `true` | none |
 | `outputs.localSiren.warningDelayMs` | integer | `0` | `0..600000` |
 | `outputs.localSiren.fullAlarmDelayMs` | integer | `0` | `0..600000` |
@@ -457,12 +444,12 @@ Payload:
       }
     },
     "anchor": {
-      "defaultSetMode": "current",
-      "offset": { "distanceM": 0.0, "angleDeg": 0.0 }
-    },
-    "zone": {
-      "type": "circle",
-      "circle": { "radiusM": 45.0 }
+      "autoMode": {
+        "minForwardSogKn": 0.8,
+        "stallMaxSogKn": 0.3,
+        "reverseMinSogKn": 0.4,
+        "confirmSeconds": 20
+      }
     },
     "triggers": {
       "wind_above": { "enabled": true, "holdMs": 15000, "severity": "warning", "thresholdKn": 30.0 },
@@ -790,7 +777,25 @@ Success:
   "payload": {
     "version": 18,
     "config": {
-      "zone": { "type": "circle", "circle": { "radiusM": 45.0 } }
+      "anchor": {
+        "autoMode": {
+          "minForwardSogKn": 0.8,
+          "stallMaxSogKn": 0.3,
+          "reverseMinSogKn": 0.4,
+          "confirmSeconds": 20
+        }
+      },
+      "alerts": {
+        "anchor_distance": { "max_distance_m": 35.0 },
+        "boating_area": {
+          "polygon": [
+            { "lat": 54.3194, "lon": 10.1388 },
+            { "lat": 54.3212, "lon": 10.1388 },
+            { "lat": 54.3212, "lon": 10.1418 },
+            { "lat": 54.3194, "lon": 10.1418 }
+          ]
+        }
+      }
     },
     "updatedAt": 1770897600456
   }

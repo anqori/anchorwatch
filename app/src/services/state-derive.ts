@@ -1,4 +1,4 @@
-import type { AnchorRuntimeState, JsonRecord, TrackPoint } from "../core/types";
+import type { AlertId, AlertRuntimeEntry, AlertRuntimeState, AlertSeverity, AnchorRuntimeState, JsonRecord, TrackPoint } from "../core/types";
 import { isObject, toFiniteNumber } from "./data-utils";
 
 export interface OnboardingWifiStatus {
@@ -25,6 +25,22 @@ export interface AnchorStatusDerived {
   state: AnchorRuntimeState;
   position: CurrentGpsPosition | null;
 }
+
+const ALERT_LABELS: Record<AlertId, string> = {
+  anchor_distance: "Anchor Distance",
+  boating_area: "Boating Area",
+  wind_strength: "Wind Strength",
+  depth: "Depth",
+  data_outdated: "Data Outdated",
+};
+
+const ALERT_IDS: AlertId[] = [
+  "anchor_distance",
+  "boating_area",
+  "wind_strength",
+  "depth",
+  "data_outdated",
+];
 
 export function readOnboardingWifiStatus(latestState: JsonRecord): OnboardingWifiStatus {
   const system = isObject(latestState.system) ? latestState.system : {};
@@ -118,4 +134,44 @@ export function deriveTelemetry(latestState: JsonRecord, nowTs = Date.now()): Te
       headingDeg: (headingDeg + 360) % 360,
     },
   };
+}
+
+function parseAlertSeverity(value: unknown): AlertSeverity {
+  const raw = typeof value === "string" ? value.trim().toUpperCase() : "";
+  return raw === "ALARM" ? "ALARM" : "WARNING";
+}
+
+function parseAlertState(value: unknown): AlertRuntimeState {
+  const raw = typeof value === "string" ? value.trim().toUpperCase() : "";
+  if (raw === "DISABLED" || raw === "TRIGGERED" || raw === "ALERT" || raw === "ALERT_SILENCED") {
+    return raw;
+  }
+  return "WATCHING";
+}
+
+function parseAlertTs(value: unknown): number | null {
+  const numeric = toFiniteNumber(value);
+  if (numeric === null || numeric <= 0) {
+    return null;
+  }
+  return Math.floor(numeric);
+}
+
+export function readAlertRuntimeEntries(latestState: JsonRecord): AlertRuntimeEntry[] {
+  const alerts = isObject(latestState.alerts) ? latestState.alerts : {};
+  const out: AlertRuntimeEntry[] = [];
+
+  for (const id of ALERT_IDS) {
+    const raw = isObject(alerts[id]) ? alerts[id] : {};
+    out.push({
+      id,
+      label: ALERT_LABELS[id],
+      severity: parseAlertSeverity(raw.severity),
+      state: parseAlertState(raw.state),
+      aboveThresholdSinceTs: parseAlertTs(raw.above_threshold_since_ts),
+      alertSinceTs: parseAlertTs(raw.alert_since_ts),
+      alertSilencedUntilTs: parseAlertTs(raw.alert_silenced_until_ts),
+    });
+  }
+  return out;
 }

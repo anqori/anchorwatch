@@ -50,8 +50,8 @@ export const CONFIG_SECTIONS: Array<{ id: ConfigSectionId; label: string; icon: 
   { id: "device", label: "Device / Bluetooth", icon: "bluetooth" },
   { id: "internet", label: "Internet & WLAN", icon: "wifi" },
   { id: "connection", label: "Connection", icon: "sensors" },
-  { id: "anchor", label: "Anchor", icon: "anchor" },
-  { id: "triggers", label: "Triggers", icon: "warning" },
+  { id: "anchor", label: "Anchor Automatic Placement", icon: "anchor" },
+  { id: "alerts", label: "Alerts", icon: "warning" },
   { id: "profiles", label: "Profiles", icon: "tune" },
   { id: "information", label: "Information / Version", icon: "info" },
 ];

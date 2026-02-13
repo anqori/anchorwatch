@@ -1,47 +1,25 @@
 import type {
-  AnchorMode,
+  AlertConfigDraft,
+  AlertSeverity,
   AutoSwitchSource,
   ColorScheme,
   JsonRecord,
   ProfileMode,
-  Severity,
-  ZoneType,
 } from "../core/types";
 import {
   parseIntegerInput,
   parseNumberInput,
-  parsePolygonPoints,
-  toFiniteNumber,
 } from "./data-utils";
 
 export interface AnchorConfigInput {
-  anchorMode: AnchorMode;
-  anchorOffsetDistanceM: string;
-  anchorOffsetAngleDeg: string;
-  autoModeEnabled: boolean;
   autoModeMinForwardSogKn: string;
   autoModeStallMaxSogKn: string;
   autoModeReverseMinSogKn: string;
   autoModeConfirmSeconds: string;
-  zoneType: ZoneType;
-  zoneRadiusM: string;
-  polygonPointsInput: string;
-  manualAnchorLat: string;
-  manualAnchorLon: string;
 }
 
-export interface TriggerConfigInput {
-  triggerWindAboveEnabled: boolean;
-  triggerWindAboveThresholdKn: string;
-  triggerWindAboveHoldMs: string;
-  triggerWindAboveSeverity: Severity;
-  triggerOutsideAreaEnabled: boolean;
-  triggerOutsideAreaHoldMs: string;
-  triggerOutsideAreaSeverity: Severity;
-  triggerGpsAgeEnabled: boolean;
-  triggerGpsAgeMaxMs: string;
-  triggerGpsAgeHoldMs: string;
-  triggerGpsAgeSeverity: Severity;
+export interface AlertConfigInput {
+  alerts: AlertConfigDraft[];
 }
 
 export interface ProfilesConfigInput {
@@ -58,58 +36,59 @@ export interface ProfilesConfigInput {
 }
 
 export function buildAnchorConfigPatch(input: AnchorConfigInput): JsonRecord {
-  const patch: JsonRecord = {
-    "anchor.defaultSetMode": input.anchorMode,
-    "anchor.offset.distanceM": parseNumberInput(input.anchorOffsetDistanceM, 8, 0, 2000),
-    "anchor.offset.angleDeg": parseNumberInput(input.anchorOffsetAngleDeg, 210, 0, 359.99),
-    "anchor.autoMode.enabled": input.autoModeEnabled,
+  return {
     "anchor.autoMode.minForwardSogKn": parseNumberInput(input.autoModeMinForwardSogKn, 0.8, 0, 20),
     "anchor.autoMode.stallMaxSogKn": parseNumberInput(input.autoModeStallMaxSogKn, 0.3, 0, 20),
     "anchor.autoMode.reverseMinSogKn": parseNumberInput(input.autoModeReverseMinSogKn, 0.4, 0, 20),
     "anchor.autoMode.confirmSeconds": parseIntegerInput(input.autoModeConfirmSeconds, 20, 1, 300),
-    "zone.type": input.zoneType,
   };
+}
 
-  if (input.zoneType === "circle") {
-    patch["zone.circle.radiusM"] = parseNumberInput(input.zoneRadiusM, 45, 1, 3000);
-  } else {
-    const points = parsePolygonPoints(input.polygonPointsInput);
-    if (points.length < 3) {
-      throw new Error("Polygon mode requires at least 3 points (lat,lon per line)");
+const FIXED_ANCHOR_DISTANCE_MAX_M = 35;
+const FIXED_BOATING_AREA_POLYGON: Array<{ lat: number; lon: number }> = [
+  { lat: 54.3194, lon: 10.1388 },
+  { lat: 54.3212, lon: 10.1388 },
+  { lat: 54.3212, lon: 10.1418 },
+  { lat: 54.3194, lon: 10.1418 },
+];
+
+function applyAlertCommonFields(patch: JsonRecord, alert: AlertConfigDraft, defaultMinTimeMs: number, severity: AlertSeverity): void {
+  patch[`alerts.${alert.id}.is_enabled`] = alert.isEnabled;
+  patch[`alerts.${alert.id}.min_time_ms`] = parseIntegerInput(alert.minTimeMs, defaultMinTimeMs, 0, 600000);
+  patch[`alerts.${alert.id}.severity`] = severity;
+}
+
+export function buildAlertConfigPatch(input: AlertConfigInput): JsonRecord {
+  const patch: JsonRecord = {};
+
+  for (const alert of input.alerts) {
+    if (alert.id === "anchor_distance") {
+      applyAlertCommonFields(patch, alert, 20000, alert.severity);
+      patch["alerts.anchor_distance.max_distance_m"] = FIXED_ANCHOR_DISTANCE_MAX_M;
+      continue;
     }
-    patch["zone.polygon.points"] = points;
+    if (alert.id === "boating_area") {
+      applyAlertCommonFields(patch, alert, 20000, alert.severity);
+      patch["alerts.boating_area.polygon"] = FIXED_BOATING_AREA_POLYGON;
+      continue;
+    }
+    if (alert.id === "wind_strength") {
+      applyAlertCommonFields(patch, alert, 20000, alert.severity);
+      patch["alerts.wind_strength.max_tws"] = parseNumberInput(alert.maxTwsKn, 30, 0, 200);
+      continue;
+    }
+    if (alert.id === "depth") {
+      applyAlertCommonFields(patch, alert, 10000, alert.severity);
+      patch["alerts.depth.min_depth"] = parseNumberInput(alert.minDepthM, 2, 0, 500);
+      continue;
+    }
+    if (alert.id === "data_outdated") {
+      applyAlertCommonFields(patch, alert, 5000, alert.severity);
+      patch["alerts.data_outdated.min_age"] = parseIntegerInput(alert.minAgeMs, 5000, 0, 600000);
+    }
   }
 
   return patch;
-}
-
-export function manualAnchorLogMessage(input: AnchorConfigInput): string | null {
-  if (input.anchorMode !== "manual") {
-    return null;
-  }
-
-  const manualLat = toFiniteNumber(input.manualAnchorLat);
-  const manualLon = toFiniteNumber(input.manualAnchorLon);
-  if (manualLat !== null && manualLon !== null) {
-    return `manual anchor draft captured at lat=${manualLat.toFixed(5)}, lon=${manualLon.toFixed(5)} (runtime command id pending)`;
-  }
-  return "manual mode selected; runtime drag/drop command not yet wired in protocol scaffold";
-}
-
-export function buildTriggerConfigPatch(input: TriggerConfigInput): JsonRecord {
-  return {
-    "triggers.wind_above.enabled": input.triggerWindAboveEnabled,
-    "triggers.wind_above.thresholdKn": parseNumberInput(input.triggerWindAboveThresholdKn, 30, 0, 150),
-    "triggers.wind_above.holdMs": parseIntegerInput(input.triggerWindAboveHoldMs, 15000, 0, 600000),
-    "triggers.wind_above.severity": input.triggerWindAboveSeverity,
-    "triggers.outside_area.enabled": input.triggerOutsideAreaEnabled,
-    "triggers.outside_area.holdMs": parseIntegerInput(input.triggerOutsideAreaHoldMs, 10000, 0, 600000),
-    "triggers.outside_area.severity": input.triggerOutsideAreaSeverity,
-    "triggers.gps_age.enabled": input.triggerGpsAgeEnabled,
-    "triggers.gps_age.maxAgeMs": parseIntegerInput(input.triggerGpsAgeMaxMs, 5000, 0, 600000),
-    "triggers.gps_age.holdMs": parseIntegerInput(input.triggerGpsAgeHoldMs, 5000, 0, 600000),
-    "triggers.gps_age.severity": input.triggerGpsAgeSeverity,
-  };
 }
 
 export function buildProfilesConfigPatch(input: ProfilesConfigInput): JsonRecord {

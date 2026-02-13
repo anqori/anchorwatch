@@ -1,7 +1,7 @@
 import { TRACK_SNAPSHOT_LIMIT } from "../core/constants";
 import type { JsonRecord, WifiSecurity } from "../core/types";
-import { mapAnchorDraftToConfigInput, mapProfilesDraftToConfigInput, mapTriggerDraftToConfigInput } from "../services/config-draft-mappers";
-import { buildAnchorConfigPatch, buildProfilesConfigPatch, buildTriggerConfigPatch, manualAnchorLogMessage } from "../services/config-patch-builders";
+import { mapAlertDraftToConfigInput, mapAnchorDraftToConfigInput, mapProfilesDraftToConfigInput } from "../services/config-draft-mappers";
+import { buildAlertConfigPatch, buildAnchorConfigPatch, buildProfilesConfigPatch } from "../services/config-patch-builders";
 import { normalizeRelayBaseUrl } from "../services/local-storage";
 import { readCurrentGpsPosition } from "../services/state-derive";
 import {
@@ -258,17 +258,12 @@ export async function applyWifiConfigFromInternetPage(): Promise<void> {
 export async function applyAnchorConfig(): Promise<void> {
   const anchorInput = mapAnchorDraftToConfigInput(appState.configDrafts.anchor);
   const patch = buildAnchorConfigPatch(anchorInput);
-
-  await sendConfigPatch(patch, "anchor+zone");
-  const manualLog = manualAnchorLogMessage(anchorInput);
-  if (manualLog) {
-    logLine(manualLog);
-  }
+  await sendConfigPatch(patch, "anchor-auto-placement");
 }
 
-export async function applyTriggerConfig(): Promise<void> {
-  const patch = buildTriggerConfigPatch(mapTriggerDraftToConfigInput(appState.configDrafts.triggers));
-  await sendConfigPatch(patch, "triggers");
+export async function applyAlertConfig(): Promise<void> {
+  const patch = buildAlertConfigPatch(mapAlertDraftToConfigInput(appState.configDrafts.alerts));
+  await sendConfigPatch(patch, "alerts");
 }
 
 export async function applyProfilesConfig(): Promise<void> {
@@ -284,6 +279,16 @@ export async function raiseAnchor(): Promise<void> {
   }
   logLine(`anchor.rise sent via ${connection.kind}`);
   await refreshStateSnapshot();
+}
+
+export async function silenceAlarm(seconds: number): Promise<void> {
+  const durationSeconds = Math.max(1, Math.min(24 * 60 * 60, Math.floor(seconds)));
+  const connection = deviceLinker.getConnection();
+  const result = await connection.commandAlarmSilence(durationSeconds);
+  if (!result.accepted) {
+    throw new Error(result.errorDetail || result.errorCode || "alarm.silence rejected");
+  }
+  logLine(`alarm.silence sent via ${connection.kind} for ${durationSeconds}s`);
 }
 
 export async function moveAnchorToPosition(lat: number, lon: number, resetTrack = true): Promise<void> {

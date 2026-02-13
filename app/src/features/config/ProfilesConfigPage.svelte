@@ -18,7 +18,6 @@
   export let notificationStatusText = "No notification checks yet.";
 
   export let onBack: () => void = () => {};
-  export let onApply: () => void = () => {};
   export let onRequestPermission: () => void = () => {};
   export let onSendTestNotification: () => void = () => {};
 </script>
@@ -66,10 +65,6 @@
     <ListInput label="Brightness %" type="number" bind:value={profileNightBrightnessPct} />
     <ListInput label="Output profile" type="text" bind:value={profileNightOutputProfile} />
   </List>
-
-  <div class="actions">
-    <KonstaButton onClick={onApply}>Apply Profile Config</KonstaButton>
-  </div>
 
   <BlockTitle>Notifications</BlockTitle>
   <List strong inset>

@@ -1,5 +1,5 @@
 import type { ConfigPatchCommand } from "../services/protocol-messages";
-import type { InboundSource, JsonRecord, TrackPoint, WifiScanNetwork } from "../core/types";
+import type { AlertRuntimeEntry, InboundSource, JsonRecord, TrackPoint, WifiScanNetwork } from "../core/types";
 
 export type DeviceConnectionKind = "bluetooth" | "cloud-relay" | "fake";
 
@@ -50,6 +50,11 @@ export interface DeviceTrackSnapshotEvent extends DeviceEventBase {
   points: TrackPoint[];
 }
 
+export interface DeviceAlertsStateEvent extends DeviceEventBase {
+  type: "alerts.state";
+  alerts: AlertRuntimeEntry[];
+}
+
 export interface DeviceUnknownEvent extends DeviceEventBase {
   type: "unknown";
   msgType: string;
@@ -61,6 +66,7 @@ export type DeviceEvent =
   | DeviceStateSnapshotEvent
   | DeviceOnboardingBoatSecretEvent
   | DeviceTrackSnapshotEvent
+  | DeviceAlertsStateEvent
   | DeviceUnknownEvent;
 
 export interface DeviceConnection {
@@ -74,6 +80,7 @@ export interface DeviceConnection {
   commandWifiScan(maxResults: number, includeHidden: boolean): Promise<WifiScanNetwork[]>;
   commandAnchorRise(): Promise<DeviceCommandResult>;
   commandAnchorDown(lat: number, lon: number): Promise<DeviceCommandResult>;
+  commandAlarmSilence(seconds: number): Promise<DeviceCommandResult>;
   requestStateSnapshot(): Promise<JsonRecord | null>;
   requestTrackSnapshot(limit: number): Promise<TrackPoint[] | null>;
   probe(base?: string): Promise<DeviceConnectionProbeResult>;

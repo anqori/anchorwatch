@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import type { Map as MapTilerMap } from "@maptiler/sdk";
-  import type { AnchorRuntimeState, ConfigSectionId, TrackPoint, ViewId, WifiScanNetwork, WifiSecurity } from "./core/types";
+  import type { AlertRuntimeEntry, AnchorRuntimeState, ConfigSectionId, TrackPoint, ViewId, WifiScanNetwork, WifiSecurity } from "./core/types";
   import {
     CONFIG_SECTIONS,
     MAPTILER_API_KEY,
@@ -22,7 +22,7 @@
     buildInternetSettingsStatusText,
     deriveAppConnectivityState,
   } from "./services/connectivity-derive";
-  import { readAnchorStatus, readCurrentGpsPosition, readFirmwareVersionFromState, readOnboardingWifiStatus } from "./services/state-derive";
+  import { readAlertRuntimeEntries, readAnchorStatus, readCurrentGpsPosition, readFirmwareVersionFromState, readOnboardingWifiStatus } from "./services/state-derive";
   import {
     applyGoToSettings,
     applyOpenConfigSection,
@@ -43,8 +43,8 @@
   import { isBleSupported } from "./connections/ble/ble-connection";
   import {
     applyAnchorConfig,
+    applyAlertConfig,
     applyProfilesConfig,
-    applyTriggerConfig,
     connectToWifiNetwork,
     fetchTrackSnapshot,
     moveAnchorToPosition,
@@ -73,7 +73,7 @@
   import ConnectionPage from "./features/config/ConnectionPage.svelte";
   import InfoVersionPage from "./features/config/InfoVersionPage.svelte";
   import AnchorConfigPage from "./features/config/AnchorConfigPage.svelte";
-  import TriggersConfigPage from "./features/config/TriggersConfigPage.svelte";
+  import AlertsConfigPage from "./features/config/AlertsConfigPage.svelte";
   import ProfilesConfigPage from "./features/config/ProfilesConfigPage.svelte";
   import SatellitePage from "./features/map/SatellitePage.svelte";
   import MapPage from "./features/map/MapPage.svelte";
@@ -108,6 +108,7 @@
   let anchorPositionText = $state("--");
   let anchorDistanceText = $state("--");
   let anchorBearingText = $state("--");
+  let activeAlerts = $state<AlertRuntimeEntry[]>([]);
   let anchorActionInFlight = $state(false);
   let anchorRiseConfirmOpen = $state(false);
   let anchorMoveMode = $state(false);
@@ -126,6 +127,23 @@
   let internetWifiNetworks = $state<WifiScanNetwork[]>([]);
   let internetRescanTimer: ReturnType<typeof setTimeout> | null = null;
   let internetWasOpen = false;
+  type ConfigAutoPatchSection = "anchor" | "alerts" | "profiles";
+  const CONFIG_AUTO_PATCH_DELAY_MS = 250;
+  const configAutoPatchTimers: Record<ConfigAutoPatchSection, ReturnType<typeof setTimeout> | null> = {
+    anchor: null,
+    alerts: null,
+    profiles: null,
+  };
+  const configAutoPatchPrimed: Record<ConfigAutoPatchSection, boolean> = {
+    anchor: false,
+    alerts: false,
+    profiles: false,
+  };
+  const configAutoPatchHashes: Record<ConfigAutoPatchSection, string> = {
+    anchor: "",
+    alerts: "",
+    profiles: "",
+  };
 
   $effect(() => {
     gpsAgeText = appState.summary.gpsAgeText;
@@ -258,6 +276,8 @@
     }
     network.selectedWifiNetwork = network.availableWifiNetworks.find((wifiNetwork) => wifiNetwork.ssid === network.selectedWifiSsid) ?? null;
     versions.firmware = readFirmwareVersionFromState(appState.latestState);
+    activeAlerts = readAlertRuntimeEntries(appState.latestState)
+      .filter((alert) => alert.state !== "DISABLED" && alert.state !== "WATCHING");
   });
 
   $effect(() => {
@@ -322,6 +342,57 @@
       }
       void runAction("scan wlan networks", scanWifiNetworks);
     }, 10_000);
+  });
+
+  $effect(() => {
+    const currentHash = JSON.stringify(configDrafts.anchor);
+    if (!isConfigSectionActive("anchor")) {
+      resetConfigAutoPatch("anchor", currentHash);
+      return;
+    }
+    if (!configAutoPatchPrimed.anchor) {
+      configAutoPatchPrimed.anchor = true;
+      configAutoPatchHashes.anchor = currentHash;
+      return;
+    }
+    if (currentHash === configAutoPatchHashes.anchor) {
+      return;
+    }
+    queueConfigAutoPatch("anchor", currentHash, "apply anchor config", applyAnchorConfig);
+  });
+
+  $effect(() => {
+    const currentHash = JSON.stringify(configDrafts.alerts);
+    if (!isConfigSectionActive("alerts")) {
+      resetConfigAutoPatch("alerts", currentHash);
+      return;
+    }
+    if (!configAutoPatchPrimed.alerts) {
+      configAutoPatchPrimed.alerts = true;
+      configAutoPatchHashes.alerts = currentHash;
+      return;
+    }
+    if (currentHash === configAutoPatchHashes.alerts) {
+      return;
+    }
+    queueConfigAutoPatch("alerts", currentHash, "apply alert config", applyAlertConfig);
+  });
+
+  $effect(() => {
+    const currentHash = JSON.stringify(configDrafts.profiles);
+    if (!isConfigSectionActive("profiles")) {
+      resetConfigAutoPatch("profiles", currentHash);
+      return;
+    }
+    if (!configAutoPatchPrimed.profiles) {
+      configAutoPatchPrimed.profiles = true;
+      configAutoPatchHashes.profiles = currentHash;
+      return;
+    }
+    if (currentHash === configAutoPatchHashes.profiles) {
+      return;
+    }
+    queueConfigAutoPatch("profiles", currentHash, "apply profile config", applyProfilesConfig);
   });
 
   $effect(() => {
@@ -413,6 +484,45 @@
     }
     clearTimeout(internetRescanTimer);
     internetRescanTimer = null;
+  }
+
+  function isConfigSectionActive(section: ConfigAutoPatchSection): boolean {
+    return navigation.activeView === "config" && navigation.activeConfigView === section;
+  }
+
+  function clearConfigAutoPatchTimer(section: ConfigAutoPatchSection): void {
+    const timer = configAutoPatchTimers[section];
+    if (!timer) {
+      return;
+    }
+    clearTimeout(timer);
+    configAutoPatchTimers[section] = null;
+  }
+
+  function resetConfigAutoPatch(section: ConfigAutoPatchSection, currentHash: string): void {
+    clearConfigAutoPatchTimer(section);
+    configAutoPatchPrimed[section] = false;
+    configAutoPatchHashes[section] = currentHash;
+  }
+
+  function queueConfigAutoPatch(
+    section: ConfigAutoPatchSection,
+    currentHash: string,
+    actionName: string,
+    patchAction: () => Promise<void>,
+  ): void {
+    clearConfigAutoPatchTimer(section);
+    configAutoPatchHashes[section] = currentHash;
+    configAutoPatchTimers[section] = setTimeout(() => {
+      configAutoPatchTimers[section] = null;
+      void runAction(actionName, patchAction);
+    }, CONFIG_AUTO_PATCH_DELAY_MS);
+  }
+
+  function clearAllConfigAutoPatchTimers(): void {
+    clearConfigAutoPatchTimer("anchor");
+    clearConfigAutoPatchTimer("alerts");
+    clearConfigAutoPatchTimer("profiles");
   }
 
   function cloneTrackPoints(points: TrackPoint[]): TrackPoint[] {
@@ -716,6 +826,7 @@
   onDestroy(() => {
     window.removeEventListener("popstate", handlePopState);
     clearInternetRescanTimer();
+    clearAllConfigAutoPatchTimers();
     destroyMapTilerView("map");
     destroyMapTilerView("satellite");
     void stopDeviceRuntime();
@@ -733,6 +844,7 @@
       anchorPositionText={anchorPositionText}
       anchorDistanceText={anchorDistanceText}
       anchorBearingText={anchorBearingText}
+      activeAlerts={activeAlerts}
     />
   {/if}
 
@@ -824,39 +936,35 @@
 
   {#if navigation.activeView === "config" && navigation.activeConfigView === "anchor"}
     <AnchorConfigPage
-      bind:anchorMode={configDrafts.anchor.mode}
-      bind:anchorOffsetDistanceM={configDrafts.anchor.offsetDistanceM}
-      bind:anchorOffsetAngleDeg={configDrafts.anchor.offsetAngleDeg}
-      bind:autoModeEnabled={configDrafts.anchor.autoModeEnabled}
       bind:autoModeMinForwardSogKn={configDrafts.anchor.autoModeMinForwardSogKn}
       bind:autoModeStallMaxSogKn={configDrafts.anchor.autoModeStallMaxSogKn}
       bind:autoModeReverseMinSogKn={configDrafts.anchor.autoModeReverseMinSogKn}
       bind:autoModeConfirmSeconds={configDrafts.anchor.autoModeConfirmSeconds}
-      bind:zoneType={configDrafts.anchor.zoneType}
-      bind:zoneRadiusM={configDrafts.anchor.zoneRadiusM}
-      bind:polygonPointsInput={configDrafts.anchor.polygonPointsInput}
-      bind:manualAnchorLat={configDrafts.anchor.manualAnchorLat}
-      bind:manualAnchorLon={configDrafts.anchor.manualAnchorLon}
       onBack={() => goToSettingsView()}
-      onApply={() => void runAction("apply anchor config", applyAnchorConfig)}
     />
   {/if}
 
-  {#if navigation.activeView === "config" && navigation.activeConfigView === "triggers"}
-    <TriggersConfigPage
-      bind:triggerWindAboveEnabled={configDrafts.triggers.windAboveEnabled}
-      bind:triggerWindAboveThresholdKn={configDrafts.triggers.windAboveThresholdKn}
-      bind:triggerWindAboveHoldMs={configDrafts.triggers.windAboveHoldMs}
-      bind:triggerWindAboveSeverity={configDrafts.triggers.windAboveSeverity}
-      bind:triggerOutsideAreaEnabled={configDrafts.triggers.outsideAreaEnabled}
-      bind:triggerOutsideAreaHoldMs={configDrafts.triggers.outsideAreaHoldMs}
-      bind:triggerOutsideAreaSeverity={configDrafts.triggers.outsideAreaSeverity}
-      bind:triggerGpsAgeEnabled={configDrafts.triggers.gpsAgeEnabled}
-      bind:triggerGpsAgeMaxMs={configDrafts.triggers.gpsAgeMaxMs}
-      bind:triggerGpsAgeHoldMs={configDrafts.triggers.gpsAgeHoldMs}
-      bind:triggerGpsAgeSeverity={configDrafts.triggers.gpsAgeSeverity}
+  {#if navigation.activeView === "config" && navigation.activeConfigView === "alerts"}
+    <AlertsConfigPage
+      bind:anchorDistanceIsEnabled={configDrafts.alerts.anchor_distance.isEnabled}
+      bind:anchorDistanceMinTimeMs={configDrafts.alerts.anchor_distance.minTimeMs}
+      bind:anchorDistanceSeverity={configDrafts.alerts.anchor_distance.severity}
+      bind:boatingAreaIsEnabled={configDrafts.alerts.boating_area.isEnabled}
+      bind:boatingAreaMinTimeMs={configDrafts.alerts.boating_area.minTimeMs}
+      bind:boatingAreaSeverity={configDrafts.alerts.boating_area.severity}
+      bind:windStrengthIsEnabled={configDrafts.alerts.wind_strength.isEnabled}
+      bind:windStrengthMaxTwsKn={configDrafts.alerts.wind_strength.maxTwsKn}
+      bind:windStrengthMinTimeMs={configDrafts.alerts.wind_strength.minTimeMs}
+      bind:windStrengthSeverity={configDrafts.alerts.wind_strength.severity}
+      bind:depthIsEnabled={configDrafts.alerts.depth.isEnabled}
+      bind:depthMinDepthM={configDrafts.alerts.depth.minDepthM}
+      bind:depthMinTimeMs={configDrafts.alerts.depth.minTimeMs}
+      bind:depthSeverity={configDrafts.alerts.depth.severity}
+      bind:dataOutdatedIsEnabled={configDrafts.alerts.data_outdated.isEnabled}
+      bind:dataOutdatedMinAgeMs={configDrafts.alerts.data_outdated.minAgeMs}
+      bind:dataOutdatedMinTimeMs={configDrafts.alerts.data_outdated.minTimeMs}
+      bind:dataOutdatedSeverity={configDrafts.alerts.data_outdated.severity}
       onBack={() => goToSettingsView()}
-      onApply={() => void runAction("apply trigger config", applyTriggerConfig)}
     />
   {/if}
 
@@ -875,7 +983,6 @@
       notificationPermissionText={notifications.permissionText}
       notificationStatusText={notifications.statusText}
       onBack={() => goToSettingsView()}
-      onApply={() => void runAction("apply profile config", applyProfilesConfig)}
       onRequestPermission={() => void runAction("request notification permission", () => requestNotificationPermission(notifications))}
       onSendTestNotification={() => void runAction("send test notification", () => sendTestNotification(notifications))}
     />

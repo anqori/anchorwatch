@@ -1,5 +1,6 @@
 <script lang="ts">
   import { BlockTitle, List, ListItem } from "konsta/svelte";
+  import type { AlertRuntimeEntry } from "../../core/types";
 
   export let currentLatText = "--";
   export let currentLonText = "--";
@@ -8,6 +9,7 @@
   export let anchorPositionText = "--";
   export let anchorDistanceText = "--";
   export let anchorBearingText = "--";
+  export let activeAlerts: AlertRuntimeEntry[] = [];
 </script>
 
 <div class="space-y-3">
@@ -27,6 +29,12 @@
 
   <BlockTitle>Alerts</BlockTitle>
   <List strong inset>
-    <ListItem title="No active alerts." />
+    {#if activeAlerts.length === 0}
+      <ListItem title="No active alerts." />
+    {:else}
+      {#each activeAlerts as alert}
+        <ListItem title={alert.label} subtitle={`${alert.state} · ${alert.severity}`} />
+      {/each}
+    {/if}
   </List>
 </div>

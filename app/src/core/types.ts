@@ -3,16 +3,22 @@ export type AppConnectivityState = "UNCONFIGURED" | "CONFIGURED_BUT_UNCONNECTED"
 export type InboundSource = "ble/eventRx" | "ble/snapshot" | "cloud/status.snapshot" | "fake/snapshot";
 export type PillClass = "ok" | "warn" | "alarm";
 export type ViewId = "summary" | "satellite" | "map" | "radar" | "config";
-export type ConfigSectionId = "device" | "internet" | "connection" | "information" | "anchor" | "triggers" | "profiles";
+export type ConfigSectionId = "device" | "internet" | "connection" | "information" | "anchor" | "alerts" | "profiles";
 export type ConfigViewId = "settings" | ConfigSectionId;
-export type AnchorMode = "current" | "offset" | "auto" | "manual";
-export type ZoneType = "circle" | "polygon";
-export type Severity = "warning" | "alarm";
 export type ProfileMode = "manual" | "auto";
 export type ColorScheme = "full" | "red" | "blue";
 export type AutoSwitchSource = "time" | "sun";
 export type WifiSecurity = "open" | "wpa2" | "wpa3" | "unknown";
 export type AnchorRuntimeState = "up" | "down" | "auto-pending";
+export type AlertSeverity = "WARNING" | "ALARM";
+export type AlertRuntimeState = "DISABLED" | "WATCHING" | "TRIGGERED" | "ALERT" | "ALERT_SILENCED";
+export type AlertId = "anchor_distance" | "boating_area" | "wind_strength" | "depth" | "data_outdated";
+export type AlertConfigDraft =
+  | AnchorDistanceAlertConfigDraft
+  | BoatingAreaAlertConfigDraft
+  | WindStrengthAlertConfigDraft
+  | DepthAlertConfigDraft
+  | DataOutdatedAlertConfigDraft;
 
 export interface ConfigSectionStatusItem {
   id: ConfigSectionId;
@@ -79,33 +85,49 @@ export interface NotificationState {
 }
 
 export interface AnchorConfigDraftState {
-  mode: AnchorMode;
-  offsetDistanceM: string;
-  offsetAngleDeg: string;
-  autoModeEnabled: boolean;
   autoModeMinForwardSogKn: string;
   autoModeStallMaxSogKn: string;
   autoModeReverseMinSogKn: string;
   autoModeConfirmSeconds: string;
-  zoneType: ZoneType;
-  zoneRadiusM: string;
-  polygonPointsInput: string;
-  manualAnchorLat: string;
-  manualAnchorLon: string;
 }
 
-export interface TriggersConfigDraftState {
-  windAboveEnabled: boolean;
-  windAboveThresholdKn: string;
-  windAboveHoldMs: string;
-  windAboveSeverity: Severity;
-  outsideAreaEnabled: boolean;
-  outsideAreaHoldMs: string;
-  outsideAreaSeverity: Severity;
-  gpsAgeEnabled: boolean;
-  gpsAgeMaxMs: string;
-  gpsAgeHoldMs: string;
-  gpsAgeSeverity: Severity;
+export interface AlertConfigDraftCommon {
+  isEnabled: boolean;
+  minTimeMs: string;
+  severity: AlertSeverity;
+}
+
+export interface AnchorDistanceAlertConfigDraft extends AlertConfigDraftCommon {
+  id: "anchor_distance";
+  maxDistanceM: string;
+}
+
+export interface BoatingAreaAlertConfigDraft extends AlertConfigDraftCommon {
+  id: "boating_area";
+  polygonPointsInput: string;
+}
+
+export interface WindStrengthAlertConfigDraft extends AlertConfigDraftCommon {
+  id: "wind_strength";
+  maxTwsKn: string;
+}
+
+export interface DepthAlertConfigDraft extends AlertConfigDraftCommon {
+  id: "depth";
+  minDepthM: string;
+}
+
+export interface DataOutdatedAlertConfigDraft extends AlertConfigDraftCommon {
+  id: "data_outdated";
+  minAgeMs: string;
+}
+
+export interface AlertsConfigDraftState {
+  anchor_distance: AnchorDistanceAlertConfigDraft;
+  boating_area: BoatingAreaAlertConfigDraft;
+  wind_strength: WindStrengthAlertConfigDraft;
+  depth: DepthAlertConfigDraft;
+  data_outdated: DataOutdatedAlertConfigDraft;
 }
 
 export interface ProfilesConfigDraftState {
@@ -123,8 +145,18 @@ export interface ProfilesConfigDraftState {
 
 export interface ConfigDraftsState {
   anchor: AnchorConfigDraftState;
-  triggers: TriggersConfigDraftState;
+  alerts: AlertsConfigDraftState;
   profiles: ProfilesConfigDraftState;
+}
+
+export interface AlertRuntimeEntry {
+  id: AlertId;
+  label: string;
+  severity: AlertSeverity;
+  state: AlertRuntimeState;
+  aboveThresholdSinceTs: number | null;
+  alertSinceTs: number | null;
+  alertSilencedUntilTs: number | null;
 }
 
 export type JsonRecord = Record<string, unknown>;

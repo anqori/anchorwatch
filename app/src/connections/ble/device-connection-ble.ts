@@ -18,6 +18,7 @@ import {
 import { makeMsgId, writeChunked } from "./ble-transport";
 import { dataViewToBytes, isObject, parseTrackSnapshot, parseWifiScanNetworks, safeParseJson } from "../../services/data-utils";
 import { buildConfigPatchPayload, buildProtocolEnvelope, type ConfigPatchCommand } from "../../services/protocol-messages";
+import { readAlertRuntimeEntries } from "../../services/state-derive";
 import { ensurePhoneId, getBoatId } from "../../services/persistence-domain";
 import type {
   DeviceConnection,
@@ -151,6 +152,12 @@ export class DeviceConnectionBle implements DeviceConnection {
 
   async commandAnchorDown(lat: number, lon: number): Promise<DeviceCommandResult> {
     const ack = await this.sendBleCommand("anchor.down", { lat, lon }, true);
+    return this.parseCommandResult(ack);
+  }
+
+  async commandAlarmSilence(seconds: number): Promise<DeviceCommandResult> {
+    const silenceForMs = Math.max(1000, Math.min(24 * 60 * 60 * 1000, Math.floor(seconds * 1000)));
+    const ack = await this.sendBleCommand("alarm.silence.request", { silenceForMs }, true);
     return this.parseCommandResult(ack);
   }
 
@@ -344,6 +351,15 @@ export class DeviceConnectionBle implements DeviceConnection {
         source,
         boatId,
         points: parseTrackSnapshot(payload),
+      };
+    }
+    if (msgType === "alerts.state" || msgType === "alarm.state") {
+      const alertsPayload = isObject(payload.alerts) ? payload.alerts : payload;
+      return {
+        type: "alerts.state",
+        source,
+        boatId,
+        alerts: readAlertRuntimeEntries({ alerts: alertsPayload }),
       };
     }
     return {

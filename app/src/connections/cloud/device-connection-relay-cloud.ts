@@ -104,6 +104,11 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
     return this.postAnchorEvent("anchor.down", { lat, lon });
   }
 
+  async commandAlarmSilence(seconds: number): Promise<DeviceCommandResult> {
+    const silenceForMs = Math.max(1000, Math.min(24 * 60 * 60 * 1000, Math.floor(seconds * 1000)));
+    return this.postAnchorEvent("alarm.silence.request", { silenceForMs });
+  }
+
   async requestStateSnapshot(): Promise<Record<string, unknown> | null> {
     const credentials = this.readCredentials();
     if (!credentials) {

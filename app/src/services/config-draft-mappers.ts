@@ -1,41 +1,28 @@
 import type { ConfigDraftsState } from "../core/types";
 import type {
+  AlertConfigInput,
   AnchorConfigInput,
   ProfilesConfigInput,
-  TriggerConfigInput,
 } from "./config-patch-builders";
 
 export function mapAnchorDraftToConfigInput(anchor: ConfigDraftsState["anchor"]): AnchorConfigInput {
   return {
-    anchorMode: anchor.mode,
-    anchorOffsetDistanceM: anchor.offsetDistanceM,
-    anchorOffsetAngleDeg: anchor.offsetAngleDeg,
-    autoModeEnabled: anchor.autoModeEnabled,
     autoModeMinForwardSogKn: anchor.autoModeMinForwardSogKn,
     autoModeStallMaxSogKn: anchor.autoModeStallMaxSogKn,
     autoModeReverseMinSogKn: anchor.autoModeReverseMinSogKn,
     autoModeConfirmSeconds: anchor.autoModeConfirmSeconds,
-    zoneType: anchor.zoneType,
-    zoneRadiusM: anchor.zoneRadiusM,
-    polygonPointsInput: anchor.polygonPointsInput,
-    manualAnchorLat: anchor.manualAnchorLat,
-    manualAnchorLon: anchor.manualAnchorLon,
   };
 }
 
-export function mapTriggerDraftToConfigInput(triggers: ConfigDraftsState["triggers"]): TriggerConfigInput {
+export function mapAlertDraftToConfigInput(alerts: ConfigDraftsState["alerts"]): AlertConfigInput {
   return {
-    triggerWindAboveEnabled: triggers.windAboveEnabled,
-    triggerWindAboveThresholdKn: triggers.windAboveThresholdKn,
-    triggerWindAboveHoldMs: triggers.windAboveHoldMs,
-    triggerWindAboveSeverity: triggers.windAboveSeverity,
-    triggerOutsideAreaEnabled: triggers.outsideAreaEnabled,
-    triggerOutsideAreaHoldMs: triggers.outsideAreaHoldMs,
-    triggerOutsideAreaSeverity: triggers.outsideAreaSeverity,
-    triggerGpsAgeEnabled: triggers.gpsAgeEnabled,
-    triggerGpsAgeMaxMs: triggers.gpsAgeMaxMs,
-    triggerGpsAgeHoldMs: triggers.gpsAgeHoldMs,
-    triggerGpsAgeSeverity: triggers.gpsAgeSeverity,
+    alerts: [
+      alerts.anchor_distance,
+      alerts.boating_area,
+      alerts.wind_strength,
+      alerts.depth,
+      alerts.data_outdated,
+    ],
   };
 }
 
