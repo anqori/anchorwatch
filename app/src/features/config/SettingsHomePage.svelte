@@ -8,7 +8,6 @@
 
 <Navbar title="Settings" />
 
-<BlockTitle>Settings</BlockTitle>
 <List strong inset aria-label="Settings pages">
   {#each configSections as configSection}
     <ListItem

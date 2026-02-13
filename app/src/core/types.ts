@@ -49,6 +49,7 @@ export interface NetworkState {
   wifiSecurity: WifiSecurity;
   wifiCountry: string;
   wifiScanRequestId: string;
+  wifiScanUpdatedAtMs: number;
   wifiScanInFlight: boolean;
   wifiScanStatusText: string;
   wifiScanErrorText: string;

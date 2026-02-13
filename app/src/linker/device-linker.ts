@@ -1,12 +1,10 @@
 import { BLE_LIVE_MAX_AGE_MS, CLOUD_HEALTH_POLL_MS, CLOUD_POLL_MS } from "../core/constants";
-import type { Envelope, InboundSource, JsonRecord, PillClass } from "../core/types";
-import { isObject, parseWifiScanNetworks } from "../services/data-utils";
-import { handleDeviceEnvelope } from "../services/device-envelope-handler";
+import type { PillClass } from "../core/types";
+import { isObject } from "../services/data-utils";
 import {
   appState,
   applyStateSnapshot,
   applyStatePatch,
-  applyWifiScanNetworks,
   logLine,
   markBleMessageSeen,
   refreshIdentityUi,
@@ -24,7 +22,7 @@ import {
   setBoatSecret,
   renderTelemetryFromLatestState,
 } from "../state/app-state.svelte";
-import type { DeviceConnection, DeviceConnectionStatus } from "../connections/device-connection";
+import type { DeviceConnection, DeviceConnectionStatus, DeviceEvent } from "../connections/device-connection";
 import { defaultConnectionForMode } from "../connections/connection-factory";
 import { markConnectedViaBleOnce } from "../services/persistence-domain";
 
@@ -39,7 +37,7 @@ export class DeviceLinker {
 
   private switchingConnection = false;
 
-  private unsubscribeEnvelope: (() => void) | null = null;
+  private unsubscribeEvents: (() => void) | null = null;
 
   private unsubscribeStatus: (() => void) | null = null;
 
@@ -73,9 +71,9 @@ export class DeviceLinker {
       this.interval = null;
     }
 
-    if (this.unsubscribeEnvelope) {
-      this.unsubscribeEnvelope();
-      this.unsubscribeEnvelope = null;
+    if (this.unsubscribeEvents) {
+      this.unsubscribeEvents();
+      this.unsubscribeEvents = null;
     }
     if (this.unsubscribeStatus) {
       this.unsubscribeStatus();
@@ -100,9 +98,9 @@ export class DeviceLinker {
     try {
       const previous = this.activeConnection;
 
-      if (this.unsubscribeEnvelope) {
-        this.unsubscribeEnvelope();
-        this.unsubscribeEnvelope = null;
+      if (this.unsubscribeEvents) {
+        this.unsubscribeEvents();
+        this.unsubscribeEvents = null;
       }
       if (this.unsubscribeStatus) {
         this.unsubscribeStatus();
@@ -116,8 +114,8 @@ export class DeviceLinker {
       this.activeConnection = next;
       setActiveConnection(next.kind);
 
-      this.unsubscribeEnvelope = next.subscribeEnvelope((envelope, source) => {
-        this.handleEnvelope(envelope, source);
+      this.unsubscribeEvents = next.subscribeEvents((event) => {
+        this.handleEvent(event);
       });
 
       this.unsubscribeStatus = next.subscribeStatus((status) => {
@@ -152,38 +150,53 @@ export class DeviceLinker {
     setBleAuthState(null);
   }
 
-  private handleEnvelope(envelope: Envelope, sourceTag: InboundSource): void {
-    handleDeviceEnvelope(envelope, sourceTag, {
-      setBoatId,
-      setBoatSecret,
-      applyStatePatch,
-      applyStateSnapshot,
-      applyWifiScanResult: (payload: JsonRecord) => {
-        this.applyWifiScanResult(payload);
-      },
-      replaceTrackPoints,
-      markBleMessageSeen: () => {
-        markBleMessageSeen(Date.now());
-      },
-      logLine,
-    });
-  }
-
-  private applyWifiScanResult(payload: JsonRecord): void {
-    const requestId = typeof payload.requestId === "string" ? payload.requestId : "";
-    const scannedNetworks = parseWifiScanNetworks(payload.networks);
-
-    appState.network.wifiScanInFlight = false;
-    appState.network.wifiScanErrorText = "";
-    if (requestId) {
-      appState.network.wifiScanRequestId = requestId;
+  private handleEvent(event: DeviceEvent): void {
+    if (event.boatId) {
+      setBoatId(event.boatId);
     }
 
-    applyWifiScanNetworks(scannedNetworks);
-    appState.network.wifiScanStatusText = scannedNetworks.length > 0
-      ? `Found ${scannedNetworks.length} WLAN network${scannedNetworks.length === 1 ? "" : "s"}.`
-      : "No WLAN networks found. Try scanning again.";
-    logLine(`onboarding.wifi.scan_result received (${scannedNetworks.length} networks)`);
+    if (event.type === "state.patch") {
+      applyStatePatch(event.patch, event.source);
+      if (event.source === "ble/eventRx" || event.source === "ble/snapshot") {
+        markBleMessageSeen(Date.now());
+      }
+      return;
+    }
+
+    if (event.type === "state.snapshot") {
+      applyStateSnapshot(event.snapshot, event.source);
+      if (event.source === "ble/eventRx" || event.source === "ble/snapshot") {
+        markBleMessageSeen(Date.now());
+      }
+      return;
+    }
+
+    if (event.type === "onboarding.boatSecret") {
+      if (event.onboardingBoatId) {
+        setBoatId(event.onboardingBoatId);
+      }
+      if (event.boatSecret && event.boatSecret.trim()) {
+        setBoatSecret(event.boatSecret);
+        logLine("received onboarding.boat_secret and stored secret");
+      } else {
+        logLine("onboarding.boat_secret missing boatSecret");
+      }
+      return;
+    }
+
+    if (event.type === "track.snapshot") {
+      if (event.points.length > 0) {
+        replaceTrackPoints(event.points);
+        logLine(`track.snapshot received (${event.points.length} points)`);
+      } else {
+        logLine("track.snapshot received (no valid points)");
+      }
+      return;
+    }
+
+    if (event.type === "unknown") {
+      logLine(`rx ${event.msgType} (${event.source})`);
+    }
   }
 
   private async tick(): Promise<void> {

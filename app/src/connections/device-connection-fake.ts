@@ -1,7 +1,12 @@
-import type { Envelope, InboundSource, JsonRecord, PillClass, TrackPoint } from "../core/types";
+import type { JsonRecord, PillClass, TrackPoint, WifiScanNetwork } from "../core/types";
 import type { ConfigPatchCommand } from "../services/protocol-messages";
-import { ensurePhoneId, getBoatId } from "../services/persistence-domain";
-import type { DeviceConnection, DeviceConnectionProbeResult, DeviceConnectionStatus } from "./device-connection";
+import { getBoatId } from "../services/persistence-domain";
+import type {
+  DeviceConnection,
+  DeviceEvent,
+  DeviceConnectionProbeResult,
+  DeviceConnectionStatus,
+} from "./device-connection";
 
 interface FakeTick {
   gpsAgeS: number;
@@ -18,13 +23,11 @@ export class DeviceConnectionFake implements DeviceConnection {
 
   private statusSubscribers = new Set<(status: DeviceConnectionStatus) => void>();
 
-  private envelopeSubscribers = new Set<(envelope: Envelope, source: InboundSource) => void>();
+  private eventSubscribers = new Set<(event: DeviceEvent) => void>();
 
   private connected = false;
 
   private bootMs = performance.now();
-
-  private seq = 1;
 
   private publishInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -38,7 +41,6 @@ export class DeviceConnectionFake implements DeviceConnection {
 
     this.connected = true;
     this.bootMs = performance.now();
-    this.seq = 1;
     this.points = [];
 
     this.publishInterval = setInterval(() => {
@@ -62,10 +64,10 @@ export class DeviceConnectionFake implements DeviceConnection {
     return this.connected;
   }
 
-  subscribeEnvelope(callback: (envelope: Envelope, source: InboundSource) => void): () => void {
-    this.envelopeSubscribers.add(callback);
+  subscribeEvents(callback: (event: DeviceEvent) => void): () => void {
+    this.eventSubscribers.add(callback);
     return () => {
-      this.envelopeSubscribers.delete(callback);
+      this.eventSubscribers.delete(callback);
     };
   }
 
@@ -77,12 +79,21 @@ export class DeviceConnectionFake implements DeviceConnection {
     };
   }
 
-  async sendCommand(_msgType: string, _payload: JsonRecord, _requiresAck?: boolean): Promise<null> {
-    return null;
-  }
-
   async sendConfigPatch(_command: ConfigPatchCommand): Promise<void> {
     // No-op in fake mode.
+  }
+
+  async commandWifiScan(maxResults: number, includeHidden: boolean): Promise<WifiScanNetwork[]> {
+    const networks: WifiScanNetwork[] = [
+      { ssid: "Demo Marina", security: "wpa2", rssi: -52, channel: 1, hidden: false },
+      { ssid: "Dockside Guest", security: "open", rssi: -64, channel: 6, hidden: false },
+      { ssid: "AnchorMaster Lab", security: "wpa3", rssi: -71, channel: 11, hidden: false },
+    ];
+    const hiddenNetwork: WifiScanNetwork = { ssid: "", security: "wpa2", rssi: -80, channel: 3, hidden: true };
+    const resultNetworks = includeHidden
+      ? [...networks, hiddenNetwork]
+      : [...networks];
+    return resultNetworks.slice(0, Math.max(0, maxResults));
   }
 
   async requestStateSnapshot(): Promise<JsonRecord | null> {
@@ -128,22 +139,15 @@ export class DeviceConnectionFake implements DeviceConnection {
     }
 
     const { snapshot } = this.buildSnapshot();
-    const envelope: Envelope = {
-      ver: "am.v1",
-      msgType: "status.snapshot",
-      msgId: `fake-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    const event: DeviceEvent = {
+      type: "state.snapshot",
+      source: "fake/snapshot",
       boatId: getBoatId() || "boat_demo_001",
-      deviceId: ensurePhoneId(),
-      seq: this.seq++,
-      ts: Date.now(),
-      requiresAck: false,
-      payload: {
-        snapshot,
-      },
+      snapshot,
     };
 
-    for (const subscriber of this.envelopeSubscribers) {
-      subscriber(envelope, "fake/snapshot");
+    for (const subscriber of this.eventSubscribers) {
+      subscriber(event);
     }
   }
 

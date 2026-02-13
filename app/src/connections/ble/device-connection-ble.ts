@@ -7,7 +7,7 @@ import {
   BLE_SNAPSHOT_UUID,
   PROTOCOL_VERSION,
 } from "../../core/constants";
-import type { Envelope, InboundSource, JsonRecord, PendingAck, TrackPoint } from "../../core/types";
+import type { Envelope, InboundSource, JsonRecord, PendingAck, TrackPoint, WifiScanNetwork } from "../../core/types";
 import { connectBleWithCharacteristics, disconnectBleDevice } from "./ble-connection";
 import {
   clearPendingAcks,
@@ -16,10 +16,15 @@ import {
   resolvePendingAckFromPayload,
 } from "./ble-session";
 import { makeMsgId, writeChunked } from "./ble-transport";
-import { dataViewToBytes, isObject, safeParseJson } from "../../services/data-utils";
+import { dataViewToBytes, isObject, parseTrackSnapshot, parseWifiScanNetworks, safeParseJson } from "../../services/data-utils";
 import { buildConfigPatchPayload, buildProtocolEnvelope, type ConfigPatchCommand } from "../../services/protocol-messages";
 import { ensurePhoneId, getBoatId } from "../../services/persistence-domain";
-import type { DeviceConnection, DeviceConnectionProbeResult, DeviceConnectionStatus } from "../device-connection";
+import type {
+  DeviceConnection,
+  DeviceEvent,
+  DeviceConnectionProbeResult,
+  DeviceConnectionStatus,
+} from "../device-connection";
 
 interface BleTransportState {
   device: BluetoothDevice | null;
@@ -57,7 +62,7 @@ export class DeviceConnectionBle implements DeviceConnection {
     authState: null,
   };
 
-  private envelopeSubscribers = new Set<(envelope: Envelope, source: InboundSource) => void>();
+  private eventSubscribers = new Set<(event: DeviceEvent) => void>();
 
   private statusSubscribers = new Set<(status: DeviceConnectionStatus) => void>();
 
@@ -109,10 +114,10 @@ export class DeviceConnectionBle implements DeviceConnection {
     return this.state.connected;
   }
 
-  subscribeEnvelope(callback: (envelope: Envelope, source: InboundSource) => void): () => void {
-    this.envelopeSubscribers.add(callback);
+  subscribeEvents(callback: (event: DeviceEvent) => void): () => void {
+    this.eventSubscribers.add(callback);
     return () => {
-      this.envelopeSubscribers.delete(callback);
+      this.eventSubscribers.delete(callback);
     };
   }
 
@@ -124,7 +129,21 @@ export class DeviceConnectionBle implements DeviceConnection {
     };
   }
 
-  async sendCommand(msgType: string, payload: JsonRecord, requiresAck = true): Promise<JsonRecord | null> {
+  async sendConfigPatch(command: ConfigPatchCommand): Promise<void> {
+    await this.sendBleCommand("config.patch", buildConfigPatchPayload(command), true);
+  }
+
+  async commandWifiScan(maxResults: number, includeHidden: boolean): Promise<WifiScanNetwork[]> {
+    const requestId = `wifi-${makeMsgId()}`;
+    const ack = await this.sendBleCommand("onboarding.wifi.scan", {
+      requestId,
+      maxResults,
+      includeHidden,
+    }, true);
+    return parseWifiScanNetworks(ack?.networks);
+  }
+
+  private async sendBleCommand(msgType: string, payload: JsonRecord, requiresAck = true): Promise<JsonRecord | null> {
     if (!this.state.connected || !this.state.controlTx) {
       throw new Error("BLE not connected");
     }
@@ -159,10 +178,6 @@ export class DeviceConnectionBle implements DeviceConnection {
     }
   }
 
-  async sendConfigPatch(command: ConfigPatchCommand): Promise<void> {
-    await this.sendCommand("config.patch", buildConfigPatchPayload(command), true);
-  }
-
   async requestStateSnapshot(): Promise<JsonRecord | null> {
     if (!this.state.connected || !this.state.snapshot) {
       throw new Error("BLE snapshot characteristic unavailable");
@@ -175,13 +190,15 @@ export class DeviceConnectionBle implements DeviceConnection {
       throw new Error("invalid snapshot JSON");
     }
 
-    this.emitEnvelope(envelope, "ble/snapshot");
+    const event = this.toDeviceEvent(envelope, "ble/snapshot");
+    if (event) {
+      this.emitEvent(event);
+    }
 
-    if (envelope.msgType !== "status.snapshot") {
+    if (!event || event.type !== "state.snapshot" || !isObject(event.snapshot)) {
       return null;
     }
-    const payload = isObject(envelope.payload) ? envelope.payload : {};
-    return isObject(payload.snapshot) ? payload.snapshot : null;
+    return event.snapshot;
   }
 
   async requestTrackSnapshot(_limit: number): Promise<TrackPoint[] | null> {
@@ -218,9 +235,9 @@ export class DeviceConnectionBle implements DeviceConnection {
     }
   }
 
-  private emitEnvelope(envelope: Envelope, source: InboundSource): void {
-    for (const subscriber of this.envelopeSubscribers) {
-      subscriber(envelope, source);
+  private emitEvent(event: DeviceEvent): void {
+    for (const subscriber of this.eventSubscribers) {
+      subscriber(event);
     }
   }
 
@@ -250,7 +267,61 @@ export class DeviceConnectionBle implements DeviceConnection {
       this.handleCommandAck(payload);
       return;
     }
-    this.emitEnvelope(envelope, source);
+    const event = this.toDeviceEvent(envelope, source);
+    if (!event) {
+      return;
+    }
+    this.emitEvent(event);
+  }
+
+  private toDeviceEvent(envelope: Envelope, source: InboundSource): DeviceEvent | null {
+    const boatId = typeof envelope.boatId === "string" && envelope.boatId ? envelope.boatId : undefined;
+    const payload: JsonRecord = isObject(envelope.payload) ? envelope.payload : {};
+    const msgType = typeof envelope.msgType === "string" && envelope.msgType ? envelope.msgType : "unknown";
+
+    if (msgType === "command.ack") {
+      return null;
+    }
+    if (msgType === "status.patch") {
+      return {
+        type: "state.patch",
+        source,
+        boatId,
+        patch: payload.statePatch,
+      };
+    }
+    if (msgType === "status.snapshot") {
+      return {
+        type: "state.snapshot",
+        source,
+        boatId,
+        snapshot: payload.snapshot,
+      };
+    }
+    if (msgType === "onboarding.boat_secret") {
+      return {
+        type: "onboarding.boatSecret",
+        source,
+        boatId,
+        onboardingBoatId: typeof payload.boatId === "string" ? payload.boatId : undefined,
+        boatSecret: typeof payload.boatSecret === "string" ? payload.boatSecret : undefined,
+      };
+    }
+    if (msgType === "track.snapshot") {
+      return {
+        type: "track.snapshot",
+        source,
+        boatId,
+        points: parseTrackSnapshot(payload),
+      };
+    }
+    return {
+      type: "unknown",
+      source,
+      boatId,
+      msgType,
+      payload,
+    };
   }
 
   private onBleNotification = (event: Event): void => {

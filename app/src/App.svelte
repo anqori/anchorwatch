@@ -46,12 +46,9 @@
   import {
     applyAnchorConfig,
     applyProfilesConfig,
-    probe,
     applyTriggerConfig,
-    applyWifiConfigFromInternetPage,
+    connectToWifiNetwork,
     fetchTrackSnapshot,
-    refreshStateSnapshot,
-    saveRelayUrl,
     scanWifiNetworks,
     selectBluetoothConnection,
     selectRelayConnection,
@@ -60,7 +57,7 @@
     stopDeviceRuntime,
     useFakeMode,
   } from "./actions/device-actions";
-  import { appState, initAppStateEnvironment, logLine, readCloudCredentials } from "./state/app-state.svelte";
+  import { appState, initAppStateEnvironment, logLine } from "./state/app-state.svelte";
   import {
     App as KonstaApp,
     Icon,
@@ -97,6 +94,7 @@
   let statePillClass = $state<"ok" | "warn" | "alarm">("ok");
   let stateSourceText = $state("Source: --");
   let connectionSelectionStatusText = $state("Not connected");
+  let configuredWifiStatusText = $state("Connecting");
   let trackStatusText = $state("No track yet");
   let currentLatText = $state("--");
   let currentLonText = $state("--");
@@ -114,6 +112,9 @@
   let maptilerSatelliteContainer = $state<HTMLDivElement | null>(null);
   let maptilerMap = $state<MapTilerMap | null>(null);
   let maptilerSatellite = $state<MapTilerMap | null>(null);
+  let internetWifiNetworks = $state<WifiScanNetwork[]>([]);
+  let internetRescanTimer: ReturnType<typeof setTimeout> | null = null;
+  let internetWasOpen = false;
 
   $effect(() => {
     gpsAgeText = appState.summary.gpsAgeText;
@@ -144,6 +145,10 @@
 
   $effect(() => {
     connection.bleStatusText = deriveBleStatusText(ble.connected, ble.authState);
+    if (connection.mode === MODE_FAKE && connection.activeConnection === "fake" && connection.activeConnectionConnected) {
+      connection.connectedDeviceName = "demo-device";
+      return;
+    }
     connection.connectedDeviceName = ble.connected ? (ble.deviceName.trim() || "device") : "";
   });
 
@@ -172,7 +177,15 @@
   });
 
   $effect(() => {
-    navigation.settingsDeviceStatusText = ble.connected ? `Connected to ${connection.connectedDeviceName}` : "No Device connected yet";
+    if (!connection.activeConnectionConnected) {
+      navigation.settingsDeviceStatusText = "No Device connected yet";
+    } else if (connection.activeConnection === "fake") {
+      navigation.settingsDeviceStatusText = "Connected to demo-device";
+    } else if (connection.activeConnection === "cloud-relay") {
+      navigation.settingsDeviceStatusText = "Connected via Relay";
+    } else {
+      navigation.settingsDeviceStatusText = `Connected to ${connection.connectedDeviceName}`;
+    }
     network.settingsInternetStatusText = buildInternetSettingsStatusText({
       onboardingWifiConnected: network.onboardingWifiConnected,
       onboardingWifiSsid: network.onboardingWifiSsid,
@@ -180,11 +193,12 @@
       wifiSsid: network.wifiSsid,
       wifiScanInFlight: network.wifiScanInFlight,
       wifiScanErrorText: network.wifiScanErrorText,
-      hasCloudCredentials: readCloudCredentials() !== null,
     });
-    navigation.configSectionsWithStatus = CONFIG_SECTIONS.map((section) => ({
+    navigation.configSectionsWithStatus = CONFIG_SECTIONS
+      .map((section) => ({
       ...section,
-      disabled: !connection.hasConfiguredDevice && section.id !== "device",
+      disabled: (!connection.hasConfiguredDevice && section.id !== "device")
+        || (section.id === "internet" && !connection.activeConnectionConnected),
       status: section.id === "device"
         ? navigation.settingsDeviceStatusText
         : section.id === "internet"
@@ -193,6 +207,21 @@
             ? connectionSelectionStatusText
           : undefined,
     }));
+  });
+
+  $effect(() => {
+    const configuredSsid = network.wifiSsid.trim();
+    const mergedNetworks = [...network.availableWifiNetworks];
+    if (configuredSsid && !mergedNetworks.some((wifiNetwork) => wifiNetwork.ssid === configuredSsid)) {
+      mergedNetworks.unshift({
+        ssid: configuredSsid,
+        security: network.wifiSecurity,
+        rssi: null,
+        channel: null,
+        hidden: false,
+      });
+    }
+    internetWifiNetworks = mergedNetworks;
   });
 
   $effect(() => {
@@ -210,6 +239,52 @@
     }
     network.selectedWifiNetwork = network.availableWifiNetworks.find((wifiNetwork) => wifiNetwork.ssid === network.selectedWifiSsid) ?? null;
     versions.firmware = readFirmwareVersionFromState(appState.latestState);
+  });
+
+  $effect(() => {
+    const configuredSsid = network.wifiSsid.trim();
+    if (!configuredSsid) {
+      configuredWifiStatusText = "Connecting";
+      return;
+    }
+    if (network.onboardingWifiConnected && network.onboardingWifiSsid.trim() === configuredSsid) {
+      configuredWifiStatusText = "Connected";
+      return;
+    }
+    if (network.onboardingWifiErrorText.trim()) {
+      configuredWifiStatusText = `Failed with ${network.onboardingWifiErrorText.trim()}`;
+      return;
+    }
+    configuredWifiStatusText = "Connecting";
+  });
+
+  $effect(() => {
+    const internetOpen = isInternetViewActive();
+    if (internetOpen && !internetWasOpen) {
+      if (!network.wifiCountry.trim()) {
+        network.wifiCountry = "DE";
+      }
+      void runAction("scan wlan networks", scanWifiNetworks);
+    }
+    if (!internetOpen) {
+      clearInternetRescanTimer();
+    }
+    internetWasOpen = internetOpen;
+  });
+
+  $effect(() => {
+    const internetOpen = isInternetViewActive();
+    const updatedAtMs = network.wifiScanUpdatedAtMs;
+    if (!internetOpen || updatedAtMs <= 0) {
+      return;
+    }
+    clearInternetRescanTimer();
+    internetRescanTimer = setTimeout(() => {
+      if (!isInternetViewActive()) {
+        return;
+      }
+      void runAction("scan wlan networks", scanWifiNetworks);
+    }, 10_000);
   });
 
   $effect(() => {
@@ -273,34 +348,16 @@
     maptilerSatellite = destroyMapTilerViewControlled(maptilerSatellite);
   }
 
-  function selectWifiNetwork(wifiNetwork: WifiScanNetwork): void {
-    network.selectedWifiSsid = wifiNetwork.ssid;
-    network.wifiSsid = wifiNetwork.ssid;
-    if (wifiNetwork.security !== "unknown") {
-      network.wifiSecurity = wifiNetwork.security;
-    }
-    if (wifiNetwork.security === "open") {
-      network.wifiPass = "";
-    }
-    network.wifiScanErrorText = "";
+  function isInternetViewActive(): boolean {
+    return navigation.activeView === "config" && navigation.activeConfigView === "internet";
   }
 
-  function clearWifiSelectionForManualEntry(): void {
-    network.selectedWifiSsid = "";
-    network.wifiSsid = "";
-    network.wifiScanErrorText = "";
-  }
-
-  function prefillWifiSettingsFromCurrentState(): void {
-    if (network.onboardingWifiSsid && network.onboardingWifiSsid !== "--") {
-      network.wifiSsid = network.onboardingWifiSsid;
-      network.selectedWifiSsid = network.onboardingWifiSsid;
+  function clearInternetRescanTimer(): void {
+    if (!internetRescanTimer) {
+      return;
     }
-    if (!network.wifiCountry.trim()) {
-      network.wifiCountry = "DE";
-    }
-    network.wifiScanErrorText = "";
-    network.wifiScanStatusText = "Scan for available WLAN networks.";
+    clearTimeout(internetRescanTimer);
+    internetRescanTimer = null;
   }
 
   function setView(nextView: ViewId): void {
@@ -324,11 +381,18 @@
       logLine(`settings section locked until setup complete: ${nextConfigView}`);
       return;
     }
-    applyOpenConfigSection(navigation, nextConfigView);
-    if (nextConfigView === "internet") {
-      prefillWifiSettingsFromCurrentState();
+    if (nextConfigView === "internet" && !connection.activeConnectionConnected) {
+      logLine("settings section unavailable without active connection: internet");
+      return;
     }
+    applyOpenConfigSection(navigation, nextConfigView);
   }
+
+  $effect(() => {
+    if (navigation.activeView === "config" && navigation.activeConfigView === "internet" && !connection.activeConnectionConnected) {
+      goToSettingsView();
+    }
+  });
 
   function goToSettingsView(syncHistory = true): void {
     applyGoToSettings(navigation, syncHistory);
@@ -413,6 +477,7 @@
 
   onDestroy(() => {
     window.removeEventListener("popstate", handlePopState);
+    clearInternetRescanTimer();
     destroyMapTilerView("map");
     destroyMapTilerView("satellite");
     void stopDeviceRuntime();
@@ -465,32 +530,17 @@
 
   {#if navigation.activeView === "config" && navigation.activeConfigView === "internet"}
     <InternetWlanPage
-      bleConnected={ble.connected}
       wifiScanInFlight={network.wifiScanInFlight}
-      wifiScanStatusText={network.wifiScanStatusText}
-      bind:wifiScanErrorText={network.wifiScanErrorText}
-      availableWifiNetworks={network.availableWifiNetworks}
-      bind:selectedWifiSsid={network.selectedWifiSsid}
-      bind:wifiSsid={network.wifiSsid}
-      bind:wifiSecurity={network.wifiSecurity}
-      bind:wifiPass={network.wifiPass}
-      bind:wifiCountry={network.wifiCountry}
-      selectedWifiNetwork={network.selectedWifiNetwork}
-      onboardingWifiConnected={network.onboardingWifiConnected}
-      onboardingWifiErrorText={network.onboardingWifiErrorText}
-      onboardingWifiStateText={network.onboardingWifiStateText}
-      onboardingWifiSsid={network.onboardingWifiSsid}
-      onboardingWifiRssiText={network.onboardingWifiRssiText}
-      bind:relayBaseUrlInput={network.relayBaseUrlInput}
-      relayResult={connection.relayResult}
+      wifiScanErrorText={network.wifiScanErrorText}
+      availableWifiNetworks={internetWifiNetworks}
+      configuredWifiSsid={network.wifiSsid}
+      configuredWifiPass={network.wifiPass}
+      configuredWifiStatusText={configuredWifiStatusText}
       formatWifiSecurity={(security) => formatWifiSecurity(security as WifiSecurity)}
-      onScanWifiNetworks={() => void runAction("scan wlan networks", scanWifiNetworks)}
-      onSelectWifiNetwork={selectWifiNetwork}
-      onApplyWifiConfig={() => void runAction("apply wlan settings", applyWifiConfigFromInternetPage)}
-      onClearSelectedNetwork={clearWifiSelectionForManualEntry}
-      onRefreshStatus={() => void runAction("refresh status snapshot", refreshStateSnapshot)}
-      onSaveRelayUrl={() => void runAction("save relay url", saveRelayUrl)}
-      onProbe={() => void runAction("probe connection", probe)}
+      onConnectWifiNetwork={(ssid, security, passphrase) => void runAction(
+        "connect wlan network",
+        () => connectToWifiNetwork(ssid, security as WifiSecurity, passphrase),
+      )}
       onBack={() => goToSettingsView()}
     />
   {/if}

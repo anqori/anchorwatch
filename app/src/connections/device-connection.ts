@@ -1,5 +1,5 @@
 import type { ConfigPatchCommand } from "../services/protocol-messages";
-import type { Envelope, InboundSource, JsonRecord, TrackPoint } from "../core/types";
+import type { InboundSource, JsonRecord, TrackPoint, WifiScanNetwork } from "../core/types";
 
 export type DeviceConnectionKind = "bluetooth" | "cloud-relay" | "fake";
 
@@ -15,15 +15,54 @@ export interface DeviceConnectionProbeResult {
   buildVersion: string | null;
 }
 
+export interface DeviceEventBase {
+  source: InboundSource;
+  boatId?: string;
+}
+
+export interface DeviceStatePatchEvent extends DeviceEventBase {
+  type: "state.patch";
+  patch: unknown;
+}
+
+export interface DeviceStateSnapshotEvent extends DeviceEventBase {
+  type: "state.snapshot";
+  snapshot: unknown;
+}
+
+export interface DeviceOnboardingBoatSecretEvent extends DeviceEventBase {
+  type: "onboarding.boatSecret";
+  onboardingBoatId?: string;
+  boatSecret?: string;
+}
+
+export interface DeviceTrackSnapshotEvent extends DeviceEventBase {
+  type: "track.snapshot";
+  points: TrackPoint[];
+}
+
+export interface DeviceUnknownEvent extends DeviceEventBase {
+  type: "unknown";
+  msgType: string;
+  payload: JsonRecord;
+}
+
+export type DeviceEvent =
+  | DeviceStatePatchEvent
+  | DeviceStateSnapshotEvent
+  | DeviceOnboardingBoatSecretEvent
+  | DeviceTrackSnapshotEvent
+  | DeviceUnknownEvent;
+
 export interface DeviceConnection {
   readonly kind: DeviceConnectionKind;
   connect(): Promise<void>;
   disconnect(): Promise<void>;
   isConnected(): boolean;
-  subscribeEnvelope(callback: (envelope: Envelope, source: InboundSource) => void): () => void;
+  subscribeEvents(callback: (event: DeviceEvent) => void): () => void;
   subscribeStatus(callback: (status: DeviceConnectionStatus) => void): () => void;
-  sendCommand(msgType: string, payload: JsonRecord, requiresAck?: boolean): Promise<JsonRecord | null>;
   sendConfigPatch(command: ConfigPatchCommand): Promise<void>;
+  commandWifiScan(maxResults: number, includeHidden: boolean): Promise<WifiScanNetwork[]>;
   requestStateSnapshot(): Promise<JsonRecord | null>;
   requestTrackSnapshot(limit: number): Promise<TrackPoint[] | null>;
   probe(base?: string): Promise<DeviceConnectionProbeResult>;

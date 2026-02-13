@@ -127,6 +127,7 @@ function defaultNetworkState(): NetworkState {
     wifiSecurity: "wpa2",
     wifiCountry: "",
     wifiScanRequestId: "",
+    wifiScanUpdatedAtMs: 0,
     wifiScanInFlight: false,
     wifiScanStatusText: "Scan for available WLAN networks.",
     wifiScanErrorText: "",

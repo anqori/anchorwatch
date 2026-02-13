@@ -7,7 +7,6 @@ export interface InternetSettingsStatusInput {
   wifiSsid: string;
   wifiScanInFlight: boolean;
   wifiScanErrorText: string;
-  hasCloudCredentials: boolean;
 }
 
 export interface RelayConnectionInput {
@@ -94,5 +93,5 @@ export function buildInternetSettingsStatusText(input: InternetSettingsStatusInp
   if (lastKnownSsid) {
     return `WLAN ${lastKnownSsid} pending`;
   }
-  return input.hasCloudCredentials ? "Internet configured, WLAN pending" : "Internet not configured";
+  return "No WLAN configured";
 }

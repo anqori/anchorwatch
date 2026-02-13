@@ -1,4 +1,4 @@
-import type { Envelope, InboundSource, JsonRecord, TrackPoint } from "../../core/types";
+import type { TrackPoint, WifiScanNetwork } from "../../core/types";
 import type { ConfigPatchCommand } from "../../services/protocol-messages";
 import { postCloudConfigPatch } from "./cloud-client";
 import {
@@ -6,7 +6,12 @@ import {
   fetchCloudTrackSnapshot,
   probeCloudRelay,
 } from "./cloud-runtime";
-import type { DeviceConnection, DeviceConnectionProbeResult, DeviceConnectionStatus } from "../device-connection";
+import type {
+  DeviceConnection,
+  DeviceEvent,
+  DeviceConnectionProbeResult,
+  DeviceConnectionStatus,
+} from "../device-connection";
 
 export interface RelayCloudCredentials {
   base: string;
@@ -50,7 +55,7 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
     return this.connected;
   }
 
-  subscribeEnvelope(_callback: (envelope: Envelope, source: InboundSource) => void): () => void {
+  subscribeEvents(_callback: (_event: DeviceEvent) => void): () => void {
     return () => {
       // Relay path is pull-based in v1; no live subscription channel.
     };
@@ -62,10 +67,6 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
     return () => {
       this.statusSubscribers.delete(callback);
     };
-  }
-
-  async sendCommand(_msgType: string, _payload: JsonRecord, _requiresAck?: boolean): Promise<null> {
-    throw new Error("Cloud relay command channel is not available for generic sendCommand");
   }
 
   async sendConfigPatch(command: ConfigPatchCommand): Promise<void> {
@@ -88,6 +89,10 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
       this.setConnected(false);
       throw error;
     }
+  }
+
+  async commandWifiScan(_maxResults: number, _includeHidden: boolean): Promise<WifiScanNetwork[]> {
+    throw new Error("Wi-Fi scan requires an active Bluetooth or fake connection");
   }
 
   async requestStateSnapshot(): Promise<Record<string, unknown> | null> {

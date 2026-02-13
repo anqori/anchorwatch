@@ -1,8 +1,7 @@
 import { TRACK_SNAPSHOT_LIMIT } from "../core/constants";
-import type { JsonRecord } from "../core/types";
+import type { JsonRecord, WifiSecurity } from "../core/types";
 import { mapAnchorDraftToConfigInput, mapProfilesDraftToConfigInput, mapTriggerDraftToConfigInput } from "../services/config-draft-mappers";
 import { buildAnchorConfigPatch, buildProfilesConfigPatch, buildTriggerConfigPatch, manualAnchorLogMessage } from "../services/config-patch-builders";
-import { parseWifiScanNetworks } from "../services/data-utils";
 import { normalizeRelayBaseUrl } from "../services/local-storage";
 import {
   getRelayBaseUrl,
@@ -52,13 +51,6 @@ async function sendConfigPatch(patch: JsonRecord, reason: string): Promise<void>
   await connection.sendConfigPatch(command);
   setConfigVersion(version);
   logLine(`config.patch sent via ${connection.kind} (${reason}) version=${version}`);
-}
-
-function ensureActiveBluetoothConnection(): void {
-  const connection = deviceLinker.getConnection();
-  if (connection.kind !== "bluetooth" || !connection.isConnected()) {
-    throw new Error("Connect BLE before using this action");
-  }
 }
 
 function ensureConfiguredDeviceForConnectionSelection(): void {
@@ -163,8 +155,6 @@ export async function probe(): Promise<void> {
 }
 
 export async function scanWifiNetworks(): Promise<void> {
-  ensureActiveBluetoothConnection();
-
   clearWifiScanTimeout();
 
   const requestId = makeRequestId();
@@ -184,19 +174,14 @@ export async function scanWifiNetworks(): Promise<void> {
   }, 10_000);
 
   try {
-    const ack = await deviceLinker.getConnection().sendCommand("onboarding.wifi.scan", {
-      requestId,
-      maxResults: 20,
-      includeHidden: false,
-    }, true);
-
-    const ackNetworks = parseWifiScanNetworks(ack?.networks);
-    if (ackNetworks.length > 0) {
-      applyWifiScanNetworks(ackNetworks);
-      clearWifiScanTimeout();
-      appState.network.wifiScanInFlight = false;
-      appState.network.wifiScanStatusText = `Found ${ackNetworks.length} WLAN network${ackNetworks.length === 1 ? "" : "s"}.`;
-    }
+    const networks = await deviceLinker.getConnection().commandWifiScan(20, false);
+    applyWifiScanNetworks(networks);
+    appState.network.wifiScanUpdatedAtMs = Date.now();
+    clearWifiScanTimeout();
+    appState.network.wifiScanInFlight = false;
+    appState.network.wifiScanStatusText = networks.length > 0
+      ? `Found ${networks.length} WLAN network${networks.length === 1 ? "" : "s"}.`
+      : "No WLAN networks found. Try scanning again.";
   } catch (error) {
     clearWifiScanTimeout();
     appState.network.wifiScanInFlight = false;
@@ -204,6 +189,23 @@ export async function scanWifiNetworks(): Promise<void> {
     appState.network.wifiScanStatusText = "WLAN scan failed.";
     throw error;
   }
+}
+
+export async function connectToWifiNetwork(ssid: string, security: WifiSecurity, passphrase: string): Promise<void> {
+  const normalizedSsid = ssid.trim();
+  if (!normalizedSsid) {
+    throw new Error("Wi-Fi SSID is required");
+  }
+
+  appState.network.wifiSsid = normalizedSsid;
+  appState.network.selectedWifiSsid = normalizedSsid;
+  appState.network.wifiSecurity = security === "unknown" ? "wpa2" : security;
+  appState.network.wifiPass = appState.network.wifiSecurity === "open" ? "" : passphrase;
+  if (!appState.network.wifiCountry.trim()) {
+    appState.network.wifiCountry = "DE";
+  }
+
+  await applyWifiConfigFromInternetPage();
 }
 
 export async function applyWifiConfig(): Promise<void> {
