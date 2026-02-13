@@ -8,6 +8,7 @@
   } from "konsta/svelte";
 
   export let isConfigured = false;
+  export let appState: "UNCONFIGURED" | "CONFIGURED_BUT_UNCONNECTED" | "CONNECTED" = "UNCONFIGURED";
   export let bleSupported = false;
   export let bleStatusText = "disconnected";
   export let boatIdText = "--";
@@ -40,6 +41,7 @@
     </div>
   {:else}
     <List strong inset>
+      <ListItem title="App state" after={appState} />
       <ListItem title="BLE" after={bleStatusText} />
       <ListItem title="Connected Device" after={connectedDeviceName || "--"} />
       <ListItem title="Boat ID" after={boatIdText} />

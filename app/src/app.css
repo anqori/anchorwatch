@@ -104,6 +104,50 @@ textarea {
   min-width: 8.5rem;
 }
 
+.app-state-led-button {
+  position: fixed;
+  top: calc(env(safe-area-inset-top) + 0.7rem);
+  left: 0.7rem;
+  z-index: 60;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 999px;
+  border: 1px solid rgba(110, 110, 110, 0.35);
+  background: rgba(248, 248, 248, 0.8);
+  backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  cursor: pointer;
+}
+
+.app-state-led-dot {
+  width: 0.78rem;
+  height: 0.78rem;
+  border-radius: 999px;
+}
+
+.app-state-led-dot.bt {
+  background: #1dc35f;
+  box-shadow: 0 0 8px rgba(29, 195, 95, 0.7);
+}
+
+.app-state-led-dot.relay {
+  background: #e7b61e;
+  box-shadow: 0 0 8px rgba(231, 182, 30, 0.7);
+}
+
+.app-state-led-dot.unconnected {
+  background: #e44646;
+  box-shadow: 0 0 8px rgba(228, 70, 70, 0.68);
+}
+
+.app-state-led-dot.unconfigured {
+  background: #8d8d8d;
+  box-shadow: 0 0 8px rgba(141, 141, 141, 0.62);
+}
+
 .device-corner-action {
   margin-top: 1rem;
   display: flex;

@@ -8,6 +8,7 @@ export const DEFAULT_RELAY_BASE_URL = (import.meta.env.VITE_RELAY_BASE_URL ?? ""
 export const PWA_BUILD_VERSION = (import.meta.env.VITE_BUILD_VERSION ?? "run-unknown").trim() || "run-unknown";
 export const BOAT_ID_KEY = "anchorwatch.boat_id";
 export const BOAT_SECRET_KEY = "anchorwatch.boat_secret";
+export const BLE_CONNECTED_ONCE_KEY = "anchorwatch.ble_connected_once";
 export const WIFI_CFG_VERSION_KEY = "anchorwatch.wifi_cfg_version";
 export const PHONE_ID_KEY = "anchorwatch.phone_id";
 

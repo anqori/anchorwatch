@@ -1,33 +1,27 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
-import {
-    Map as MapTilerMap,
-    config as maptilerConfig,
-    type GeoJSONSource,
-  } from "@maptiler/sdk";
+  import type { Map as MapTilerMap } from "@maptiler/sdk";
   import type {
-    AnchorMode,
-    AutoSwitchSource,
     BleState,
-    ColorScheme,
+    ConfigDraftsState,
     ConfigSectionId,
-    ConfigViewId,
+    ConnectionState,
     Envelope,
     InboundSource,
     JsonRecord,
     Mode,
+    NavigationState,
+    NetworkState,
+    NotificationState,
     PillClass,
-    ProfileMode,
-    Severity,
     TrackPoint,
+    VersionState,
     ViewId,
     WifiScanNetwork,
     WifiSecurity,
-    ZoneType,
   } from "./core/types";
   import {
     BLE_AUTH_UUID,
-    BLE_CHUNK_MAX_PAYLOAD,
     BLE_CHUNK_TIMEOUT_MS,
     BLE_CONTROL_TX_UUID,
     BLE_EVENT_RX_UUID,
@@ -55,39 +49,79 @@ import {
     WIFI_SCAN_TIMEOUT_MS,
   } from "./core/constants";
   import {
-    clampNumber,
     dataViewToBytes,
     deepMerge,
-    extractAckError,
     formatWifiSecurity,
     isObject,
     normalizePatch,
-    parseTrackSnapshot,
     parseWifiScanNetworks,
     safeParseJson,
   } from "./services/data-utils";
+  import {
+    clearPendingAcks as clearPendingAcksSession,
+    consumeChunkedBleFrame,
+    makeAckPromise as makeAckPromiseSession,
+    resolvePendingAckFromPayload,
+  } from "./services/ble-session";
+  import {
+    connectBleWithCharacteristics,
+    disconnectBleDevice,
+  } from "./services/ble-connection";
+  import { deriveBleStatusText, resetBleConnectionState } from "./services/ble-state";
+  import { handleBleEnvelope } from "./services/ble-envelope-handler";
   import { makeMsgId, writeCharacteristic, writeChunked } from "./services/ble-transport";
+  import {
+    fetchCloudBuildVersion,
+    fetchCloudSnapshot,
+    fetchCloudTrackSnapshot,
+    probeCloudRelay,
+    verifyCloudStateAuth,
+  } from "./services/cloud-runtime";
   import { maskSecret, normalizeRelayBaseUrl } from "./services/local-storage";
   import {
-    buildMapTilerPanBounds,
-    buildTrackGeoJson,
-    getMapTilerAnchorPoint,
-    mapTilerMinZoomForArea,
-    maptilerIds,
-    resolveMapTilerStyleUrl,
-  } from "./services/maptiler-helpers";
+    applyGoToSettings,
+    applyOpenConfigSection,
+    applyViewChange,
+    initNavigationHistoryRoot,
+    resolvePopNavigationAction,
+  } from "./services/navigation-controller";
+  import {
+    initNotificationStatus,
+    requestNotificationPermission,
+    sendTestNotification,
+  } from "./services/notification-controller";
+  import {
+    destroyMapTilerView as destroyMapTilerViewControlled,
+    ensureMapTilerView as ensureMapTilerViewControlled,
+    updateMapTrackAndViewport,
+  } from "./services/maptiler-controller";
   import {
     deriveTelemetry,
     readFirmwareVersionFromState as readFirmwareVersionFromStateDerived,
     readOnboardingWifiStatus as readOnboardingWifiStatusDerived,
   } from "./services/state-derive";
   import {
+    buildInternetSettingsStatusText as buildInternetSettingsStatusTextDerived,
+    deriveAppConnectivityState as deriveAppConnectivityStateDerived,
+    deriveLinkLedState as deriveLinkLedStateDerived,
+    hasActiveCloudRelayConnection as hasActiveCloudRelayConnectionDerived,
+    hasCloudCredentialsConfigured as hasCloudCredentialsConfiguredDerived,
+    hasConfiguredDevice as hasConfiguredDeviceDerived,
+    linkLedTitle as linkLedTitleDerived,
+  } from "./services/connectivity-derive";
+  import {
+    deriveRadarProjection,
+    deriveTrackSummary,
+  } from "./services/track-derive";
+  import { deriveFakeSummaryTick } from "./services/simulation-derive";
+  import {
     ensurePhoneId as ensurePhoneIdStored,
     getBoatId as getBoatIdStored,
     getBoatSecret as getBoatSecretStored,
     getRelayBaseUrl as getRelayBaseUrlStored,
-    hasPersistedSetup as hasPersistedSetupStored,
+    hasConnectedViaBleOnce as hasConnectedViaBleOnceStored,
     loadMode as loadModeStored,
+    markConnectedViaBleOnce as markConnectedViaBleOnceStored,
     nextConfigVersion as nextConfigVersionStored,
     setMode as setModeStored,
     setBoatId as setBoatIdStored,
@@ -101,6 +135,12 @@ import {
     buildTriggerConfigPatch,
     manualAnchorLogMessage,
   } from "./services/config-patch-builders";
+  import {
+    mapAnchorDraftToConfigInput,
+    mapProfilesDraftToConfigInput,
+    mapTriggerDraftToConfigInput,
+  } from "./services/config-draft-mappers";
+  import { dispatchConfigPatch } from "./services/config-transport";
   import {
     App as KonstaApp,
     Icon,
@@ -139,7 +179,6 @@ import {
   };
 
   let bootMs = performance.now();
-  let mode: Mode = loadMode();
   let pollBusy = false;
   let lastTickMs = 0;
   let lastCloudPollMs = 0;
@@ -147,7 +186,7 @@ import {
   let lastBleMessageAtMs = 0;
 
   let latestState: JsonRecord = {};
-  let latestStateSource = "--";
+  let latestStateSource: InboundSource | "--" = "--";
   let latestStateUpdatedAtMs = 0;
 
   let gpsAgeText = "--";
@@ -159,42 +198,59 @@ import {
   let statePillClass: PillClass = "ok";
   let stateSourceText = "Source: --";
 
-  let bleSupported = false;
-  let bleStatusText = "disconnected";
-  let boatIdText = "--";
-  let secretStatusText = "not stored";
-  let cloudStatusText = "not checked";
-  let relayResult = "No request yet.";
-  let pwaVersionText = PWA_BUILD_VERSION;
-  let firmwareVersionText = "--";
-  let cloudVersionText = "--";
+  let connection: ConnectionState = {
+    mode: loadModeStored(),
+    appState: "UNCONFIGURED",
+    linkLedState: "unconfigured",
+    linkLedTitle: "Unconfigured. Open device setup.",
+    bleSupported: false,
+    bleStatusText: "disconnected",
+    boatIdText: "--",
+    secretStatusText: "not stored",
+    cloudStatusText: "not checked",
+    relayResult: "No request yet.",
+    connectedDeviceName: "",
+    hasConfiguredDevice: false,
+  };
 
-  let relayBaseUrlInput = "";
-  let wifiSsid = "";
-  let wifiPass = "";
-  let wifiSecurity: WifiSecurity = "wpa2";
-  let wifiCountry = "";
-  let wifiScanRequestId = "";
-  let wifiScanInFlight = false;
-  let wifiScanStatusText = "Scan for available WLAN networks.";
-  let wifiScanErrorText = "";
-  let availableWifiNetworks: WifiScanNetwork[] = [];
-  let selectedWifiSsid = "";
-  let selectedWifiNetwork: WifiScanNetwork | null = null;
-  let onboardingWifiSsid = "--";
-  let onboardingWifiConnected = false;
-  let onboardingWifiRssiText = "--";
-  let onboardingWifiErrorText = "";
-  let onboardingWifiStateText = "Waiting for Wi-Fi status...";
-  let connectedDeviceName = "";
-  let settingsDeviceStatusText = "No Device connected yet";
-  let settingsInternetStatusText = "Internet not configured";
-  let hasStoredDeviceCredentials = false;
-  let configSectionsWithStatus = CONFIG_SECTIONS;
-  let activeView: ViewId = "summary";
-  let activeConfigView: ConfigViewId = "settings";
-  let navigationDepth = 0;
-  let suppressedPopEvents = 0;
+  let versions: VersionState = {
+    pwa: PWA_BUILD_VERSION,
+    firmware: "--",
+    cloud: "--",
+  };
+
+  let network: NetworkState = {
+    relayBaseUrlInput: "",
+    wifiSsid: "",
+    wifiPass: "",
+    wifiSecurity: "wpa2",
+    wifiCountry: "",
+    wifiScanRequestId: "",
+    wifiScanInFlight: false,
+    wifiScanStatusText: "Scan for available WLAN networks.",
+    wifiScanErrorText: "",
+    availableWifiNetworks: [],
+    selectedWifiSsid: "",
+    selectedWifiNetwork: null,
+    onboardingWifiSsid: "--",
+    onboardingWifiConnected: false,
+    onboardingWifiRssiText: "--",
+    onboardingWifiErrorText: "",
+    onboardingWifiStateText: "Waiting for Wi-Fi status...",
+    settingsInternetStatusText: "Internet not configured",
+  };
+
+  let navigation: NavigationState = {
+    settingsDeviceStatusText: "No Device connected yet",
+    configSectionsWithStatus: CONFIG_SECTIONS,
+    activeView: "summary",
+    activeConfigView: "settings",
+    depth: 0,
+    suppressedPopEvents: 0,
+    isFullScreenVizView: false,
+    isConfigView: false,
+  };
+
   let trackStatusText = "No track yet";
   let trackPoints: TrackPoint[] = [];
   let currentLatText = "--";
@@ -207,115 +263,139 @@ import {
   let maptilerSatelliteContainer: HTMLDivElement | null = null;
   let maptilerMap: MapTilerMap | null = null;
   let maptilerSatellite: MapTilerMap | null = null;
-  let maptilerLimitsApplyingMap = false;
-  let maptilerLimitsApplyingSatellite = false;
   let radarTargetX = 110;
   let radarTargetY = 110;
   let radarDistanceText = "--";
   let radarBearingText = "--";
 
-  let notificationPermissionText = "not checked";
-  let notificationStatusText = "No notification checks yet.";
+  let notifications: NotificationState = {
+    permissionText: "not checked",
+    statusText: "No notification checks yet.",
+  };
 
-  let anchorMode: AnchorMode = "offset";
-  let anchorOffsetDistanceM = "8.0";
-  let anchorOffsetAngleDeg = "210.0";
-  let autoModeEnabled = true;
-  let autoModeMinForwardSogKn = "0.8";
-  let autoModeStallMaxSogKn = "0.3";
-  let autoModeReverseMinSogKn = "0.4";
-  let autoModeConfirmSeconds = "20";
-  let zoneType: ZoneType = "circle";
-  let zoneRadiusM = "45.0";
-  let polygonPointsInput = "54.3201,10.1402\n54.3208,10.1413\n54.3198,10.1420";
-  let manualAnchorLat = "";
-  let manualAnchorLon = "";
-
-  let triggerWindAboveEnabled = true;
-  let triggerWindAboveThresholdKn = "30.0";
-  let triggerWindAboveHoldMs = "15000";
-  let triggerWindAboveSeverity: Severity = "warning";
-  let triggerOutsideAreaEnabled = true;
-  let triggerOutsideAreaHoldMs = "10000";
-  let triggerOutsideAreaSeverity: Severity = "alarm";
-  let triggerGpsAgeEnabled = true;
-  let triggerGpsAgeMaxMs = "5000";
-  let triggerGpsAgeHoldMs = "5000";
-  let triggerGpsAgeSeverity: Severity = "warning";
-
-  let profilesMode: ProfileMode = "auto";
-  let profileDayColorScheme: ColorScheme = "full";
-  let profileDayBrightnessPct = "100";
-  let profileDayOutputProfile = "normal";
-  let profileNightColorScheme: ColorScheme = "red";
-  let profileNightBrightnessPct = "20";
-  let profileNightOutputProfile = "night";
-  let profileAutoSwitchSource: AutoSwitchSource = "time";
-  let profileDayStartLocal = "07:00";
-  let profileNightStartLocal = "21:30";
+  let configDrafts: ConfigDraftsState = {
+    anchor: {
+      mode: "offset",
+      offsetDistanceM: "8.0",
+      offsetAngleDeg: "210.0",
+      autoModeEnabled: true,
+      autoModeMinForwardSogKn: "0.8",
+      autoModeStallMaxSogKn: "0.3",
+      autoModeReverseMinSogKn: "0.4",
+      autoModeConfirmSeconds: "20",
+      zoneType: "circle",
+      zoneRadiusM: "45.0",
+      polygonPointsInput: "54.3201,10.1402\n54.3208,10.1413\n54.3198,10.1420",
+      manualAnchorLat: "",
+      manualAnchorLon: "",
+    },
+    triggers: {
+      windAboveEnabled: true,
+      windAboveThresholdKn: "30.0",
+      windAboveHoldMs: "15000",
+      windAboveSeverity: "warning",
+      outsideAreaEnabled: true,
+      outsideAreaHoldMs: "10000",
+      outsideAreaSeverity: "alarm",
+      gpsAgeEnabled: true,
+      gpsAgeMaxMs: "5000",
+      gpsAgeHoldMs: "5000",
+      gpsAgeSeverity: "warning",
+    },
+    profiles: {
+      mode: "auto",
+      dayColorScheme: "full",
+      dayBrightnessPct: "100",
+      dayOutputProfile: "normal",
+      nightColorScheme: "red",
+      nightBrightnessPct: "20",
+      nightOutputProfile: "night",
+      autoSwitchSource: "time",
+      dayStartLocal: "07:00",
+      nightStartLocal: "21:30",
+    },
+  };
 
   let logLines: string[] = [];
 
   let tickInterval: ReturnType<typeof setInterval> | null = null;
   let wifiScanTimeout: ReturnType<typeof setTimeout> | null = null;
 
-  $: isFullScreenVizView = activeView === "satellite" || activeView === "map" || activeView === "radar";
-  $: isConfigView = activeView === "config";
-  $: connectedDeviceName = ble.connected ? (ble.device?.name?.trim() || "device") : "";
-  $: settingsDeviceStatusText = ble.connected ? `Connected to ${connectedDeviceName}` : "No Device connected yet";
-  $: settingsInternetStatusText = buildInternetSettingsStatusText();
-  $: configSectionsWithStatus = CONFIG_SECTIONS.map((section) => ({
+  $: navigation.isFullScreenVizView = navigation.activeView === "satellite" || navigation.activeView === "map" || navigation.activeView === "radar";
+  $: navigation.isConfigView = navigation.activeView === "config";
+  $: connection.connectedDeviceName = ble.connected ? (ble.device?.name?.trim() || "device") : "";
+  $: {
+    const relayConnected = hasActiveCloudRelayConnectionDerived({
+      latestStateSource,
+      latestStateUpdatedAtMs,
+      cloudPollMs: CLOUD_POLL_MS,
+    });
+    connection.appState = deriveAppConnectivityStateDerived(connection.hasConfiguredDevice, ble.connected, relayConnected);
+    connection.linkLedState = deriveLinkLedStateDerived(connection.hasConfiguredDevice, ble.connected, relayConnected);
+    connection.linkLedTitle = linkLedTitleDerived(connection.linkLedState);
+  }
+  $: navigation.settingsDeviceStatusText = ble.connected ? `Connected to ${connection.connectedDeviceName}` : "No Device connected yet";
+  $: network.settingsInternetStatusText = buildInternetSettingsStatusTextDerived({
+    onboardingWifiConnected: network.onboardingWifiConnected,
+    onboardingWifiSsid: network.onboardingWifiSsid,
+    onboardingWifiErrorText: network.onboardingWifiErrorText,
+    wifiSsid: network.wifiSsid,
+    wifiScanInFlight: network.wifiScanInFlight,
+    wifiScanErrorText: network.wifiScanErrorText,
+    hasCloudCredentials: readCloudCredentials() !== null,
+  });
+  $: navigation.configSectionsWithStatus = CONFIG_SECTIONS.map((section) => ({
     ...section,
     status: section.id === "device"
-      ? settingsDeviceStatusText
+      ? navigation.settingsDeviceStatusText
       : section.id === "internet"
-        ? settingsInternetStatusText
+        ? network.settingsInternetStatusText
         : undefined,
   }));
 
   $: {
     const wifiStatus = readOnboardingWifiStatus();
-    onboardingWifiConnected = wifiStatus.connected;
-    onboardingWifiSsid = wifiStatus.ssid || "--";
-    onboardingWifiRssiText = wifiStatus.rssi === null ? "--" : `${wifiStatus.rssi} dBm`;
-    onboardingWifiErrorText = wifiStatus.error;
+    network.onboardingWifiConnected = wifiStatus.connected;
+    network.onboardingWifiSsid = wifiStatus.ssid || "--";
+    network.onboardingWifiRssiText = wifiStatus.rssi === null ? "--" : `${wifiStatus.rssi} dBm`;
+    network.onboardingWifiErrorText = wifiStatus.error;
 
     if (wifiStatus.connected) {
-      onboardingWifiStateText = `Connected to ${onboardingWifiSsid}`;
+      network.onboardingWifiStateText = `Connected to ${network.onboardingWifiSsid}`;
     } else if (wifiStatus.error) {
-      onboardingWifiStateText = `Not connected (${wifiStatus.error})`;
+      network.onboardingWifiStateText = `Not connected (${wifiStatus.error})`;
     } else {
-      onboardingWifiStateText = "Connecting or waiting for Wi-Fi telemetry...";
+      network.onboardingWifiStateText = "Connecting or waiting for Wi-Fi telemetry...";
     }
   }
 
-  $: selectedWifiNetwork = availableWifiNetworks.find((network) => network.ssid === selectedWifiSsid) ?? null;
-  $: firmwareVersionText = readFirmwareVersionFromState();
+  $: network.selectedWifiNetwork = network.availableWifiNetworks.find((wifiNetwork) => wifiNetwork.ssid === network.selectedWifiSsid) ?? null;
+  $: versions.firmware = readFirmwareVersionFromState();
 
   function applyWifiScanNetworks(networks: WifiScanNetwork[]): void {
-    availableWifiNetworks = networks;
-    if (!networks.some((network) => network.ssid === selectedWifiSsid)) {
-      selectedWifiSsid = "";
+    network.availableWifiNetworks = networks;
+    if (!networks.some((wifiNetwork) => wifiNetwork.ssid === network.selectedWifiSsid)) {
+      network.selectedWifiSsid = "";
     }
 
-    if (wifiSsid && !selectedWifiSsid) {
-      const match = networks.find((network) => network.ssid === wifiSsid);
+    if (network.wifiSsid && !network.selectedWifiSsid) {
+      const match = networks.find((wifiNetwork) => wifiNetwork.ssid === network.wifiSsid);
       if (match) {
-        selectedWifiSsid = match.ssid;
+        network.selectedWifiSsid = match.ssid;
       }
     }
   }
 
-  function selectWifiNetwork(network: WifiScanNetwork): void {
-    selectedWifiSsid = network.ssid;
-    wifiSsid = network.ssid;
-    if (network.security !== "unknown") {
-      wifiSecurity = network.security;
+  function selectWifiNetwork(wifiNetwork: WifiScanNetwork): void {
+    network.selectedWifiSsid = wifiNetwork.ssid;
+    network.wifiSsid = wifiNetwork.ssid;
+    if (wifiNetwork.security !== "unknown") {
+      network.wifiSecurity = wifiNetwork.security;
     }
-    if (network.security === "open") {
-      wifiPass = "";
+    if (wifiNetwork.security === "open") {
+      network.wifiPass = "";
     }
-    wifiScanErrorText = "";
+    network.wifiScanErrorText = "";
   }
 
   function readOnboardingWifiStatus(): { connected: boolean; ssid: string; rssi: number | null; error: string } {
@@ -326,49 +406,37 @@ import {
     return readFirmwareVersionFromStateDerived(latestState);
   }
 
-  function hasCloudCredentialsConfigured(): boolean {
-    return Boolean(getRelayBaseUrl() && getBoatId() && getBoatSecret());
+  function computeConfiguredDeviceState(): boolean {
+    return hasConfiguredDeviceDerived(getBoatIdStored(), hasConnectedViaBleOnceStored());
   }
 
-  function buildInternetSettingsStatusText(): string {
-    const lastKnownSsid = onboardingWifiSsid !== "--" ? onboardingWifiSsid : wifiSsid.trim();
-    if (onboardingWifiConnected && lastKnownSsid) {
-      return `WLAN ${lastKnownSsid} connected`;
+  function readCloudCredentialFields(): { base: string; boatId: string; boatSecret: string } {
+    return {
+      base: getRelayBaseUrlStored(),
+      boatId: getBoatIdStored(),
+      boatSecret: getBoatSecretStored(),
+    };
+  }
+
+  function readCloudCredentials(): { base: string; boatId: string; boatSecret: string } | null {
+    const credentials = readCloudCredentialFields();
+    if (!hasCloudCredentialsConfiguredDerived(credentials.base, credentials.boatId, credentials.boatSecret)) {
+      return null;
     }
-    if (onboardingWifiErrorText) {
-      return lastKnownSsid ? `WLAN ${lastKnownSsid} failed` : "WLAN connection failed";
-    }
-    if (wifiScanInFlight) {
-      return "Scanning WLAN networks...";
-    }
-    if (wifiScanErrorText) {
-      return "WLAN scan failed";
-    }
-    if (lastKnownSsid) {
-      return `WLAN ${lastKnownSsid} pending`;
-    }
-    return hasCloudCredentialsConfigured() ? "Internet configured, WLAN pending" : "Internet not configured";
+    return credentials;
   }
 
   function prefillWifiSettingsFromCurrentState(): void {
     const wifiStatus = readOnboardingWifiStatus();
     if (wifiStatus.ssid) {
-      wifiSsid = wifiStatus.ssid;
-      selectedWifiSsid = wifiStatus.ssid;
+      network.wifiSsid = wifiStatus.ssid;
+      network.selectedWifiSsid = wifiStatus.ssid;
     }
-    if (!wifiCountry.trim()) {
-      wifiCountry = "DE";
+    if (!network.wifiCountry.trim()) {
+      network.wifiCountry = "DE";
     }
-    wifiScanErrorText = "";
-    wifiScanStatusText = "Scan for available WLAN networks.";
-  }
-
-  function nextConfigVersion(): number {
-    return nextConfigVersionStored();
-  }
-
-  function setConfigVersion(version: number): void {
-    setConfigVersionStored(version);
+    network.wifiScanErrorText = "";
+    network.wifiScanStatusText = "Scan for available WLAN networks.";
   }
 
   function getMapTilerInstance(kind: "map" | "satellite"): MapTilerMap | null {
@@ -383,226 +451,67 @@ import {
     maptilerSatellite = map;
   }
 
-  function getMapTilerContainer(kind: "map" | "satellite"): HTMLDivElement | null {
-    return kind === "map" ? maptilerMapContainer : maptilerSatelliteContainer;
-  }
-
-  function mapTilerLimitsFlag(kind: "map" | "satellite"): boolean {
-    return kind === "map" ? maptilerLimitsApplyingMap : maptilerLimitsApplyingSatellite;
-  }
-
-  function setMapTilerLimitsFlag(kind: "map" | "satellite", value: boolean): void {
-    if (kind === "map") {
-      maptilerLimitsApplyingMap = value;
-      return;
-    }
-    maptilerLimitsApplyingSatellite = value;
-  }
-
-  function enforceMapTilerViewportLimits(map: MapTilerMap, kind: "map" | "satellite"): void {
-    if (mapTilerLimitsFlag(kind)) {
-      return;
-    }
-
-    setMapTilerLimitsFlag(kind, true);
-    try {
-      const anchorPoint = getMapTilerAnchorPoint(trackPoints);
-      const panBounds = buildMapTilerPanBounds(anchorPoint, MAPTILER_MAX_PAN_DISTANCE_M);
-      const [[minLon, minLat], [maxLon, maxLat]] = panBounds;
-
-      map.setMaxBounds(panBounds);
-
-      const center = map.getCenter();
-      const clampedCenter: [number, number] = [
-        clampNumber(center.lng, minLon, maxLon),
-        clampNumber(center.lat, minLat, maxLat),
-      ];
-      if (Math.abs(clampedCenter[0] - center.lng) > 0.0000001 || Math.abs(clampedCenter[1] - center.lat) > 0.0000001) {
-        map.setCenter(clampedCenter);
-      }
-
-      const canvas = map.getCanvas();
-      const minZoom = mapTilerMinZoomForArea(clampedCenter[1], canvas.clientWidth, canvas.clientHeight, MAPTILER_MAX_VISIBLE_AREA_M2);
-      if (Math.abs(map.getMinZoom() - minZoom) > 0.001) {
-        map.setMinZoom(minZoom);
-      }
-      if (map.getZoom() < minZoom) {
-        map.setZoom(minZoom);
-      }
-    } finally {
-      setMapTilerLimitsFlag(kind, false);
-    }
-  }
-
-  function ensureMapTilerTrackLayers(map: MapTilerMap, kind: "map" | "satellite"): void {
-    const ids = maptilerIds(kind);
-    if (!map.getSource(ids.source)) {
-      map.addSource(ids.source, {
-        type: "geojson",
-        data: buildTrackGeoJson(trackPoints),
-      });
-    }
-    if (!map.getLayer(ids.lineLayer)) {
-      map.addLayer({
-        id: ids.lineLayer,
-        source: ids.source,
-        type: "line",
-        filter: ["==", ["get", "kind"], "track"],
-        paint: {
-          "line-color": kind === "map" ? "#5ce1ff" : "#ffd166",
-          "line-width": 3,
-          "line-opacity": 0.92,
-        },
-      });
-    }
-    if (!map.getLayer(ids.pointLayer)) {
-      map.addLayer({
-        id: ids.pointLayer,
-        source: ids.source,
-        type: "circle",
-        filter: ["==", ["get", "kind"], "current"],
-        paint: {
-          "circle-radius": 6,
-          "circle-color": "#ffffff",
-          "circle-stroke-color": kind === "map" ? "#5ce1ff" : "#ffd166",
-          "circle-stroke-width": 2,
-        },
-      });
-    }
-  }
-
-  function updateMapTilerTrackData(map: MapTilerMap, kind: "map" | "satellite"): void {
-    if (!map.isStyleLoaded()) {
-      return;
-    }
-    ensureMapTilerTrackLayers(map, kind);
-    const source = map.getSource(maptilerIds(kind).source) as GeoJSONSource | undefined;
-    if (source) {
-      source.setData(buildTrackGeoJson(trackPoints));
-    }
-  }
-
   function ensureMapTilerView(kind: "map" | "satellite"): void {
-    if (!MAPTILER_API_KEY) {
-      maptilerStatusText = "MapTiler token missing. Set VITE_MAPTILER_API_KEY in .env and redeploy.";
-      return;
-    }
-
-    const existing = getMapTilerInstance(kind);
-    if (existing) {
-      existing.resize();
-      updateMapTilerTrackData(existing, kind);
-      enforceMapTilerViewportLimits(existing, kind);
-      return;
-    }
-
-    const container = getMapTilerContainer(kind);
-    if (!container) {
-      return;
-    }
-
-    const latestPoint = trackPoints[trackPoints.length - 1];
-    const center: [number, number] = latestPoint
-      ? [latestPoint.lon, latestPoint.lat]
-      : MAPTILER_DEFAULT_CENTER;
-
-    maptilerConfig.apiKey = MAPTILER_API_KEY;
-    const styleRef = kind === "map" ? MAPTILER_STYLE_MAP : MAPTILER_STYLE_SATELLITE;
-    const style = resolveMapTilerStyleUrl(styleRef, MAPTILER_API_KEY);
-    const map = new MapTilerMap({
-      container,
-      style,
-      center,
-      zoom: MAPTILER_DEFAULT_ZOOM,
+    const nextMap = ensureMapTilerViewControlled({
+      kind,
+      existingMap: getMapTilerInstance(kind),
+      container: kind === "map" ? maptilerMapContainer : maptilerSatelliteContainer,
+      getTrackPoints: () => trackPoints,
+      apiKey: MAPTILER_API_KEY,
+      defaultCenter: MAPTILER_DEFAULT_CENTER,
+      defaultZoom: MAPTILER_DEFAULT_ZOOM,
+      styleMapRef: MAPTILER_STYLE_MAP,
+      styleSatelliteRef: MAPTILER_STYLE_SATELLITE,
+      maxPanDistanceM: MAPTILER_MAX_PAN_DISTANCE_M,
+      maxVisibleAreaM2: MAPTILER_MAX_VISIBLE_AREA_M2,
+      setStatusText: (text) => {
+        maptilerStatusText = text;
+      },
     });
-
-    maptilerStatusText = "Loading map tiles...";
-    map.on("load", () => {
-      maptilerStatusText = "Map loaded.";
-      updateMapTilerTrackData(map, kind);
-      enforceMapTilerViewportLimits(map, kind);
-      map.resize();
-    });
-    map.on("moveend", () => {
-      enforceMapTilerViewportLimits(map, kind);
-    });
-    map.on("resize", () => {
-      enforceMapTilerViewportLimits(map, kind);
-    });
-    map.on("error", (event) => {
-      const errorText = event.error instanceof Error ? event.error.message : "unknown map error";
-      maptilerStatusText = `Map error: ${errorText}`;
-    });
-
-    setMapTilerInstance(kind, map);
+    setMapTilerInstance(kind, nextMap);
   }
 
   function destroyMapTilerView(kind: "map" | "satellite"): void {
-    const map = getMapTilerInstance(kind);
-    if (!map) {
+    if (kind === "map") {
+      maptilerMap = destroyMapTilerViewControlled(maptilerMap);
       return;
     }
-    map.remove();
-    setMapTilerInstance(kind, null);
-  }
-
-  function updateRadarFromTrack(points: TrackPoint[]): void {
-    if (points.length < 2) {
-      radarTargetX = 110;
-      radarTargetY = 110;
-      radarDistanceText = "--";
-      radarBearingText = "--";
-      return;
-    }
-
-    const anchor = points[0];
-    const current = points[points.length - 1];
-    const meanLatRad = ((anchor.lat + current.lat) / 2) * Math.PI / 180;
-    const metersPerLat = 111_320;
-    const metersPerLon = Math.max(1, 111_320 * Math.cos(meanLatRad));
-    const northMeters = (current.lat - anchor.lat) * metersPerLat;
-    const eastMeters = (current.lon - anchor.lon) * metersPerLon;
-    const distanceM = Math.sqrt(northMeters * northMeters + eastMeters * eastMeters);
-    const bearingDeg = (Math.atan2(eastMeters, northMeters) * 180 / Math.PI + 360) % 360;
-    const displayRadius = 92;
-    const scale = clampNumber(distanceM / 80, 0, 1);
-    const radius = scale * displayRadius;
-    const radians = bearingDeg * Math.PI / 180;
-
-    radarTargetX = 110 + Math.sin(radians) * radius;
-    radarTargetY = 110 - Math.cos(radians) * radius;
-    radarDistanceText = `${distanceM.toFixed(1)} m`;
-    radarBearingText = `${bearingDeg.toFixed(0)} deg`;
+    maptilerSatellite = destroyMapTilerViewControlled(maptilerSatellite);
   }
 
   function updateTrackProjection(points: TrackPoint[]): void {
-    updateRadarFromTrack(points);
+    const radarProjection = deriveRadarProjection(points);
+    radarTargetX = radarProjection.targetX;
+    radarTargetY = radarProjection.targetY;
+    radarDistanceText = radarProjection.distanceText;
+    radarBearingText = radarProjection.bearingText;
+
     if (maptilerMap) {
-      updateMapTilerTrackData(maptilerMap, "map");
-      enforceMapTilerViewportLimits(maptilerMap, "map");
+      updateMapTrackAndViewport({
+        map: maptilerMap,
+        kind: "map",
+        getTrackPoints: () => trackPoints,
+        maxPanDistanceM: MAPTILER_MAX_PAN_DISTANCE_M,
+        maxVisibleAreaM2: MAPTILER_MAX_VISIBLE_AREA_M2,
+      });
     }
     if (maptilerSatellite) {
-      updateMapTilerTrackData(maptilerSatellite, "satellite");
-      enforceMapTilerViewportLimits(maptilerSatellite, "satellite");
+      updateMapTrackAndViewport({
+        map: maptilerSatellite,
+        kind: "satellite",
+        getTrackPoints: () => trackPoints,
+        maxPanDistanceM: MAPTILER_MAX_PAN_DISTANCE_M,
+        maxVisibleAreaM2: MAPTILER_MAX_VISIBLE_AREA_M2,
+      });
     }
 
-    const current = points.length > 0 ? points[points.length - 1] : null;
-    if (!current) {
-      currentLatText = "--";
-      currentLonText = "--";
-      currentSogText = "--";
-      currentCogText = "--";
-      currentHeadingText = "--";
-      trackStatusText = "No track yet";
-      return;
-    }
-
-    currentLatText = current.lat.toFixed(5);
-    currentLonText = current.lon.toFixed(5);
-    currentSogText = `${current.sogKn.toFixed(2)} kn`;
-    currentCogText = `${current.cogDeg.toFixed(0)} deg`;
-    currentHeadingText = `${current.headingDeg.toFixed(0)} deg`;
-    trackStatusText = `${points.length} points loaded`;
+    const trackSummary = deriveTrackSummary(points);
+    currentLatText = trackSummary.currentLatText;
+    currentLonText = trackSummary.currentLonText;
+    currentSogText = trackSummary.currentSogText;
+    currentCogText = trackSummary.currentCogText;
+    currentHeadingText = trackSummary.currentHeadingText;
+    trackStatusText = trackSummary.statusText;
   }
 
   function appendTrackPoint(point: TrackPoint): void {
@@ -634,25 +543,9 @@ import {
     stateSourceText = `Source: ${text}`;
   }
 
-  function loadMode(): Mode {
-    return loadModeStored();
-  }
-
-  function getRelayBaseUrl(): string {
-    return getRelayBaseUrlStored();
-  }
-
-  function getBoatId(): string {
-    return getBoatIdStored();
-  }
-
   function setBoatId(value: string): void {
     setBoatIdStored(value);
     refreshIdentityUi();
-  }
-
-  function getBoatSecret(): string {
-    return getBoatSecretStored();
   }
 
   function setBoatSecret(secret: string): void {
@@ -660,39 +553,24 @@ import {
     refreshIdentityUi();
   }
 
-  function ensurePhoneId(): string {
-    return ensurePhoneIdStored();
-  }
-
   function refreshIdentityUi(): void {
-    const boatId = getBoatId();
-    const boatSecret = getBoatSecret();
-    hasStoredDeviceCredentials = Boolean(boatId && boatSecret);
-    boatIdText = boatId || "--";
-    secretStatusText = maskSecret(boatSecret);
-    relayBaseUrlInput = getRelayBaseUrl();
+    const boatId = getBoatIdStored();
+    const boatSecret = getBoatSecretStored();
+    connection.hasConfiguredDevice = computeConfiguredDeviceState();
+    connection.boatIdText = boatId || "--";
+    connection.secretStatusText = maskSecret(boatSecret);
+    network.relayBaseUrlInput = getRelayBaseUrlStored();
   }
 
   function updateBleStatus(): void {
-    if (!ble.connected) {
-      bleStatusText = "disconnected";
-      return;
-    }
-    const auth = ble.authState ?? {};
-    const paired = auth.sessionPaired ? "paired" : "unpaired";
-    const pairMode = auth.pairModeActive ? "pair-mode-on" : "pair-mode-off";
-    bleStatusText = `connected (${paired}, ${pairMode})`;
+    connection.bleStatusText = deriveBleStatusText(ble.connected, ble.authState);
   }
 
   function applyMode(nextMode: Mode, persist = true): void {
-    mode = nextMode;
+    connection.mode = nextMode;
     if (persist) {
       setModeStored(nextMode);
     }
-  }
-
-  function hasPersistedSetup(): boolean {
-    return hasPersistedSetupStored();
   }
 
   function setTelemetry(gpsAgeS: number, dataAgeS: number, depthM: number, windKn: number): void {
@@ -730,78 +608,11 @@ import {
   }
 
   function tickFakeSummary(nowMs: number): void {
-    const ageMs = Math.floor(nowMs - bootMs);
-    const depthM = 3.2 + Math.sin(ageMs / 9000) * 0.35;
-    const windKn = 12.0 + Math.sin(ageMs / 5000) * 2.5;
-    const ageS = Math.floor(ageMs / 1000);
-
-    setTelemetry(ageS, ageS, depthM, windKn);
+    const tick = deriveFakeSummaryTick(nowMs, bootMs);
+    setTelemetry(tick.gpsAgeS, tick.dataAgeS, tick.depthM, tick.windKn);
     setSource("fake-simulator");
-
-    const t = ageMs / 1000;
-    const lat = 54.3201 + Math.sin(t / 45) * 0.0007;
-    const lon = 10.1402 + Math.cos(t / 60) * 0.0011;
-    const sogKn = 0.4 + Math.abs(Math.sin(t / 10)) * 0.8;
-    const cogDeg = (t * 16) % 360;
-    const headingDeg = (cogDeg + Math.sin(t / 7) * 14 + 360) % 360;
-    appendTrackPoint({
-      ts: Date.now(),
-      lat,
-      lon,
-      sogKn,
-      cogDeg,
-      headingDeg,
-    });
-
-    if (depthM < 2.0) {
-      setState("FAKE: ALARM", "alarm");
-      return;
-    }
-    if (windKn > 18.0) {
-      setState("FAKE: WARNING", "warn");
-      return;
-    }
-    setState("FAKE: MONITORING", "ok");
-  }
-
-  function resolvePendingAck(payload: JsonRecord): void {
-    const ackForMsgId = typeof payload.ackForMsgId === "string" ? payload.ackForMsgId : "";
-    if (!ackForMsgId) {
-      return;
-    }
-
-    const pending = ble.pendingAcks.get(ackForMsgId);
-    if (!pending) {
-      return;
-    }
-
-    clearTimeout(pending.timeout);
-    ble.pendingAcks.delete(ackForMsgId);
-
-    if (payload.status === "ok") {
-      pending.resolve(payload);
-      return;
-    }
-
-    pending.reject(new Error(extractAckError(payload)));
-  }
-
-  function clearPendingAcks(reason: string): void {
-    for (const pending of ble.pendingAcks.values()) {
-      clearTimeout(pending.timeout);
-      pending.reject(new Error(reason));
-    }
-    ble.pendingAcks.clear();
-  }
-
-  function makeAckPromise(msgId: string, timeoutMs = 4500): Promise<JsonRecord> {
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        ble.pendingAcks.delete(msgId);
-        reject(new Error("ACK timeout"));
-      }, timeoutMs);
-      ble.pendingAcks.set(msgId, { resolve, reject, timeout });
-    });
+    appendTrackPoint(tick.trackPoint);
+    setState(tick.stateText, tick.stateClass);
   }
 
   function buildEnvelope(msgType: string, payload: JsonRecord, requiresAck = true): Envelope {
@@ -809,8 +620,8 @@ import {
       ver: PROTOCOL_VERSION,
       msgType,
       msgId: makeMsgId(),
-      boatId: getBoatId() || "boat_unknown",
-      deviceId: ensurePhoneId(),
+      boatId: getBoatIdStored() || "boat_unknown",
+      deviceId: ensurePhoneIdStored(),
       seq: ble.seq++,
       ts: Date.now(),
       requiresAck,
@@ -825,7 +636,7 @@ import {
 
     const envelope = buildEnvelope(msgType, payload, requiresAck);
     const raw = JSON.stringify(envelope);
-    const ackPromise = requiresAck && envelope.msgId ? makeAckPromise(envelope.msgId) : null;
+    const ackPromise = requiresAck && envelope.msgId ? makeAckPromiseSession(ble.pendingAcks, envelope.msgId) : null;
 
     try {
       await writeChunked(ble.controlTx, envelope.msgId as string, raw, encoder);
@@ -885,120 +696,48 @@ import {
     const scannedNetworks = parseWifiScanNetworks(payload.networks);
 
     clearWifiScanTimeout();
-    wifiScanInFlight = false;
-    wifiScanErrorText = "";
+    network.wifiScanInFlight = false;
+    network.wifiScanErrorText = "";
     if (requestId) {
-      wifiScanRequestId = requestId;
+      network.wifiScanRequestId = requestId;
     }
 
     applyWifiScanNetworks(scannedNetworks);
-    wifiScanStatusText = scannedNetworks.length > 0
+    network.wifiScanStatusText = scannedNetworks.length > 0
       ? `Found ${scannedNetworks.length} WLAN network${scannedNetworks.length === 1 ? "" : "s"}.`
       : "No WLAN networks found. Try scanning again.";
     logLine(`onboarding.wifi.scan_result received (${scannedNetworks.length} networks)`);
   }
 
   function handleEnvelope(envelope: Envelope, sourceTag: InboundSource): void {
-    if (typeof envelope.boatId === "string" && envelope.boatId) {
-      setBoatId(envelope.boatId);
-    }
-
-    const payload: JsonRecord = isObject(envelope.payload) ? envelope.payload : {};
-    const msgType = envelope.msgType || "unknown";
-
-    if (msgType === "command.ack") {
-      resolvePendingAck(payload);
-      return;
-    }
-
-    if (msgType === "status.patch") {
-      applyStatePatch(payload.statePatch, sourceTag);
-      lastBleMessageAtMs = Date.now();
-      return;
-    }
-
-    if (msgType === "status.snapshot") {
-      applyStateSnapshot(payload.snapshot, sourceTag);
-      lastBleMessageAtMs = Date.now();
-      return;
-    }
-
-    if (msgType === "onboarding.boat_secret") {
-      if (typeof payload.boatId === "string") {
-        setBoatId(payload.boatId);
-      }
-      if (typeof payload.boatSecret === "string" && payload.boatSecret) {
-        setBoatSecret(payload.boatSecret);
-        logLine("received onboarding.boat_secret and stored secret");
-      } else {
-        logLine("onboarding.boat_secret missing boatSecret");
-      }
-      return;
-    }
-
-    if (msgType === "onboarding.wifi.scan_result") {
-      applyWifiScanResult(payload);
-      return;
-    }
-
-    if (msgType === "track.snapshot") {
-      const points = parseTrackSnapshot(payload);
-      if (points.length > 0) {
-        replaceTrackPoints(points);
-        logLine(`track.snapshot received (${points.length} points)`);
-      } else {
-        logLine("track.snapshot received (no valid points)");
-      }
-      return;
-    }
-
-    logLine(`rx ${msgType} (${sourceTag})`);
-  }
-
-  function cleanupChunkAssemblies(): void {
-    const now = Date.now();
-    for (const [key, entry] of ble.chunkAssemblies.entries()) {
-      if (now - entry.updatedAt > BLE_CHUNK_TIMEOUT_MS) {
-        ble.chunkAssemblies.delete(key);
-      }
-    }
+    handleBleEnvelope(envelope, sourceTag, {
+      setBoatId,
+      setBoatSecret,
+      applyStatePatch,
+      applyStateSnapshot,
+      applyWifiScanResult,
+      replaceTrackPoints,
+      resolvePendingAck: (payload) => {
+        resolvePendingAckFromPayload(ble.pendingAcks, payload);
+      },
+      markBleMessageSeen: () => {
+        lastBleMessageAtMs = Date.now();
+      },
+      logLine,
+    });
   }
 
   function handleChunkedBleFrame(bytes: Uint8Array): void {
-    if (bytes.length < 6) {
+    const frame = consumeChunkedBleFrame(
+      ble.chunkAssemblies,
+      bytes,
+      (chunk) => decoder.decode(chunk),
+      BLE_CHUNK_TIMEOUT_MS,
+    );
+    if (frame.kind !== "complete" || !frame.raw) {
       return;
     }
-
-    const msgId32 = bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24);
-    const partIndex = bytes[4];
-    const partCount = bytes[5];
-
-    if (!partCount || partIndex >= partCount) {
-      return;
-    }
-
-    const key = `${msgId32}:${partCount}`;
-    let entry = ble.chunkAssemblies.get(key);
-    if (!entry) {
-      entry = {
-        partCount,
-        parts: Array.from({ length: partCount }, () => null),
-        updatedAt: Date.now(),
-      };
-      ble.chunkAssemblies.set(key, entry);
-    }
-
-    entry.updatedAt = Date.now();
-    entry.parts[partIndex] = decoder.decode(bytes.slice(6));
-
-    if (entry.parts.some((part) => part === null)) {
-      cleanupChunkAssemblies();
-      return;
-    }
-
-    ble.chunkAssemblies.delete(key);
-    const raw = entry.parts.join("");
-    const parsed = safeParseJson(raw);
+    const parsed = safeParseJson(frame.raw);
     if (!parsed) {
       logLine("rx parse failed for chunked frame");
       return;
@@ -1032,49 +771,42 @@ import {
   }
 
   function onBleDisconnected(): void {
+    const previousDevice = ble.device;
+    const previousEventRx = ble.eventRx;
+    if (previousEventRx) {
+      previousEventRx.removeEventListener("characteristicvaluechanged", onBleNotification as EventListener);
+    }
+    if (previousDevice) {
+      previousDevice.removeEventListener("gattserverdisconnected", onBleDisconnected as EventListener);
+    }
+
     clearWifiScanTimeout();
-    wifiScanInFlight = false;
-    wifiScanStatusText = "BLE disconnected. Reconnect to scan WLAN networks.";
-    ble.connected = false;
-    ble.device = null;
-    ble.server = null;
-    ble.service = null;
-    ble.controlTx = null;
-    ble.eventRx = null;
-    ble.snapshot = null;
-    ble.auth = null;
-    ble.authState = null;
-    ble.chunkAssemblies.clear();
-    clearPendingAcks("BLE disconnected");
+    network.wifiScanInFlight = false;
+    network.wifiScanStatusText = "BLE disconnected. Reconnect to scan WLAN networks.";
+    resetBleConnectionState(ble);
+    clearPendingAcksSession(ble.pendingAcks, "BLE disconnected");
     updateBleStatus();
     logLine("BLE disconnected");
   }
 
   async function connectBle(): Promise<void> {
-    if (!navigator.bluetooth) {
-      throw new Error("Web Bluetooth unavailable");
-    }
-
-    const device = await navigator.bluetooth.requestDevice({
-      filters: [{ services: [BLE_SERVICE_UUID] }],
-      optionalServices: [BLE_SERVICE_UUID],
+    const {
+      device,
+      server,
+      service,
+      controlTx,
+      eventRx,
+      snapshot,
+      auth,
+    } = await connectBleWithCharacteristics({
+      serviceUuid: BLE_SERVICE_UUID,
+      controlTxUuid: BLE_CONTROL_TX_UUID,
+      eventRxUuid: BLE_EVENT_RX_UUID,
+      snapshotUuid: BLE_SNAPSHOT_UUID,
+      authUuid: BLE_AUTH_UUID,
+      onDisconnected: onBleDisconnected as EventListener,
+      onNotification: onBleNotification as EventListener,
     });
-
-    device.addEventListener("gattserverdisconnected", onBleDisconnected as EventListener);
-
-    if (!device.gatt) {
-      throw new Error("GATT unavailable on selected device");
-    }
-
-    const server = await device.gatt.connect();
-    const service = await server.getPrimaryService(BLE_SERVICE_UUID);
-    const controlTx = await service.getCharacteristic(BLE_CONTROL_TX_UUID);
-    const eventRx = await service.getCharacteristic(BLE_EVENT_RX_UUID);
-    const snapshot = await service.getCharacteristic(BLE_SNAPSHOT_UUID);
-    const auth = await service.getCharacteristic(BLE_AUTH_UUID);
-
-    await eventRx.startNotifications();
-    eventRx.addEventListener("characteristicvaluechanged", onBleNotification);
 
     ble.device = device;
     ble.server = server;
@@ -1085,6 +817,8 @@ import {
     ble.auth = auth;
     ble.connected = true;
     ble.chunkAssemblies.clear();
+    markConnectedViaBleOnceStored();
+    connection.hasConfiguredDevice = computeConfiguredDeviceState();
 
     updateBleStatus();
     logLine(`BLE connected to ${device.name || "device"}`);
@@ -1093,8 +827,7 @@ import {
   }
 
   async function disconnectBle(): Promise<void> {
-    if (ble.device?.gatt?.connected) {
-      ble.device.gatt.disconnect();
+    if (disconnectBleDevice(ble.device)) {
       return;
     }
     onBleDisconnected();
@@ -1126,18 +859,18 @@ import {
     clearWifiScanTimeout();
 
     const requestId = makeMsgId();
-    wifiScanRequestId = requestId;
-    wifiScanInFlight = true;
-    wifiScanErrorText = "";
-    wifiScanStatusText = "Scanning nearby WLAN networks...";
+    network.wifiScanRequestId = requestId;
+    network.wifiScanInFlight = true;
+    network.wifiScanErrorText = "";
+    network.wifiScanStatusText = "Scanning nearby WLAN networks...";
 
     wifiScanTimeout = setTimeout(() => {
-      if (!wifiScanInFlight || wifiScanRequestId !== requestId) {
+      if (!network.wifiScanInFlight || network.wifiScanRequestId !== requestId) {
         return;
       }
-      wifiScanInFlight = false;
-      wifiScanErrorText = "No scan result received from device.";
-      wifiScanStatusText = "WLAN scan timed out. Try scanning again.";
+      network.wifiScanInFlight = false;
+      network.wifiScanErrorText = "No scan result received from device.";
+      network.wifiScanStatusText = "WLAN scan timed out. Try scanning again.";
       logLine("onboarding.wifi.scan_result timeout");
     }, WIFI_SCAN_TIMEOUT_MS);
 
@@ -1152,23 +885,23 @@ import {
       if (ackNetworks.length > 0) {
         applyWifiScanNetworks(ackNetworks);
         clearWifiScanTimeout();
-        wifiScanInFlight = false;
-        wifiScanStatusText = `Found ${ackNetworks.length} WLAN network${ackNetworks.length === 1 ? "" : "s"}.`;
+        network.wifiScanInFlight = false;
+        network.wifiScanStatusText = `Found ${ackNetworks.length} WLAN network${ackNetworks.length === 1 ? "" : "s"}.`;
       }
     } catch (error) {
       clearWifiScanTimeout();
-      wifiScanInFlight = false;
-      wifiScanErrorText = String(error);
-      wifiScanStatusText = "WLAN scan failed.";
+      network.wifiScanInFlight = false;
+      network.wifiScanErrorText = String(error);
+      network.wifiScanStatusText = "WLAN scan failed.";
       throw error;
     }
   }
 
   async function applyWiFiConfig(): Promise<void> {
-    const ssid = wifiSsid.trim();
-    const passphrase = wifiPass;
-    const security = wifiSecurity === "unknown" ? "wpa2" : wifiSecurity;
-    const country = wifiCountry.trim().toUpperCase();
+    const ssid = network.wifiSsid.trim();
+    const passphrase = network.wifiPass;
+    const security = network.wifiSecurity === "unknown" ? "wpa2" : network.wifiSecurity;
+    const country = network.wifiCountry.trim().toUpperCase();
 
     if (!ssid) {
       throw new Error("Wi-Fi SSID is required");
@@ -1179,7 +912,7 @@ import {
       "network.wifi.passphrase": passphrase,
       "network.wifi.security": security,
       "network.wifi.country": country || "DE",
-      "network.wifi.hidden": selectedWifiNetwork?.hidden ?? false,
+      "network.wifi.hidden": network.selectedWifiNetwork?.hidden ?? false,
     };
 
     await sendConfigPatch(patch, "wifi");
@@ -1199,17 +932,17 @@ import {
   }
 
   function clearWifiSelectionForManualEntry(): void {
-    selectedWifiSsid = "";
-    wifiSsid = "";
-    wifiScanErrorText = "";
+    network.selectedWifiSsid = "";
+    network.wifiSsid = "";
+    network.wifiScanErrorText = "";
   }
 
   function selectDeviceModeForSetup(): void {
-    if (mode === MODE_DEVICE) {
+    if (connection.mode === MODE_DEVICE) {
       return;
     }
     applyMode(MODE_DEVICE);
-    logLine("device mode selected for setup");
+    logLine("device connection.mode selected for setup");
   }
 
   async function useFakeModeAndReturnHome(): Promise<void> {
@@ -1218,280 +951,99 @@ import {
       await disconnectBle();
     }
     setView("summary");
-    logLine("fake mode selected; skipped BLE/cloud setup");
+    logLine("fake connection.mode selected; skipped BLE/cloud setup");
   }
 
   async function sendConfigPatch(patch: JsonRecord, reason: string): Promise<void> {
-    const version = nextConfigVersion();
-
-    if (ble.connected) {
-      await sendControlMessage("config.patch", { version, patch }, true);
-      setConfigVersion(version);
-      logLine(`config.patch sent via BLE (${reason}) version=${version}`);
-      return;
-    }
-
-    const base = getRelayBaseUrl();
-    const boatId = getBoatId();
-    const boatSecret = getBoatSecret();
-    if (!base || !boatId || !boatSecret) {
-      throw new Error("Need BLE connection or cloud credentials (relay URL + boatId + boatSecret)");
-    }
-
-    const res = await fetch(`${base}/v1/config`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${boatSecret}`,
-        "content-type": "application/json",
-        "X-AnchorWatch-Client": "app",
+    const version = nextConfigVersionStored();
+    const transport = await dispatchConfigPatch({
+      patch,
+      version,
+      bleConnected: ble.connected,
+      sendViaBle: async (nextVersion, nextPatch) => {
+        await sendControlMessage("config.patch", { version: nextVersion, patch: nextPatch }, true);
       },
-      body: JSON.stringify({
-        ver: PROTOCOL_VERSION,
-        msgType: "config.patch",
-        boatId,
-        deviceId: ensurePhoneId(),
-        ts: Date.now(),
-        version,
-        patch,
-      }),
+      cloudCredentials: readCloudCredentials(),
+      protocolVersion: PROTOCOL_VERSION,
+      deviceId: ensurePhoneIdStored(),
     });
-
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`cloud config.patch failed ${res.status}: ${text}`);
-    }
-
-    setConfigVersion(version);
-    logLine(`config.patch sent via cloud (${reason}) version=${version}`);
+    setConfigVersionStored(version);
+    logLine(`config.patch sent via ${transport === "ble" ? "BLE" : "cloud"} (${reason}) version=${version}`);
   }
 
   async function applyAnchorConfig(): Promise<void> {
-    const patch = buildAnchorConfigPatch({
-      anchorMode,
-      anchorOffsetDistanceM,
-      anchorOffsetAngleDeg,
-      autoModeEnabled,
-      autoModeMinForwardSogKn,
-      autoModeStallMaxSogKn,
-      autoModeReverseMinSogKn,
-      autoModeConfirmSeconds,
-      zoneType,
-      zoneRadiusM,
-      polygonPointsInput,
-      manualAnchorLat,
-      manualAnchorLon,
-    });
+    const anchorInput = mapAnchorDraftToConfigInput(configDrafts.anchor);
+    const patch = buildAnchorConfigPatch(anchorInput);
 
     await sendConfigPatch(patch, "anchor+zone");
-    const manualLog = manualAnchorLogMessage({
-      anchorMode,
-      anchorOffsetDistanceM,
-      anchorOffsetAngleDeg,
-      autoModeEnabled,
-      autoModeMinForwardSogKn,
-      autoModeStallMaxSogKn,
-      autoModeReverseMinSogKn,
-      autoModeConfirmSeconds,
-      zoneType,
-      zoneRadiusM,
-      polygonPointsInput,
-      manualAnchorLat,
-      manualAnchorLon,
-    });
+    const manualLog = manualAnchorLogMessage(anchorInput);
     if (manualLog) {
       logLine(manualLog);
     }
   }
 
   async function applyTriggerConfig(): Promise<void> {
-    const patch = buildTriggerConfigPatch({
-      triggerWindAboveEnabled,
-      triggerWindAboveThresholdKn,
-      triggerWindAboveHoldMs,
-      triggerWindAboveSeverity,
-      triggerOutsideAreaEnabled,
-      triggerOutsideAreaHoldMs,
-      triggerOutsideAreaSeverity,
-      triggerGpsAgeEnabled,
-      triggerGpsAgeMaxMs,
-      triggerGpsAgeHoldMs,
-      triggerGpsAgeSeverity,
-    });
+    const patch = buildTriggerConfigPatch(mapTriggerDraftToConfigInput(configDrafts.triggers));
     await sendConfigPatch(patch, "triggers");
   }
 
   async function applyProfilesConfig(): Promise<void> {
-    const patch = buildProfilesConfigPatch({
-      profilesMode,
-      profileDayColorScheme,
-      profileDayBrightnessPct,
-      profileDayOutputProfile,
-      profileNightColorScheme,
-      profileNightBrightnessPct,
-      profileNightOutputProfile,
-      profileAutoSwitchSource,
-      profileDayStartLocal,
-      profileNightStartLocal,
-    });
+    const patch = buildProfilesConfigPatch(mapProfilesDraftToConfigInput(configDrafts.profiles));
     await sendConfigPatch(patch, "profiles");
   }
 
   async function fetchTrackSnapshot(): Promise<void> {
-    const base = getRelayBaseUrl();
-    const boatId = getBoatId();
-    const boatSecret = getBoatSecret();
-    if (!base || !boatId || !boatSecret) {
+    const cloudCredentials = readCloudCredentials();
+    if (!cloudCredentials) {
       throw new Error("Track fetch requires relay URL + boatId + boatSecret");
     }
-
-    const url = `${base}/v1/tracks?boatId=${encodeURIComponent(boatId)}&limit=${TRACK_SNAPSHOT_LIMIT}`;
-    const res = await fetch(url, {
-      method: "GET",
-      headers: {
-        authorization: `Bearer ${boatSecret}`,
-      },
-    });
-
-    if (res.status === 404) {
+    const snapshot = await fetchCloudTrackSnapshot(cloudCredentials, TRACK_SNAPSHOT_LIMIT);
+    if (snapshot.status === 404) {
       trackStatusText = "No cloud track available yet.";
       logLine("track snapshot not found (404)");
       return;
     }
-    if (!res.ok) {
-      throw new Error(`track snapshot failed ${res.status}`);
-    }
-
-    const body = (await res.json()) as JsonRecord;
-    const payload = isObject(body.payload) ? body.payload : body;
-    const points = parseTrackSnapshot(payload);
-    replaceTrackPoints(points);
-    logLine(`track snapshot loaded (${points.length} points)`);
-  }
-
-  function navLevelFor(view: ViewId, configView: ConfigViewId): number {
-    if (view === "summary") {
-      return 0;
-    }
-    if (view === "config" && configView !== "settings") {
-      return 2;
-    }
-    return 1;
-  }
-
-  function currentNavLevel(): number {
-    return navLevelFor(activeView, activeConfigView);
-  }
-
-  function pushNavStep(): void {
-    try {
-      window.history.pushState({ anchorwatch: "nav-step" }, "", window.location.href);
-      navigationDepth += 1;
-    } catch {
-      // Ignore history API failures in constrained contexts.
-    }
-  }
-
-  function popNavSteps(steps: number): void {
-    const count = Math.min(Math.max(steps, 0), navigationDepth);
-    if (count <= 0) {
-      return;
-    }
-    try {
-      suppressedPopEvents += count;
-      navigationDepth -= count;
-      if (count === 1) {
-        window.history.back();
-      } else {
-        window.history.go(-count);
-      }
-    } catch {
-      suppressedPopEvents = Math.max(0, suppressedPopEvents - count);
-      navigationDepth += count;
-    }
-  }
-
-  function syncToNavLevel(targetLevel: number): void {
-    const currentLevel = currentNavLevel();
-    if (targetLevel > currentLevel) {
-      for (let i = 0; i < targetLevel - currentLevel; i += 1) {
-        pushNavStep();
-      }
-      return;
-    }
-    if (targetLevel < currentLevel) {
-      popNavSteps(currentLevel - targetLevel);
-    }
+    replaceTrackPoints(snapshot.points);
+    logLine(`track snapshot loaded (${snapshot.points.length} points)`);
   }
 
   function setView(nextView: ViewId): void {
-    const previousView = activeView;
-    const targetLevel = nextView === "summary" ? 0 : 1;
-    syncToNavLevel(targetLevel);
-
-    if (nextView === "config") {
-      activeConfigView = "settings";
-    } else if (activeConfigView !== "settings") {
-      activeConfigView = "settings";
+    const transition = applyViewChange(navigation, nextView);
+    if (transition.leftMapView) {
+      destroyMapTilerView(transition.leftMapView);
     }
-
-    activeView = nextView;
-
-    if (previousView === "map" && nextView !== "map") {
-      destroyMapTilerView("map");
-    }
-    if (previousView === "satellite" && nextView !== "satellite") {
-      destroyMapTilerView("satellite");
-    }
-    if (nextView === "map") {
+    if (transition.enteredMapView === "map") {
       requestAnimationFrame(() => ensureMapTilerView("map"));
-    } else if (nextView === "satellite") {
+    } else if (transition.enteredMapView === "satellite") {
       requestAnimationFrame(() => ensureMapTilerView("satellite"));
     }
 
-    if ((nextView === "satellite" || nextView === "map" || nextView === "radar") && mode === MODE_DEVICE && trackPoints.length < 3) {
+    if ((nextView === "satellite" || nextView === "map" || nextView === "radar") && connection.mode === MODE_DEVICE && trackPoints.length < 3) {
       void runAction("track snapshot", fetchTrackSnapshot);
     }
   }
 
   function openConfigView(nextConfigView: ConfigSectionId): void {
-    syncToNavLevel(2);
+    applyOpenConfigSection(navigation, nextConfigView);
     if (nextConfigView === "internet") {
       prefillWifiSettingsFromCurrentState();
     }
-    activeView = "config";
-    activeConfigView = nextConfigView;
   }
 
   function goToSettingsView(syncHistory = true): void {
-    if (activeView !== "config" || activeConfigView === "settings") {
-      return;
-    }
-    if (syncHistory) {
-      syncToNavLevel(1);
-    }
-    activeView = "config";
-    activeConfigView = "settings";
+    applyGoToSettings(navigation, syncHistory);
   }
 
   function handlePopState(): void {
-    if (suppressedPopEvents > 0) {
-      suppressedPopEvents -= 1;
-      return;
-    }
-
-    if (navigationDepth > 0) {
-      navigationDepth -= 1;
-    }
-
-    const level = currentNavLevel();
-    if (level === 2) {
+    const action = resolvePopNavigationAction(navigation);
+    if (action === "to_settings") {
       goToSettingsView(false);
       return;
     }
-    if (level === 1) {
-      const previousView = activeView;
-      activeView = "summary";
-      activeConfigView = "settings";
+    if (action === "to_summary") {
+      const previousView = navigation.activeView;
+      navigation.activeView = "summary";
+      navigation.activeConfigView = "settings";
       if (previousView === "map") {
         destroyMapTilerView("map");
       } else if (previousView === "satellite") {
@@ -1500,61 +1052,9 @@ import {
     }
   }
 
-  function initNotificationStatus(): void {
-    if (!("Notification" in window)) {
-      notificationPermissionText = "unsupported";
-      notificationStatusText = "Notification API not supported by this browser.";
-      return;
-    }
-
-    notificationPermissionText = Notification.permission;
-    notificationStatusText = Notification.permission === "granted"
-      ? "Permission granted. Test notification is available."
-      : "Permission not granted yet.";
-  }
-
-  async function requestNotificationPermission(): Promise<void> {
-    if (!("Notification" in window)) {
-      throw new Error("Notification API unavailable");
-    }
-    const permission = await Notification.requestPermission();
-    notificationPermissionText = permission;
-    notificationStatusText = permission === "granted"
-      ? "Permission granted."
-      : `Permission status: ${permission}`;
-  }
-
-  async function sendTestNotification(): Promise<void> {
-    if (!("Notification" in window)) {
-      throw new Error("Notification API unavailable");
-    }
-    if (Notification.permission !== "granted") {
-      throw new Error("Notification permission is not granted");
-    }
-
-    const title = "Anqori AnchorWatch test alert";
-    const body = "Notification path works in this browser session.";
-    if ("serviceWorker" in navigator) {
-      const registration = await navigator.serviceWorker.ready;
-      await registration.showNotification(title, {
-        body,
-        tag: `am-test-${Date.now()}`,
-      });
-    } else {
-      // Fallback when no service worker registration is available.
-      // eslint-disable-next-line no-new
-      new Notification(title, { body });
-    }
-    notificationStatusText = `Test sent at ${new Date().toLocaleTimeString()}`;
-  }
-
-  function applyCloudHealthBody(raw: unknown): void {
-    if (!isObject(raw)) {
-      return;
-    }
-    const buildVersion = typeof raw.buildVersion === "string" ? raw.buildVersion.trim() : "";
+  function applyCloudBuildVersion(buildVersion: string | null): void {
     if (buildVersion) {
-      cloudVersionText = buildVersion;
+      versions.cloud = buildVersion;
     }
   }
 
@@ -1566,42 +1066,31 @@ import {
     lastCloudHealthPollMs = now;
 
     try {
-      const response = await fetch(`${base}/health`, { method: "GET" });
-      if (!response.ok) {
-        return;
-      }
-      const body = (await response.json()) as unknown;
-      applyCloudHealthBody(body);
+      const buildVersion = await fetchCloudBuildVersion(base);
+      applyCloudBuildVersion(buildVersion);
     } catch {
       // Ignore cloud health parsing errors in background refresh path.
     }
   }
 
   async function probeRelay(): Promise<void> {
-    const base = getRelayBaseUrl();
+    const base = getRelayBaseUrlStored();
     if (!base) {
-      relayResult = "Set relay base URL first.";
+      connection.relayResult = "Set relay base URL first.";
       return;
     }
 
     try {
-      const res = await fetch(`${base}/health`, { method: "GET" });
-      const text = await res.text();
-      relayResult = `${res.status} ${text}`;
-      try {
-        applyCloudHealthBody(JSON.parse(text) as unknown);
-      } catch {
-        // Ignore parse errors when health endpoint is not JSON.
-      }
+      const relayProbe = await probeCloudRelay(base);
+      connection.relayResult = relayProbe.resultText;
+      applyCloudBuildVersion(relayProbe.buildVersion);
     } catch (error) {
-      relayResult = `Relay probe failed: ${String(error)}`;
+      connection.relayResult = `Relay probe failed: ${String(error)}`;
     }
   }
 
   async function verifyCloudAuth(): Promise<void> {
-    const base = getRelayBaseUrl();
-    const boatId = getBoatId();
-    const boatSecret = getBoatSecret();
+    const { base, boatId, boatSecret } = readCloudCredentialFields();
 
     if (!base) {
       throw new Error("Relay base URL missing");
@@ -1615,23 +1104,14 @@ import {
 
     await refreshCloudVersion(base);
 
-    const url = `${base}/v1/state?boatId=${encodeURIComponent(boatId)}`;
-    const res = await fetch(url, {
-      method: "GET",
-      headers: {
-        authorization: `Bearer ${boatSecret}`,
-      },
-    });
-
-    if (res.status === 200 || res.status === 404) {
-      cloudStatusText = `ok (${res.status})`;
-      logLine(`cloud auth verify ok (${res.status})`);
+    const authVerify = await verifyCloudStateAuth({ base, boatId, boatSecret });
+    if (authVerify.ok) {
+      connection.cloudStatusText = `ok (${authVerify.status})`;
+      logLine(`cloud auth verify ok (${authVerify.status})`);
       return;
     }
-
-    const text = await res.text();
-    cloudStatusText = `failed (${res.status})`;
-    throw new Error(`cloud verify failed ${res.status}: ${text}`);
+    connection.cloudStatusText = `failed (${authVerify.status})`;
+    throw new Error(`cloud verify failed ${authVerify.status}: ${authVerify.errorText}`);
   }
 
   async function pollCloudState(nowMs: number): Promise<void> {
@@ -1640,34 +1120,19 @@ import {
     }
     lastCloudPollMs = nowMs;
 
-    const base = getRelayBaseUrl();
-    const boatId = getBoatId();
-    const boatSecret = getBoatSecret();
-    if (!base || !boatId || !boatSecret) {
+    const cloudCredentials = readCloudCredentials();
+    if (!cloudCredentials) {
       return;
     }
+    const { base } = cloudCredentials;
 
     try {
       await refreshCloudVersion(base);
-      const url = `${base}/v1/state?boatId=${encodeURIComponent(boatId)}`;
-      const res = await fetch(url, {
-        method: "GET",
-        headers: {
-          authorization: `Bearer ${boatSecret}`,
-        },
-      });
-
-      if (res.status === 404) {
+      const cloudSnapshot = await fetchCloudSnapshot(cloudCredentials);
+      if (cloudSnapshot.status === 404 || cloudSnapshot.snapshot === null) {
         return;
       }
-      if (!res.ok) {
-        throw new Error(`HTTP ${res.status}`);
-      }
-
-      const body = (await res.json()) as JsonRecord;
-      const payload = isObject(body.payload) ? body.payload : {};
-      const snapshot = payload.snapshot ?? body.snapshot;
-      applyStateSnapshot(snapshot, "cloud/status.snapshot");
+      applyStateSnapshot(cloudSnapshot.snapshot, "cloud/status.snapshot");
     } catch (error) {
       logLine(`cloud poll failed: ${String(error)}`);
     }
@@ -1710,13 +1175,13 @@ import {
   }
 
   function initBleSupportLabel(): void {
-    bleSupported = Boolean(navigator.bluetooth);
+    connection.bleSupported = Boolean(navigator.bluetooth);
   }
 
   function initUiFromStorage(): void {
     refreshIdentityUi();
-    wifiSecurity = "wpa2";
-    relayBaseUrlInput = getRelayBaseUrl();
+    network.wifiSecurity = "wpa2";
+    network.relayBaseUrlInput = getRelayBaseUrlStored();
   }
 
   async function tick(): Promise<void> {
@@ -1728,7 +1193,7 @@ import {
     lastTickMs = nowMs;
 
     try {
-      if (mode === MODE_FAKE) {
+      if (connection.mode === MODE_FAKE) {
         tickFakeSummary(nowMs);
       } else {
         await tickDeviceSummary(nowMs);
@@ -1747,29 +1212,30 @@ import {
   }
 
   function saveRelayUrl(): void {
-    const normalized = normalizeRelayBaseUrl(relayBaseUrlInput);
+    const normalized = normalizeRelayBaseUrl(network.relayBaseUrlInput);
     setRelayBaseUrlStored(normalized);
-    relayBaseUrlInput = normalized;
+    network.relayBaseUrlInput = normalized;
     logLine(`relay base URL saved: ${normalized || "(empty)"}`);
   }
 
-  onMount(() => {
-    try {
-      window.history.replaceState({ anchorwatch: "root" }, "", window.location.href);
-      navigationDepth = 0;
-      suppressedPopEvents = 0;
-    } catch {
-      navigationDepth = 0;
-      suppressedPopEvents = 0;
+  function openConfigFromStatusLed(): void {
+    if (connection.linkLedState === "unconfigured") {
+      openConfigView("device");
+      return;
     }
+    setView("config");
+  }
+
+  onMount(() => {
+    initNavigationHistoryRoot(navigation);
     window.addEventListener("popstate", handlePopState);
     initBleSupportLabel();
-    initNotificationStatus();
+    initNotificationStatus(notifications);
     initUiFromStorage();
     void registerServiceWorker();
     updateBleStatus();
-    applyMode(mode, false);
-    if (mode === MODE_FAKE || !hasPersistedSetup()) {
+    applyMode(connection.mode, false);
+    if (connection.mode === MODE_FAKE || !connection.hasConfiguredDevice) {
       setView("config");
       logLine("startup route: connection setup required");
     }
@@ -1791,14 +1257,14 @@ import {
       clearInterval(tickInterval);
       tickInterval = null;
     }
-    clearPendingAcks("App closed");
+    clearPendingAcksSession(ble.pendingAcks, "App closed");
   });
 </script>
 
 <KonstaApp theme="material" safeAreas>
   <KonstaPage class="am-page">
-    <main class="am-main" class:full-screen-view={isFullScreenVizView} class:config-view={isConfigView}>
-  {#if activeView === "summary"}
+    <main class="am-main" class:full-screen-view={navigation.isFullScreenVizView} class:config-view={navigation.isConfigView}>
+  {#if navigation.activeView === "summary"}
     <SummaryPage
       gpsAgeText={gpsAgeText}
       dataAgeText={dataAgeText}
@@ -1811,54 +1277,55 @@ import {
       currentLonText={currentLonText}
       currentSogText={currentSogText}
       currentHeadingText={currentHeadingText}
-      pwaVersionText={pwaVersionText}
-      firmwareVersionText={firmwareVersionText}
-      cloudVersionText={cloudVersionText}
+      pwaVersionText={versions.pwa}
+      firmwareVersionText={versions.firmware}
+      cloudVersionText={versions.cloud}
       trackStatusText={trackStatusText}
     />
   {/if}
 
-  {#if activeView === "config" && activeConfigView === "settings"}
+  {#if navigation.activeView === "config" && navigation.activeConfigView === "settings"}
     <SettingsHomePage
-      configSections={configSectionsWithStatus}
+      configSections={navigation.configSectionsWithStatus}
       onOpenConfig={openConfigView}
     />
   {/if}
 
-  {#if activeView === "config" && activeConfigView === "device"}
+  {#if navigation.activeView === "config" && navigation.activeConfigView === "device"}
     <DeviceBluetoothPage
-      isConfigured={hasStoredDeviceCredentials}
-      bleSupported={bleSupported}
-      bleStatusText={bleStatusText}
-      boatIdText={boatIdText}
-      secretStatusText={secretStatusText}
-      connectedDeviceName={connectedDeviceName}
+      isConfigured={connection.hasConfiguredDevice}
+      appState={connection.appState}
+      bleSupported={connection.bleSupported}
+      bleStatusText={connection.bleStatusText}
+      boatIdText={connection.boatIdText}
+      secretStatusText={connection.secretStatusText}
+      connectedDeviceName={connection.connectedDeviceName}
       onBack={() => goToSettingsView()}
       onSearchDevice={() => void runAction("search device via bluetooth", searchForDeviceViaBluetooth)}
       onUseDemoData={() => void runAction("use fake mode", useFakeModeAndReturnHome)}
     />
   {/if}
 
-  {#if activeView === "config" && activeConfigView === "internet"}
+  {#if navigation.activeView === "config" && navigation.activeConfigView === "internet"}
     <InternetWlanPage
       bleConnected={ble.connected}
-      wifiScanInFlight={wifiScanInFlight}
-      wifiScanStatusText={wifiScanStatusText}
-      bind:wifiScanErrorText
-      availableWifiNetworks={availableWifiNetworks}
-      bind:selectedWifiSsid
-      bind:wifiSsid
-      bind:wifiSecurity
-      bind:wifiPass
-      bind:wifiCountry
-      selectedWifiNetwork={selectedWifiNetwork}
-      onboardingWifiConnected={onboardingWifiConnected}
-      onboardingWifiErrorText={onboardingWifiErrorText}
-      onboardingWifiStateText={onboardingWifiStateText}
-      onboardingWifiSsid={onboardingWifiSsid}
-      onboardingWifiRssiText={onboardingWifiRssiText}
-      bind:relayBaseUrlInput
-      relayResult={relayResult}
+      wifiScanInFlight={network.wifiScanInFlight}
+      wifiScanStatusText={network.wifiScanStatusText}
+      bind:wifiScanErrorText={network.wifiScanErrorText}
+      availableWifiNetworks={network.availableWifiNetworks}
+      bind:selectedWifiSsid={network.selectedWifiSsid}
+      bind:wifiSsid={network.wifiSsid}
+      bind:wifiSecurity={network.wifiSecurity}
+      bind:wifiPass={network.wifiPass}
+      bind:wifiCountry={network.wifiCountry}
+      selectedWifiNetwork={network.selectedWifiNetwork}
+      onboardingWifiConnected={network.onboardingWifiConnected}
+      onboardingWifiErrorText={network.onboardingWifiErrorText}
+      onboardingWifiStateText={network.onboardingWifiStateText}
+      onboardingWifiSsid={network.onboardingWifiSsid}
+      onboardingWifiRssiText={network.onboardingWifiRssiText}
+      bind:relayBaseUrlInput={network.relayBaseUrlInput}
+      relayResult={connection.relayResult}
       formatWifiSecurity={(security) => formatWifiSecurity(security as WifiSecurity)}
       onScanWifiNetworks={() => void runAction("scan wlan networks", scanWifiNetworks)}
       onSelectWifiNetwork={selectWifiNetwork}
@@ -1872,16 +1339,16 @@ import {
     />
   {/if}
 
-  {#if activeView === "config" && activeConfigView === "information"}
+  {#if navigation.activeView === "config" && navigation.activeConfigView === "information"}
     <InfoVersionPage
-      pwaVersionText={pwaVersionText}
-      firmwareVersionText={firmwareVersionText}
-      cloudVersionText={cloudVersionText}
+      pwaVersionText={versions.pwa}
+      firmwareVersionText={versions.firmware}
+      cloudVersionText={versions.cloud}
       onBack={() => goToSettingsView()}
     />
   {/if}
 
-  {#if activeView === "satellite"}
+  {#if navigation.activeView === "satellite"}
     <SatellitePage
       hasMapTilerKey={Boolean(MAPTILER_API_KEY)}
       maptilerStatusText={maptilerStatusText}
@@ -1890,7 +1357,7 @@ import {
     />
   {/if}
 
-  {#if activeView === "map"}
+  {#if navigation.activeView === "map"}
     <MapPage
       hasMapTilerKey={Boolean(MAPTILER_API_KEY)}
       maptilerStatusText={maptilerStatusText}
@@ -1902,7 +1369,7 @@ import {
     />
   {/if}
 
-  {#if activeView === "radar"}
+  {#if navigation.activeView === "radar"}
     <RadarPage
       radarTargetX={radarTargetX}
       radarTargetY={radarTargetY}
@@ -1912,71 +1379,82 @@ import {
     />
   {/if}
 
-  {#if activeView === "config" && activeConfigView === "anchor"}
+  {#if navigation.activeView === "config" && navigation.activeConfigView === "anchor"}
     <AnchorConfigPage
-      bind:anchorMode
-      bind:anchorOffsetDistanceM
-      bind:anchorOffsetAngleDeg
-      bind:autoModeEnabled
-      bind:autoModeMinForwardSogKn
-      bind:autoModeStallMaxSogKn
-      bind:autoModeReverseMinSogKn
-      bind:autoModeConfirmSeconds
-      bind:zoneType
-      bind:zoneRadiusM
-      bind:polygonPointsInput
-      bind:manualAnchorLat
-      bind:manualAnchorLon
+      bind:anchorMode={configDrafts.anchor.mode}
+      bind:anchorOffsetDistanceM={configDrafts.anchor.offsetDistanceM}
+      bind:anchorOffsetAngleDeg={configDrafts.anchor.offsetAngleDeg}
+      bind:autoModeEnabled={configDrafts.anchor.autoModeEnabled}
+      bind:autoModeMinForwardSogKn={configDrafts.anchor.autoModeMinForwardSogKn}
+      bind:autoModeStallMaxSogKn={configDrafts.anchor.autoModeStallMaxSogKn}
+      bind:autoModeReverseMinSogKn={configDrafts.anchor.autoModeReverseMinSogKn}
+      bind:autoModeConfirmSeconds={configDrafts.anchor.autoModeConfirmSeconds}
+      bind:zoneType={configDrafts.anchor.zoneType}
+      bind:zoneRadiusM={configDrafts.anchor.zoneRadiusM}
+      bind:polygonPointsInput={configDrafts.anchor.polygonPointsInput}
+      bind:manualAnchorLat={configDrafts.anchor.manualAnchorLat}
+      bind:manualAnchorLon={configDrafts.anchor.manualAnchorLon}
       onBack={() => goToSettingsView()}
       onApply={() => void runAction("apply anchor config", applyAnchorConfig)}
     />
   {/if}
 
-  {#if activeView === "config" && activeConfigView === "triggers"}
+  {#if navigation.activeView === "config" && navigation.activeConfigView === "triggers"}
     <TriggersConfigPage
-      bind:triggerWindAboveEnabled
-      bind:triggerWindAboveThresholdKn
-      bind:triggerWindAboveHoldMs
-      bind:triggerWindAboveSeverity
-      bind:triggerOutsideAreaEnabled
-      bind:triggerOutsideAreaHoldMs
-      bind:triggerOutsideAreaSeverity
-      bind:triggerGpsAgeEnabled
-      bind:triggerGpsAgeMaxMs
-      bind:triggerGpsAgeHoldMs
-      bind:triggerGpsAgeSeverity
+      bind:triggerWindAboveEnabled={configDrafts.triggers.windAboveEnabled}
+      bind:triggerWindAboveThresholdKn={configDrafts.triggers.windAboveThresholdKn}
+      bind:triggerWindAboveHoldMs={configDrafts.triggers.windAboveHoldMs}
+      bind:triggerWindAboveSeverity={configDrafts.triggers.windAboveSeverity}
+      bind:triggerOutsideAreaEnabled={configDrafts.triggers.outsideAreaEnabled}
+      bind:triggerOutsideAreaHoldMs={configDrafts.triggers.outsideAreaHoldMs}
+      bind:triggerOutsideAreaSeverity={configDrafts.triggers.outsideAreaSeverity}
+      bind:triggerGpsAgeEnabled={configDrafts.triggers.gpsAgeEnabled}
+      bind:triggerGpsAgeMaxMs={configDrafts.triggers.gpsAgeMaxMs}
+      bind:triggerGpsAgeHoldMs={configDrafts.triggers.gpsAgeHoldMs}
+      bind:triggerGpsAgeSeverity={configDrafts.triggers.gpsAgeSeverity}
       onBack={() => goToSettingsView()}
       onApply={() => void runAction("apply trigger config", applyTriggerConfig)}
     />
   {/if}
 
-  {#if activeView === "config" && activeConfigView === "profiles"}
+  {#if navigation.activeView === "config" && navigation.activeConfigView === "profiles"}
     <ProfilesConfigPage
-      bind:profilesMode
-      bind:profileAutoSwitchSource
-      bind:profileDayStartLocal
-      bind:profileNightStartLocal
-      bind:profileDayColorScheme
-      bind:profileDayBrightnessPct
-      bind:profileDayOutputProfile
-      bind:profileNightColorScheme
-      bind:profileNightBrightnessPct
-      bind:profileNightOutputProfile
-      notificationPermissionText={notificationPermissionText}
-      notificationStatusText={notificationStatusText}
+      bind:profilesMode={configDrafts.profiles.mode}
+      bind:profileAutoSwitchSource={configDrafts.profiles.autoSwitchSource}
+      bind:profileDayStartLocal={configDrafts.profiles.dayStartLocal}
+      bind:profileNightStartLocal={configDrafts.profiles.nightStartLocal}
+      bind:profileDayColorScheme={configDrafts.profiles.dayColorScheme}
+      bind:profileDayBrightnessPct={configDrafts.profiles.dayBrightnessPct}
+      bind:profileDayOutputProfile={configDrafts.profiles.dayOutputProfile}
+      bind:profileNightColorScheme={configDrafts.profiles.nightColorScheme}
+      bind:profileNightBrightnessPct={configDrafts.profiles.nightBrightnessPct}
+      bind:profileNightOutputProfile={configDrafts.profiles.nightOutputProfile}
+      notificationPermissionText={notifications.permissionText}
+      notificationStatusText={notifications.statusText}
       onBack={() => goToSettingsView()}
       onApply={() => void runAction("apply profile config", applyProfilesConfig)}
-      onRequestPermission={() => void runAction("request notification permission", requestNotificationPermission)}
-      onSendTestNotification={() => void runAction("send test notification", sendTestNotification)}
+      onRequestPermission={() => void runAction("request notification permission", () => requestNotificationPermission(notifications))}
+      onSendTestNotification={() => void runAction("send test notification", () => sendTestNotification(notifications))}
     />
   {/if}
 
     </main>
+    {#if navigation.activeView !== "config"}
+      <button
+        type="button"
+        class="app-state-led-button"
+        onclick={openConfigFromStatusLed}
+        aria-label={connection.linkLedTitle}
+        title={connection.linkLedTitle}
+      >
+        <span class={`app-state-led-dot ${connection.linkLedState}`} aria-hidden="true"></span>
+      </button>
+    {/if}
     <Tabbar icons class="am-tabbar fixed bottom-0 left-0 right-0 z-40" aria-label="Anqori AnchorWatch sections">
       {#each VIEW_TABS as tab}
         <TabbarLink
           class="am-tab-link"
-          active={activeView === tab.id}
+          active={navigation.activeView === tab.id}
           colors={TABBAR_LINK_COLORS}
           onclick={() => setView(tab.id)}
           linkProps={{ "aria-label": tab.label, title: tab.label }}

@@ -1,4 +1,5 @@
 import {
+  BLE_CONNECTED_ONCE_KEY,
   BOAT_ID_KEY,
   BOAT_SECRET_KEY,
   DEFAULT_RELAY_BASE_URL,
@@ -80,4 +81,12 @@ export function hasPersistedSetup(): boolean {
   const configVersion = Number(loadStoredString(WIFI_CFG_VERSION_KEY, "0"));
   const hasSavedConfigVersion = Number.isInteger(configVersion) && configVersion > 0;
   return hasBoatId || hasBoatSecret || hasRelayBaseUrl || hasSavedConfigVersion;
+}
+
+export function hasConnectedViaBleOnce(): boolean {
+  return loadStoredString(BLE_CONNECTED_ONCE_KEY) === "1";
+}
+
+export function markConnectedViaBleOnce(): void {
+  saveStoredString(BLE_CONNECTED_ONCE_KEY, "1");
 }
