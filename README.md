@@ -54,6 +54,8 @@ PORT=/dev/ttyACM0 BAUD=115200 just firmware-monitor
 
 ## Cloudflare Setup (Install + API Keys + Pages + Worker)
 
+MapTiler setup for real map/satellite pages is documented in `docs/maptiler-setup.md`.
+
 ### 1) Install prerequisites
 
 Install Node.js 20+.

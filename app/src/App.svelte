@@ -1,5 +1,11 @@
 <script lang="ts">
+  import type { Feature, FeatureCollection, Geometry, Position } from "geojson";
   import { onDestroy, onMount } from "svelte";
+  import {
+    Map as MapTilerMap,
+    config as maptilerConfig,
+    type GeoJSONSource,
+  } from "@maptiler/sdk";
   import {
     App as KonstaApp,
     Block,
@@ -9,6 +15,7 @@
     List,
     ListInput,
     ListItem,
+    Navbar,
     Page as KonstaPage,
     Tabbar,
     TabbarLink,
@@ -111,9 +118,17 @@
   const CLOUD_POLL_MS = 5000;
   const CLOUD_HEALTH_POLL_MS = 60000;
   const TRACK_MAX_POINTS = 320;
-  const MAP_VIEW_WIDTH = 320;
-  const MAP_VIEW_HEIGHT = 210;
   const TRACK_SNAPSHOT_LIMIT = 240;
+  const MAPTILER_API_KEY = (import.meta.env.VITE_MAPTILER_API_KEY ?? "").trim();
+  const MAPTILER_STYLE_MAP = (import.meta.env.VITE_MAPTILER_STYLE_MAP ?? "streets-v2").trim();
+  const MAPTILER_STYLE_SATELLITE = (import.meta.env.VITE_MAPTILER_STYLE_SATELLITE ?? "hybrid").trim();
+  const MAPTILER_DEFAULT_CENTER: [number, number] = [10.1402, 54.3201];
+  const MAPTILER_DEFAULT_ZOOM = 14;
+  const MAPTILER_MAX_PAN_DISTANCE_M = 550;
+  const MAPTILER_MAX_VISIBLE_AREA_M2 = 1_000_000;
+  const MAPTILER_MAX_ZOOM = 22;
+  const WEB_MERCATOR_EARTH_CIRCUMFERENCE_M = 40_075_016.68557849;
+  const WEB_MERCATOR_TILE_SIZE = 256;
 
   const VIEW_TABS: Array<{ id: ViewId; label: string; icon: string }> = [
     { id: "summary", label: "Summary", icon: "home" },
@@ -123,11 +138,11 @@
     { id: "config", label: "Config", icon: "settings" },
   ];
 
-  const CONFIG_SECTIONS: Array<{ id: ConfigSectionId; label: string }> = [
-    { id: "onboarding", label: "Connection" },
-    { id: "anchor", label: "Anchor" },
-    { id: "triggers", label: "Triggers" },
-    { id: "profiles", label: "Profiles" },
+  const CONFIG_SECTIONS: Array<{ id: ConfigSectionId; label: string; icon: string }> = [
+    { id: "onboarding", label: "Connection", icon: "bluetooth" },
+    { id: "anchor", label: "Anchor", icon: "anchor" },
+    { id: "triggers", label: "Triggers", icon: "warning" },
+    { id: "profiles", label: "Profiles", icon: "tune" },
   ];
 
   const TABBAR_LINK_COLORS = {
@@ -211,12 +226,18 @@
   let suppressedPopEvents = 0;
   let trackStatusText = "No track yet";
   let trackPoints: TrackPoint[] = [];
-  let mapPath = "";
   let currentLatText = "--";
   let currentLonText = "--";
   let currentSogText = "--";
   let currentCogText = "--";
   let currentHeadingText = "--";
+  let maptilerStatusText = MAPTILER_API_KEY ? "Map ready state pending." : "MapTiler token missing.";
+  let maptilerMapContainer: HTMLDivElement | null = null;
+  let maptilerSatelliteContainer: HTMLDivElement | null = null;
+  let maptilerMap: MapTilerMap | null = null;
+  let maptilerSatellite: MapTilerMap | null = null;
+  let maptilerLimitsApplyingMap = false;
+  let maptilerLimitsApplyingSatellite = false;
   let radarTargetX = 110;
   let radarTargetY = 110;
   let radarDistanceText = "--";
@@ -486,35 +507,261 @@
     saveStoredString(WIFI_CFG_VERSION_KEY, String(version));
   }
 
-  function buildTrackPath(points: TrackPoint[]): string {
-    if (points.length < 2) {
-      return "";
+  function buildTrackGeoJson(points: TrackPoint[]): FeatureCollection<Geometry> {
+    const coordinates: Position[] = points.map((point) => [point.lon, point.lat]);
+    const features: Array<Feature<Geometry>> = [];
+
+    if (coordinates.length >= 2) {
+      features.push({
+        type: "Feature",
+        properties: { kind: "track" },
+        geometry: {
+          type: "LineString",
+          coordinates,
+        },
+      });
     }
 
-    let minLat = points[0].lat;
-    let maxLat = points[0].lat;
-    let minLon = points[0].lon;
-    let maxLon = points[0].lon;
-
-    for (const point of points) {
-      minLat = Math.min(minLat, point.lat);
-      maxLat = Math.max(maxLat, point.lat);
-      minLon = Math.min(minLon, point.lon);
-      maxLon = Math.max(maxLon, point.lon);
+    if (coordinates.length >= 1) {
+      features.push({
+        type: "Feature",
+        properties: { kind: "current" },
+        geometry: {
+          type: "Point",
+          coordinates: coordinates[coordinates.length - 1],
+        },
+      });
     }
 
-    const margin = 14;
-    const width = MAP_VIEW_WIDTH - margin * 2;
-    const height = MAP_VIEW_HEIGHT - margin * 2;
-    const latSpan = Math.max(0.000001, maxLat - minLat);
-    const lonSpan = Math.max(0.000001, maxLon - minLon);
+    return {
+      type: "FeatureCollection",
+      features,
+    };
+  }
 
-    return points.map((point, index) => {
-      const x = margin + ((point.lon - minLon) / lonSpan) * width;
-      const y = margin + (1 - ((point.lat - minLat) / latSpan)) * height;
-      const command = index === 0 ? "M" : "L";
-      return `${command}${x.toFixed(1)} ${y.toFixed(1)}`;
-    }).join(" ");
+  function maptilerIds(kind: "map" | "satellite"): { source: string; lineLayer: string; pointLayer: string } {
+    const prefix = kind === "map" ? "aw-map" : "aw-satellite";
+    return {
+      source: `${prefix}-track-source`,
+      lineLayer: `${prefix}-track-line`,
+      pointLayer: `${prefix}-track-point`,
+    };
+  }
+
+  function getMapTilerInstance(kind: "map" | "satellite"): MapTilerMap | null {
+    return kind === "map" ? maptilerMap : maptilerSatellite;
+  }
+
+  function setMapTilerInstance(kind: "map" | "satellite", map: MapTilerMap | null): void {
+    if (kind === "map") {
+      maptilerMap = map;
+      return;
+    }
+    maptilerSatellite = map;
+  }
+
+  function getMapTilerContainer(kind: "map" | "satellite"): HTMLDivElement | null {
+    return kind === "map" ? maptilerMapContainer : maptilerSatelliteContainer;
+  }
+
+  function resolveMapTilerStyleUrl(styleRef: string): string {
+    const trimmed = styleRef.trim();
+    if (trimmed.startsWith("https://") || trimmed.startsWith("http://")) {
+      if (trimmed.includes("key=")) {
+        return trimmed;
+      }
+      const joiner = trimmed.includes("?") ? "&" : "?";
+      return `${trimmed}${joiner}key=${encodeURIComponent(MAPTILER_API_KEY)}`;
+    }
+    return `https://api.maptiler.com/maps/${encodeURIComponent(trimmed)}/style.json?key=${encodeURIComponent(MAPTILER_API_KEY)}`;
+  }
+
+  function getMapTilerAnchorPoint(): [number, number] {
+    const latestPoint = trackPoints[trackPoints.length - 1];
+    if (latestPoint) {
+      return [latestPoint.lon, latestPoint.lat];
+    }
+    return MAPTILER_DEFAULT_CENTER;
+  }
+
+  function buildMapTilerPanBounds(anchorPoint: [number, number], radiusM: number): [[number, number], [number, number]] {
+    const [anchorLon, anchorLat] = anchorPoint;
+    const latDelta = radiusM / 111_320;
+    const cosLat = Math.max(0.01, Math.cos((anchorLat * Math.PI) / 180));
+    const lonDelta = radiusM / (111_320 * cosLat);
+    return [
+      [anchorLon - lonDelta, anchorLat - latDelta],
+      [anchorLon + lonDelta, anchorLat + latDelta],
+    ];
+  }
+
+  function mapTilerMinZoomForArea(latitudeDeg: number, widthPx: number, heightPx: number, maxAreaM2: number): number {
+    const safeWidth = Math.max(1, widthPx);
+    const safeHeight = Math.max(1, heightPx);
+    const safeLatFactor = Math.max(0.01, Math.abs(Math.cos((latitudeDeg * Math.PI) / 180)));
+    const maxMetersPerPixel = Math.sqrt(maxAreaM2 / (safeWidth * safeHeight));
+    const denominator = WEB_MERCATOR_TILE_SIZE * Math.max(0.01, maxMetersPerPixel);
+    const zoom = Math.log2((WEB_MERCATOR_EARTH_CIRCUMFERENCE_M * safeLatFactor) / denominator);
+    return clampNumber(zoom, 0, MAPTILER_MAX_ZOOM);
+  }
+
+  function mapTilerLimitsFlag(kind: "map" | "satellite"): boolean {
+    return kind === "map" ? maptilerLimitsApplyingMap : maptilerLimitsApplyingSatellite;
+  }
+
+  function setMapTilerLimitsFlag(kind: "map" | "satellite", value: boolean): void {
+    if (kind === "map") {
+      maptilerLimitsApplyingMap = value;
+      return;
+    }
+    maptilerLimitsApplyingSatellite = value;
+  }
+
+  function enforceMapTilerViewportLimits(map: MapTilerMap, kind: "map" | "satellite"): void {
+    if (mapTilerLimitsFlag(kind)) {
+      return;
+    }
+
+    setMapTilerLimitsFlag(kind, true);
+    try {
+      const anchorPoint = getMapTilerAnchorPoint();
+      const panBounds = buildMapTilerPanBounds(anchorPoint, MAPTILER_MAX_PAN_DISTANCE_M);
+      const [[minLon, minLat], [maxLon, maxLat]] = panBounds;
+
+      map.setMaxBounds(panBounds);
+
+      const center = map.getCenter();
+      const clampedCenter: [number, number] = [
+        clampNumber(center.lng, minLon, maxLon),
+        clampNumber(center.lat, minLat, maxLat),
+      ];
+      if (Math.abs(clampedCenter[0] - center.lng) > 0.0000001 || Math.abs(clampedCenter[1] - center.lat) > 0.0000001) {
+        map.setCenter(clampedCenter);
+      }
+
+      const canvas = map.getCanvas();
+      const minZoom = mapTilerMinZoomForArea(clampedCenter[1], canvas.clientWidth, canvas.clientHeight, MAPTILER_MAX_VISIBLE_AREA_M2);
+      if (Math.abs(map.getMinZoom() - minZoom) > 0.001) {
+        map.setMinZoom(minZoom);
+      }
+      if (map.getZoom() < minZoom) {
+        map.setZoom(minZoom);
+      }
+    } finally {
+      setMapTilerLimitsFlag(kind, false);
+    }
+  }
+
+  function ensureMapTilerTrackLayers(map: MapTilerMap, kind: "map" | "satellite"): void {
+    const ids = maptilerIds(kind);
+    if (!map.getSource(ids.source)) {
+      map.addSource(ids.source, {
+        type: "geojson",
+        data: buildTrackGeoJson(trackPoints),
+      });
+    }
+    if (!map.getLayer(ids.lineLayer)) {
+      map.addLayer({
+        id: ids.lineLayer,
+        source: ids.source,
+        type: "line",
+        filter: ["==", ["get", "kind"], "track"],
+        paint: {
+          "line-color": kind === "map" ? "#5ce1ff" : "#ffd166",
+          "line-width": 3,
+          "line-opacity": 0.92,
+        },
+      });
+    }
+    if (!map.getLayer(ids.pointLayer)) {
+      map.addLayer({
+        id: ids.pointLayer,
+        source: ids.source,
+        type: "circle",
+        filter: ["==", ["get", "kind"], "current"],
+        paint: {
+          "circle-radius": 6,
+          "circle-color": "#ffffff",
+          "circle-stroke-color": kind === "map" ? "#5ce1ff" : "#ffd166",
+          "circle-stroke-width": 2,
+        },
+      });
+    }
+  }
+
+  function updateMapTilerTrackData(map: MapTilerMap, kind: "map" | "satellite"): void {
+    if (!map.isStyleLoaded()) {
+      return;
+    }
+    ensureMapTilerTrackLayers(map, kind);
+    const source = map.getSource(maptilerIds(kind).source) as GeoJSONSource | undefined;
+    if (source) {
+      source.setData(buildTrackGeoJson(trackPoints));
+    }
+  }
+
+  function ensureMapTilerView(kind: "map" | "satellite"): void {
+    if (!MAPTILER_API_KEY) {
+      maptilerStatusText = "MapTiler token missing. Set VITE_MAPTILER_API_KEY in .env and redeploy.";
+      return;
+    }
+
+    const existing = getMapTilerInstance(kind);
+    if (existing) {
+      existing.resize();
+      updateMapTilerTrackData(existing, kind);
+      enforceMapTilerViewportLimits(existing, kind);
+      return;
+    }
+
+    const container = getMapTilerContainer(kind);
+    if (!container) {
+      return;
+    }
+
+    const latestPoint = trackPoints[trackPoints.length - 1];
+    const center: [number, number] = latestPoint
+      ? [latestPoint.lon, latestPoint.lat]
+      : MAPTILER_DEFAULT_CENTER;
+
+    maptilerConfig.apiKey = MAPTILER_API_KEY;
+    const styleRef = kind === "map" ? MAPTILER_STYLE_MAP : MAPTILER_STYLE_SATELLITE;
+    const style = resolveMapTilerStyleUrl(styleRef);
+    const map = new MapTilerMap({
+      container,
+      style,
+      center,
+      zoom: MAPTILER_DEFAULT_ZOOM,
+    });
+
+    maptilerStatusText = "Loading map tiles...";
+    map.on("load", () => {
+      maptilerStatusText = "Map loaded.";
+      updateMapTilerTrackData(map, kind);
+      enforceMapTilerViewportLimits(map, kind);
+      map.resize();
+    });
+    map.on("moveend", () => {
+      enforceMapTilerViewportLimits(map, kind);
+    });
+    map.on("resize", () => {
+      enforceMapTilerViewportLimits(map, kind);
+    });
+    map.on("error", (event) => {
+      const errorText = event.error instanceof Error ? event.error.message : "unknown map error";
+      maptilerStatusText = `Map error: ${errorText}`;
+    });
+
+    setMapTilerInstance(kind, map);
+  }
+
+  function destroyMapTilerView(kind: "map" | "satellite"): void {
+    const map = getMapTilerInstance(kind);
+    if (!map) {
+      return;
+    }
+    map.remove();
+    setMapTilerInstance(kind, null);
   }
 
   function updateRadarFromTrack(points: TrackPoint[]): void {
@@ -547,8 +794,15 @@
   }
 
   function updateTrackProjection(points: TrackPoint[]): void {
-    mapPath = buildTrackPath(points);
     updateRadarFromTrack(points);
+    if (maptilerMap) {
+      updateMapTilerTrackData(maptilerMap, "map");
+      enforceMapTilerViewportLimits(maptilerMap, "map");
+    }
+    if (maptilerSatellite) {
+      updateMapTilerTrackData(maptilerSatellite, "satellite");
+      enforceMapTilerViewportLimits(maptilerSatellite, "satellite");
+    }
 
     const current = points.length > 0 ? points[points.length - 1] : null;
     if (!current) {
@@ -1646,6 +1900,7 @@
   }
 
   function setView(nextView: ViewId): void {
+    const previousView = activeView;
     const targetLevel = nextView === "summary" ? 0 : 1;
     syncToNavLevel(targetLevel);
 
@@ -1657,6 +1912,18 @@
     }
 
     activeView = nextView;
+
+    if (previousView === "map" && nextView !== "map") {
+      destroyMapTilerView("map");
+    }
+    if (previousView === "satellite" && nextView !== "satellite") {
+      destroyMapTilerView("satellite");
+    }
+    if (nextView === "map") {
+      requestAnimationFrame(() => ensureMapTilerView("map"));
+    } else if (nextView === "satellite") {
+      requestAnimationFrame(() => ensureMapTilerView("satellite"));
+    }
 
     if ((nextView === "satellite" || nextView === "map" || nextView === "radar") && mode === MODE_DEVICE && trackPoints.length < 3) {
       void runAction("track snapshot", fetchTrackSnapshot);
@@ -1699,9 +1966,15 @@
       return;
     }
     if (level === 1) {
+      const previousView = activeView;
       activeView = "summary";
       activeConfigView = "settings";
       onboardingStep = 1;
+      if (previousView === "map") {
+        destroyMapTilerView("map");
+      } else if (previousView === "satellite") {
+        destroyMapTilerView("satellite");
+      }
     }
   }
 
@@ -1997,6 +2270,8 @@
 
   onDestroy(() => {
     window.removeEventListener("popstate", handlePopState);
+    destroyMapTilerView("map");
+    destroyMapTilerView("satellite");
     clearWifiScanTimeout();
     if (tickInterval) {
       clearInterval(tickInterval);
@@ -2038,18 +2313,20 @@
   {/if}
 
   {#if activeView === "config" && activeConfigView === "settings"}
-    <Block strong class="space-y-3">
-      <BlockTitle>Settings</BlockTitle>
-      <List strong inset aria-label="Settings pages">
+    <Navbar title="Settings" large transparent centerTitle />
+    <List strong inset aria-label="Settings pages">
         {#each CONFIG_SECTIONS as configSection}
           <ListItem
-            menuListItem
+            link
             title={configSection.label}
             onClick={() => openConfigView(configSection.id)}
-          />
+          >
+            {#snippet media()}
+              <span class="material-symbols-rounded am-tab-material-icon" aria-hidden="true">{configSection.icon}</span>
+            {/snippet}
+          </ListItem>
         {/each}
       </List>
-    </Block>
   {/if}
 
   {#if activeView === "config" && activeConfigView !== "settings"}
@@ -2226,53 +2503,22 @@
 
   {#if activeView === "satellite"}
     <section class="viz-screen satellite-screen">
-      <svg class="viz-fill satellite" preserveAspectRatio="none" viewBox={`0 0 ${MAP_VIEW_WIDTH} ${MAP_VIEW_HEIGHT}`} role="img" aria-label="Satellite track view">
-        <defs>
-          <linearGradient id="satGradient" x1="0" y1="0" x2="1" y2="1">
-            <stop offset="0%" stop-color="#2f4f3a" />
-            <stop offset="50%" stop-color="#385f49" />
-            <stop offset="100%" stop-color="#274334" />
-          </linearGradient>
-          <pattern id="satNoise" width="20" height="20" patternUnits="userSpaceOnUse">
-            <circle cx="4" cy="5" r="1.1" fill="rgba(255,255,255,0.08)" />
-            <circle cx="13" cy="8" r="0.8" fill="rgba(0,0,0,0.18)" />
-            <circle cx="8" cy="15" r="1.2" fill="rgba(255,255,255,0.06)" />
-          </pattern>
-        </defs>
-        <rect x="0" y="0" width={MAP_VIEW_WIDTH} height={MAP_VIEW_HEIGHT} fill="url(#satGradient)" />
-        <rect x="0" y="0" width={MAP_VIEW_WIDTH} height={MAP_VIEW_HEIGHT} fill="url(#satNoise)" />
-        {#if mapPath}
-          <path d={mapPath} class="track-line sat-track" />
-        {/if}
-      </svg>
+      {#if MAPTILER_API_KEY}
+        <div class="maptiler-host" bind:this={maptilerSatelliteContainer} aria-label="Satellite map view"></div>
+      {:else}
+        <div class="maptiler-missing">{maptilerStatusText}</div>
+      {/if}
       <div class="viz-overlay mono">Track: {trackStatusText}</div>
     </section>
   {/if}
 
   {#if activeView === "map"}
     <section class="viz-screen map-screen">
-      <svg class="viz-fill map" preserveAspectRatio="none" viewBox={`0 0 ${MAP_VIEW_WIDTH} ${MAP_VIEW_HEIGHT}`} role="img" aria-label="Map track view">
-        <rect x="0" y="0" width={MAP_VIEW_WIDTH} height={MAP_VIEW_HEIGHT} fill="#102130" />
-        {#each Array.from({ length: 8 }) as _, i}
-          <line
-            x1={((i + 1) * MAP_VIEW_WIDTH) / 9}
-            y1="0"
-            x2={((i + 1) * MAP_VIEW_WIDTH) / 9}
-            y2={MAP_VIEW_HEIGHT}
-            class="grid-line"
-          />
-          <line
-            x1="0"
-            y1={((i + 1) * MAP_VIEW_HEIGHT) / 9}
-            x2={MAP_VIEW_WIDTH}
-            y2={((i + 1) * MAP_VIEW_HEIGHT) / 9}
-            class="grid-line"
-          />
-        {/each}
-        {#if mapPath}
-          <path d={mapPath} class="track-line map-track" />
-        {/if}
-      </svg>
+      {#if MAPTILER_API_KEY}
+        <div class="maptiler-host" bind:this={maptilerMapContainer} aria-label="Map view"></div>
+      {:else}
+        <div class="maptiler-missing">{maptilerStatusText}</div>
+      {/if}
       <div class="viz-overlay mono">Lat {currentLatText} · Lon {currentLonText} · SOG {currentSogText} · COG {currentCogText}</div>
     </section>
   {/if}
@@ -2510,17 +2756,6 @@
     box-sizing: border-box;
   }
 
-  :global(.am-page) {
-    background: transparent;
-  }
-
-  :global(.am-page .bg-md-light-surface),
-  :global(.am-page .bg-md-dark-surface),
-  :global(.am-page .bg-md-light-surface-1),
-  :global(.am-page .bg-md-dark-surface-1) {
-    background-color: transparent;
-  }
-
   :global(:root) {
     --am-tab-count: 5;
     --am-tabbar-height: calc(5rem + env(safe-area-inset-bottom));
@@ -2726,7 +2961,7 @@
     backdrop-filter: blur(4px);
   }
 
-  .viz-fill {
+  .maptiler-host {
     width: 100%;
     height: 100%;
     display: block;
@@ -2736,32 +2971,16 @@
     border-radius: 0;
   }
 
-  .satellite {
-    background: #22382d;
-  }
-
-  .map {
-    background: #0f2230;
-  }
-
-  .grid-line {
-    stroke: rgba(255, 255, 255, 0.08);
-    stroke-width: 1;
-  }
-
-  .track-line {
-    fill: none;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-    stroke-width: 2.4;
-  }
-
-  .sat-track {
-    stroke: #ffd166;
-  }
-
-  .map-track {
-    stroke: #5ce1ff;
+  .maptiler-missing {
+    width: 100%;
+    height: 100%;
+    display: grid;
+    place-items: center;
+    text-align: center;
+    padding: 1.4rem;
+    color: rgba(228, 244, 246, 0.95);
+    background: linear-gradient(135deg, #142734, #0d1721);
+    font-size: 0.92rem;
   }
 
   .radar-screen {

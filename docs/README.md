@@ -12,4 +12,5 @@ Planned additions:
 Current docs:
 
 - `docs/cloudflare-setup.md` plain `wrangler` setup for Pages + Workers
+- `docs/maptiler-setup.md` MapTiler account + key setup for real map/satellite rendering
 - `docs/protocol-v1.md` draft wire protocol/messages for cloud path and BLE path
