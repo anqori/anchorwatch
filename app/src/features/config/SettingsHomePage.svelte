@@ -1,14 +1,15 @@
 <script lang="ts">
   import { List, ListItem, Navbar } from "konsta/svelte";
+  import type { ConfigSectionId } from "../../core/types";
 
   interface ConfigSection {
-    id: string;
+    id: ConfigSectionId;
     label: string;
     icon: string;
   }
 
   export let configSections: ConfigSection[] = [];
-  export let onOpenConfig: (id: string) => void = () => {};
+  export let onOpenConfig: (id: ConfigSectionId) => void = () => {};
 </script>
 
 <Navbar title="Settings" large transparent centerTitle />

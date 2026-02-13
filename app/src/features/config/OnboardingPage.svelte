@@ -7,14 +7,7 @@
     ListInput,
     ListItem,
   } from "konsta/svelte";
-
-  interface WifiScanNetwork {
-    ssid: string;
-    security: "open" | "wpa2" | "wpa3" | "unknown";
-    rssi: number | null;
-    channel: number | null;
-    hidden: boolean;
-  }
+  import type { WifiScanNetwork, WifiSecurity } from "../../core/types";
 
   export let onboardingStep = 1;
   export let onboardingStepLabel = "Step 1 of 3";
@@ -38,7 +31,7 @@
   export let availableWifiNetworks: WifiScanNetwork[] = [];
   export let selectedWifiSsid = "";
   export let wifiSsid = "";
-  export let wifiSecurity: "open" | "wpa2" | "wpa3" | "unknown" = "wpa2";
+  export let wifiSecurity: WifiSecurity = "wpa2";
   export let wifiPass = "";
   export let wifiCountry = "";
   export let selectedWifiNetwork: WifiScanNetwork | null = null;
@@ -53,7 +46,7 @@
   export let relayResult = "No request yet.";
   export let onboardingLogText = "";
 
-  export let formatWifiSecurity: (security: "open" | "wpa2" | "wpa3" | "unknown") => string = (security) => security;
+  export let formatWifiSecurity: (security: WifiSecurity) => string = (security) => security;
 
   export let onSelectDeviceMode: () => void = () => {};
   export let onUseFakeMode: () => void = () => {};

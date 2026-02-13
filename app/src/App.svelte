@@ -1,11 +1,93 @@
 <script lang="ts">
-  import type { Feature, FeatureCollection, Geometry, Position } from "geojson";
   import { onDestroy, onMount } from "svelte";
-  import {
+import {
     Map as MapTilerMap,
     config as maptilerConfig,
     type GeoJSONSource,
   } from "@maptiler/sdk";
+  import type {
+    AnchorMode,
+    AutoSwitchSource,
+    BleState,
+    ColorScheme,
+    ConfigSectionId,
+    ConfigViewId,
+    Envelope,
+    InboundSource,
+    JsonRecord,
+    Mode,
+    OnboardingStep,
+    PillClass,
+    ProfileMode,
+    Severity,
+    TrackPoint,
+    ViewId,
+    WifiScanNetwork,
+    WifiSecurity,
+    ZoneType,
+  } from "./core/types";
+  import {
+    BLE_AUTH_UUID,
+    BLE_CHUNK_MAX_PAYLOAD,
+    BLE_CHUNK_TIMEOUT_MS,
+    BLE_CONTROL_TX_UUID,
+    BLE_EVENT_RX_UUID,
+    BLE_LIVE_MAX_AGE_MS,
+    BLE_SERVICE_UUID,
+    BLE_SNAPSHOT_UUID,
+    BOAT_ID_KEY,
+    BOAT_SECRET_KEY,
+    CLOUD_HEALTH_POLL_MS,
+    CLOUD_POLL_MS,
+    CONFIG_SECTIONS,
+    DEFAULT_RELAY_BASE_URL,
+    MAPTILER_API_KEY,
+    MAPTILER_DEFAULT_CENTER,
+    MAPTILER_DEFAULT_ZOOM,
+    MAPTILER_MAX_PAN_DISTANCE_M,
+    MAPTILER_MAX_VISIBLE_AREA_M2,
+    MAPTILER_STYLE_MAP,
+    MAPTILER_STYLE_SATELLITE,
+    MODE_DEVICE,
+    MODE_FAKE,
+    MODE_KEY,
+    PHONE_ID_KEY,
+    PROTOCOL_VERSION,
+    PWA_BUILD_VERSION,
+    RELAY_BASE_URL_KEY,
+    TABBAR_LINK_COLORS,
+    TRACK_MAX_POINTS,
+    TRACK_SNAPSHOT_LIMIT,
+    VIEW_TABS,
+    WIFI_CFG_VERSION_KEY,
+    WIFI_SCAN_TIMEOUT_MS,
+  } from "./core/constants";
+  import {
+    clampNumber,
+    dataViewToBytes,
+    deepMerge,
+    extractAckError,
+    formatWifiSecurity,
+    isObject,
+    normalizePatch,
+    parseIntegerInput,
+    parseNumberInput,
+    parsePolygonPoints,
+    parseTrackSnapshot,
+    parseWifiScanNetworks,
+    safeParseJson,
+    toFiniteNumber,
+  } from "./services/data-utils";
+  import { makeMsgId, writeCharacteristic, writeChunked } from "./services/ble-transport";
+  import { loadStoredString, maskSecret, normalizeRelayBaseUrl, saveStoredString } from "./services/local-storage";
+  import {
+    buildMapTilerPanBounds,
+    buildTrackGeoJson,
+    getMapTilerAnchorPoint,
+    mapTilerMinZoomForArea,
+    maptilerIds,
+    resolveMapTilerStyleUrl,
+  } from "./services/maptiler-helpers";
   import {
     App as KonstaApp,
     Button as KonstaButton,
@@ -23,137 +105,6 @@
   import SatellitePage from "./features/map/SatellitePage.svelte";
   import MapPage from "./features/map/MapPage.svelte";
   import RadarPage from "./features/radar/RadarPage.svelte";
-
-  type Mode = "fake" | "device";
-  type InboundSource = "ble/eventRx" | "ble/snapshot" | "cloud/status.snapshot";
-  type PillClass = "ok" | "warn" | "alarm";
-  type ViewId = "summary" | "satellite" | "map" | "radar" | "config";
-  type ConfigSectionId = "onboarding" | "anchor" | "triggers" | "profiles";
-  type ConfigViewId = "settings" | ConfigSectionId;
-  type OnboardingStep = 1 | 2 | 3;
-  type AnchorMode = "current" | "offset" | "auto" | "manual";
-  type ZoneType = "circle" | "polygon";
-  type Severity = "warning" | "alarm";
-  type ProfileMode = "manual" | "auto";
-  type ColorScheme = "full" | "red" | "blue";
-  type AutoSwitchSource = "time" | "sun";
-  type WifiSecurity = "open" | "wpa2" | "wpa3" | "unknown";
-
-  type JsonRecord = Record<string, unknown>;
-
-  interface TrackPoint {
-    ts: number;
-    lat: number;
-    lon: number;
-    sogKn: number;
-    cogDeg: number;
-    headingDeg: number;
-  }
-
-  interface WifiScanNetwork {
-    ssid: string;
-    security: WifiSecurity;
-    rssi: number | null;
-    channel: number | null;
-    hidden: boolean;
-  }
-
-  interface Envelope {
-    ver?: string;
-    msgType?: string;
-    msgId?: string;
-    boatId?: string;
-    deviceId?: string;
-    seq?: number;
-    ts?: number;
-    requiresAck?: boolean;
-    payload?: JsonRecord;
-  }
-
-  interface PendingAck {
-    resolve: (payload: JsonRecord) => void;
-    reject: (error: Error) => void;
-    timeout: ReturnType<typeof setTimeout>;
-  }
-
-  interface ChunkAssembly {
-    partCount: number;
-    parts: Array<string | null>;
-    updatedAt: number;
-  }
-
-  interface BleState {
-    device: BluetoothDevice | null;
-    server: BluetoothRemoteGATTServer | null;
-    service: BluetoothRemoteGATTService | null;
-    controlTx: BluetoothRemoteGATTCharacteristic | null;
-    eventRx: BluetoothRemoteGATTCharacteristic | null;
-    snapshot: BluetoothRemoteGATTCharacteristic | null;
-    auth: BluetoothRemoteGATTCharacteristic | null;
-    connected: boolean;
-    seq: number;
-    pendingAcks: Map<string, PendingAck>;
-    chunkAssemblies: Map<string, ChunkAssembly>;
-    authState: JsonRecord | null;
-  }
-
-  const MODE_KEY = "anchorwatch.mode";
-  const MODE_FAKE: Mode = "fake";
-  const MODE_DEVICE: Mode = "device";
-  const RELAY_BASE_URL_KEY = "anchorwatch.relay_base_url";
-  const DEFAULT_RELAY_BASE_URL = (import.meta.env.VITE_RELAY_BASE_URL ?? "").trim();
-  const PWA_BUILD_VERSION = (import.meta.env.VITE_BUILD_VERSION ?? "run-unknown").trim() || "run-unknown";
-  const BOAT_ID_KEY = "anchorwatch.boat_id";
-  const BOAT_SECRET_KEY = "anchorwatch.boat_secret";
-  const WIFI_CFG_VERSION_KEY = "anchorwatch.wifi_cfg_version";
-  const PHONE_ID_KEY = "anchorwatch.phone_id";
-
-  const PROTOCOL_VERSION = "am.v1";
-  const BLE_SERVICE_UUID = "9f2d0000-87aa-4f4a-a0ea-4d5d4f415354";
-  const BLE_CONTROL_TX_UUID = "9f2d0001-87aa-4f4a-a0ea-4d5d4f415354";
-  const BLE_EVENT_RX_UUID = "9f2d0002-87aa-4f4a-a0ea-4d5d4f415354";
-  const BLE_SNAPSHOT_UUID = "9f2d0003-87aa-4f4a-a0ea-4d5d4f415354";
-  const BLE_AUTH_UUID = "9f2d0004-87aa-4f4a-a0ea-4d5d4f415354";
-  const BLE_CHUNK_MAX_PAYLOAD = 120;
-  const BLE_CHUNK_TIMEOUT_MS = 2000;
-  const WIFI_SCAN_TIMEOUT_MS = 10000;
-  const BLE_LIVE_MAX_AGE_MS = 8000;
-  const CLOUD_POLL_MS = 5000;
-  const CLOUD_HEALTH_POLL_MS = 60000;
-  const TRACK_MAX_POINTS = 320;
-  const TRACK_SNAPSHOT_LIMIT = 240;
-  const MAPTILER_API_KEY = (import.meta.env.VITE_MAPTILER_API_KEY ?? "").trim();
-  const MAPTILER_STYLE_MAP = (import.meta.env.VITE_MAPTILER_STYLE_MAP ?? "streets-v2").trim();
-  const MAPTILER_STYLE_SATELLITE = (import.meta.env.VITE_MAPTILER_STYLE_SATELLITE ?? "hybrid").trim();
-  const MAPTILER_DEFAULT_CENTER: [number, number] = [10.1402, 54.3201];
-  const MAPTILER_DEFAULT_ZOOM = 14;
-  const MAPTILER_MAX_PAN_DISTANCE_M = 550;
-  const MAPTILER_MAX_VISIBLE_AREA_M2 = 1_000_000;
-  const MAPTILER_MAX_ZOOM = 22;
-  const WEB_MERCATOR_EARTH_CIRCUMFERENCE_M = 40_075_016.68557849;
-  const WEB_MERCATOR_TILE_SIZE = 256;
-
-  const VIEW_TABS: Array<{ id: ViewId; label: string; icon: string }> = [
-    { id: "summary", label: "Summary", icon: "home" },
-    { id: "satellite", label: "Satellite", icon: "satellite_alt" },
-    { id: "map", label: "Map", icon: "map" },
-    { id: "radar", label: "Radar", icon: "radar" },
-    { id: "config", label: "Config", icon: "settings" },
-  ];
-
-  const CONFIG_SECTIONS: Array<{ id: ConfigSectionId; label: string; icon: string }> = [
-    { id: "onboarding", label: "Connection", icon: "bluetooth" },
-    { id: "anchor", label: "Anchor", icon: "anchor" },
-    { id: "triggers", label: "Triggers", icon: "warning" },
-    { id: "profiles", label: "Profiles", icon: "tune" },
-  ];
-
-  const TABBAR_LINK_COLORS = {
-    textMaterial: "text-md-light-on-surface-variant dark:text-md-dark-on-surface-variant",
-    textActiveMaterial: "text-md-light-primary dark:text-md-dark-primary",
-    iconBgMaterial: "",
-    iconBgActiveMaterial: "",
-  };
 
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
@@ -319,109 +270,6 @@
   $: selectedWifiNetwork = availableWifiNetworks.find((network) => network.ssid === selectedWifiSsid) ?? null;
   $: firmwareVersionText = readFirmwareVersionFromState();
 
-  function isObject(value: unknown): value is JsonRecord {
-    return typeof value === "object" && value !== null && !Array.isArray(value);
-  }
-
-  function toFiniteNumber(value: unknown): number | null {
-    const asNumber = Number(value);
-    return Number.isFinite(asNumber) ? asNumber : null;
-  }
-
-  function clampNumber(value: number, minValue: number, maxValue: number): number {
-    return Math.min(maxValue, Math.max(minValue, value));
-  }
-
-  function parseNumberInput(raw: string, fallback: number, minValue: number, maxValue: number): number {
-    const parsed = Number(raw);
-    if (!Number.isFinite(parsed)) {
-      return fallback;
-    }
-    return clampNumber(parsed, minValue, maxValue);
-  }
-
-  function parseIntegerInput(raw: string, fallback: number, minValue: number, maxValue: number): number {
-    const parsed = Number.parseInt(raw, 10);
-    if (!Number.isFinite(parsed)) {
-      return fallback;
-    }
-    return clampNumber(parsed, minValue, maxValue);
-  }
-
-  function normalizeWifiSecurity(value: unknown): WifiSecurity {
-    const raw = typeof value === "string" ? value.trim().toLowerCase() : "";
-    if (raw === "open") {
-      return "open";
-    }
-    if (raw === "wpa3" || raw === "wpa3-psk" || raw === "wpa3_psk") {
-      return "wpa3";
-    }
-    if (raw === "wpa2" || raw === "wpa2-psk" || raw === "wpa2_psk") {
-      return "wpa2";
-    }
-    return "unknown";
-  }
-
-  function formatWifiSecurity(security: WifiSecurity): string {
-    if (security === "open") {
-      return "OPEN";
-    }
-    if (security === "wpa3") {
-      return "WPA3";
-    }
-    if (security === "wpa2") {
-      return "WPA2";
-    }
-    return "UNKNOWN";
-  }
-
-  function parseWifiScanNetworks(value: unknown): WifiScanNetwork[] {
-    if (!Array.isArray(value)) {
-      return [];
-    }
-
-    const strongestBySsid = new Map<string, WifiScanNetwork>();
-    for (const candidate of value) {
-      if (!isObject(candidate)) {
-        continue;
-      }
-
-      const ssid = typeof candidate.ssid === "string" ? candidate.ssid.trim() : "";
-      if (!ssid) {
-        continue;
-      }
-
-      const network: WifiScanNetwork = {
-        ssid,
-        security: normalizeWifiSecurity(candidate.security),
-        rssi: toFiniteNumber(candidate.rssi),
-        channel: toFiniteNumber(candidate.channel),
-        hidden: candidate.hidden === true,
-      };
-
-      const existing = strongestBySsid.get(ssid);
-      if (!existing) {
-        strongestBySsid.set(ssid, network);
-        continue;
-      }
-
-      const existingScore = existing.rssi ?? -999;
-      const candidateScore = network.rssi ?? -999;
-      if (candidateScore > existingScore) {
-        strongestBySsid.set(ssid, network);
-      }
-    }
-
-    return Array.from(strongestBySsid.values()).sort((a, b) => {
-      const rssiA = a.rssi ?? -999;
-      const rssiB = b.rssi ?? -999;
-      if (rssiA !== rssiB) {
-        return rssiB - rssiA;
-      }
-      return a.ssid.localeCompare(b.ssid);
-    });
-  }
-
   function applyWifiScanNetworks(networks: WifiScanNetwork[]): void {
     availableWifiNetworks = networks;
     if (!networks.some((network) => network.ssid === selectedWifiSsid)) {
@@ -479,25 +327,6 @@
     wifiScanStatusText = "Scan for available WLAN networks.";
   }
 
-  function parsePolygonPoints(raw: string): Array<{ lat: number; lon: number }> {
-    const lines = raw
-      .split(/\r?\n/g)
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0);
-    const points: Array<{ lat: number; lon: number }> = [];
-
-    for (const line of lines) {
-      const [rawLat, rawLon] = line.split(",").map((part) => part.trim());
-      const lat = Number(rawLat);
-      const lon = Number(rawLon);
-      if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
-        throw new Error(`invalid polygon point: "${line}"`);
-      }
-      points.push({ lat, lon });
-    }
-    return points;
-  }
-
   function nextConfigVersion(): number {
     const current = Number(loadStoredString(WIFI_CFG_VERSION_KEY, "0"));
     if (!Number.isInteger(current) || current < 0) {
@@ -508,47 +337,6 @@
 
   function setConfigVersion(version: number): void {
     saveStoredString(WIFI_CFG_VERSION_KEY, String(version));
-  }
-
-  function buildTrackGeoJson(points: TrackPoint[]): FeatureCollection<Geometry> {
-    const coordinates: Position[] = points.map((point) => [point.lon, point.lat]);
-    const features: Array<Feature<Geometry>> = [];
-
-    if (coordinates.length >= 2) {
-      features.push({
-        type: "Feature",
-        properties: { kind: "track" },
-        geometry: {
-          type: "LineString",
-          coordinates,
-        },
-      });
-    }
-
-    if (coordinates.length >= 1) {
-      features.push({
-        type: "Feature",
-        properties: { kind: "current" },
-        geometry: {
-          type: "Point",
-          coordinates: coordinates[coordinates.length - 1],
-        },
-      });
-    }
-
-    return {
-      type: "FeatureCollection",
-      features,
-    };
-  }
-
-  function maptilerIds(kind: "map" | "satellite"): { source: string; lineLayer: string; pointLayer: string } {
-    const prefix = kind === "map" ? "aw-map" : "aw-satellite";
-    return {
-      source: `${prefix}-track-source`,
-      lineLayer: `${prefix}-track-line`,
-      pointLayer: `${prefix}-track-point`,
-    };
   }
 
   function getMapTilerInstance(kind: "map" | "satellite"): MapTilerMap | null {
@@ -565,47 +353,6 @@
 
   function getMapTilerContainer(kind: "map" | "satellite"): HTMLDivElement | null {
     return kind === "map" ? maptilerMapContainer : maptilerSatelliteContainer;
-  }
-
-  function resolveMapTilerStyleUrl(styleRef: string): string {
-    const trimmed = styleRef.trim();
-    if (trimmed.startsWith("https://") || trimmed.startsWith("http://")) {
-      if (trimmed.includes("key=")) {
-        return trimmed;
-      }
-      const joiner = trimmed.includes("?") ? "&" : "?";
-      return `${trimmed}${joiner}key=${encodeURIComponent(MAPTILER_API_KEY)}`;
-    }
-    return `https://api.maptiler.com/maps/${encodeURIComponent(trimmed)}/style.json?key=${encodeURIComponent(MAPTILER_API_KEY)}`;
-  }
-
-  function getMapTilerAnchorPoint(): [number, number] {
-    const latestPoint = trackPoints[trackPoints.length - 1];
-    if (latestPoint) {
-      return [latestPoint.lon, latestPoint.lat];
-    }
-    return MAPTILER_DEFAULT_CENTER;
-  }
-
-  function buildMapTilerPanBounds(anchorPoint: [number, number], radiusM: number): [[number, number], [number, number]] {
-    const [anchorLon, anchorLat] = anchorPoint;
-    const latDelta = radiusM / 111_320;
-    const cosLat = Math.max(0.01, Math.cos((anchorLat * Math.PI) / 180));
-    const lonDelta = radiusM / (111_320 * cosLat);
-    return [
-      [anchorLon - lonDelta, anchorLat - latDelta],
-      [anchorLon + lonDelta, anchorLat + latDelta],
-    ];
-  }
-
-  function mapTilerMinZoomForArea(latitudeDeg: number, widthPx: number, heightPx: number, maxAreaM2: number): number {
-    const safeWidth = Math.max(1, widthPx);
-    const safeHeight = Math.max(1, heightPx);
-    const safeLatFactor = Math.max(0.01, Math.abs(Math.cos((latitudeDeg * Math.PI) / 180)));
-    const maxMetersPerPixel = Math.sqrt(maxAreaM2 / (safeWidth * safeHeight));
-    const denominator = WEB_MERCATOR_TILE_SIZE * Math.max(0.01, maxMetersPerPixel);
-    const zoom = Math.log2((WEB_MERCATOR_EARTH_CIRCUMFERENCE_M * safeLatFactor) / denominator);
-    return clampNumber(zoom, 0, MAPTILER_MAX_ZOOM);
   }
 
   function mapTilerLimitsFlag(kind: "map" | "satellite"): boolean {
@@ -627,7 +374,7 @@
 
     setMapTilerLimitsFlag(kind, true);
     try {
-      const anchorPoint = getMapTilerAnchorPoint();
+      const anchorPoint = getMapTilerAnchorPoint(trackPoints);
       const panBounds = buildMapTilerPanBounds(anchorPoint, MAPTILER_MAX_PAN_DISTANCE_M);
       const [[minLon, minLat], [maxLon, maxLat]] = panBounds;
 
@@ -729,7 +476,7 @@
 
     maptilerConfig.apiKey = MAPTILER_API_KEY;
     const styleRef = kind === "map" ? MAPTILER_STYLE_MAP : MAPTILER_STYLE_SATELLITE;
-    const style = resolveMapTilerStyleUrl(styleRef);
+    const style = resolveMapTilerStyleUrl(styleRef, MAPTILER_API_KEY);
     const map = new MapTilerMap({
       container,
       style,
@@ -855,22 +602,6 @@
     stateSourceText = `Source: ${text}`;
   }
 
-  function loadStoredString(key: string, fallback = ""): string {
-    try {
-      return localStorage.getItem(key) ?? fallback;
-    } catch {
-      return fallback;
-    }
-  }
-
-  function saveStoredString(key: string, value: string): void {
-    try {
-      localStorage.setItem(key, value);
-    } catch {
-      // Ignore storage failures in constrained contexts.
-    }
-  }
-
   function loadMode(): Mode {
     const saved = loadStoredString(MODE_KEY, MODE_FAKE);
     return saved === MODE_DEVICE ? MODE_DEVICE : MODE_FAKE;
@@ -878,10 +609,6 @@
 
   function getRelayBaseUrl(): string {
     return loadStoredString(RELAY_BASE_URL_KEY, DEFAULT_RELAY_BASE_URL).trim();
-  }
-
-  function normalizeRelayBaseUrl(raw: string): string {
-    return raw.trim().replace(/\/+$/, "");
   }
 
   function getBoatId(): string {
@@ -916,16 +643,6 @@
       saveStoredString(PHONE_ID_KEY, phoneId);
     }
     return phoneId;
-  }
-
-  function maskSecret(secret: string): string {
-    if (!secret) {
-      return "not stored";
-    }
-    if (secret.length <= 10) {
-      return "stored";
-    }
-    return `stored (${secret.slice(0, 6)}...${secret.slice(-4)})`;
   }
 
   function refreshIdentityUi(): void {
@@ -968,65 +685,6 @@
     dataAgeText = `${Math.max(0, Math.round(dataAgeS))}s`;
     depthText = `${depthM.toFixed(1)} m`;
     windText = `${windKn.toFixed(1)} kn`;
-  }
-
-  function deepMerge(baseValue: unknown, patchValue: JsonRecord): JsonRecord {
-    const base: JsonRecord = isObject(baseValue) ? { ...baseValue } : {};
-    for (const [key, value] of Object.entries(patchValue)) {
-      if (isObject(value) && isObject(base[key])) {
-        base[key] = deepMerge(base[key], value);
-      } else {
-        base[key] = value;
-      }
-    }
-    return base;
-  }
-
-  function assignPath(target: JsonRecord, path: string, value: unknown): boolean {
-    const parts = path.split(".");
-    if (parts.some((part) => !part)) {
-      return false;
-    }
-
-    let cursor: JsonRecord = target;
-    for (let i = 0; i < parts.length - 1; i += 1) {
-      const part = parts[i];
-      if (!isObject(cursor[part])) {
-        cursor[part] = {};
-      }
-      cursor = cursor[part] as JsonRecord;
-    }
-
-    const leaf = parts[parts.length - 1];
-    cursor[leaf] = isObject(value) ? normalizePatch(value) : value;
-    return true;
-  }
-
-  function normalizePatch(rawPatch: unknown): JsonRecord | null {
-    if (!isObject(rawPatch)) {
-      return null;
-    }
-
-    const out: JsonRecord = {};
-    for (const [key, value] of Object.entries(rawPatch)) {
-      if (key.includes(".")) {
-        if (!assignPath(out, key, value)) {
-          return null;
-        }
-        continue;
-      }
-
-      if (isObject(value)) {
-        const nested = normalizePatch(value);
-        if (!nested) {
-          return null;
-        }
-        out[key] = nested;
-      } else {
-        out[key] = value;
-      }
-    }
-    return out;
   }
 
   function applyStateSnapshot(snapshot: unknown, source: InboundSource): void {
@@ -1116,12 +774,6 @@
     setState("FAKE: MONITORING", "ok");
   }
 
-  function extractAckError(payload: JsonRecord): string {
-    const code = typeof payload.errorCode === "string" ? payload.errorCode : "ACK_FAILED";
-    const detail = typeof payload.errorDetail === "string" ? payload.errorDetail : "command rejected";
-    return `${code}: ${detail}`;
-  }
-
   function resolvePendingAck(payload: JsonRecord): void {
     const ackForMsgId = typeof payload.ackForMsgId === "string" ? payload.ackForMsgId : "";
     if (!ackForMsgId) {
@@ -1162,63 +814,6 @@
     });
   }
 
-  function makeMsgId(): string {
-    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-      return crypto.randomUUID().replace(/-/g, "").slice(0, 24);
-    }
-    return `${Date.now().toString(16)}${Math.random().toString(16).slice(2, 12)}`.slice(0, 24);
-  }
-
-  function fnv1a32(value: string): number {
-    let hash = 0x811c9dc5;
-    for (let i = 0; i < value.length; i += 1) {
-      hash ^= value.charCodeAt(i);
-      hash = Math.imul(hash, 0x01000193) >>> 0;
-    }
-    return hash >>> 0;
-  }
-
-  async function writeCharacteristic(
-    characteristic: BluetoothRemoteGATTCharacteristic,
-    bytes: Uint8Array,
-  ): Promise<void> {
-    const payload = new Uint8Array(bytes);
-    const candidate = characteristic as BluetoothRemoteGATTCharacteristic & {
-      writeValueWithoutResponse?: (value: BufferSource) => Promise<void>;
-    };
-
-    if (typeof candidate.writeValueWithoutResponse === "function") {
-      await candidate.writeValueWithoutResponse(payload);
-      return;
-    }
-
-    await characteristic.writeValue(payload);
-  }
-
-  async function writeChunked(
-    characteristic: BluetoothRemoteGATTCharacteristic,
-    msgId: string,
-    jsonText: string,
-  ): Promise<void> {
-    const bytes = encoder.encode(jsonText);
-    const partCount = Math.max(1, Math.ceil(bytes.length / BLE_CHUNK_MAX_PAYLOAD));
-    const msgId32 = fnv1a32(msgId);
-
-    for (let partIndex = 0; partIndex < partCount; partIndex += 1) {
-      const offset = partIndex * BLE_CHUNK_MAX_PAYLOAD;
-      const chunk = bytes.slice(offset, offset + BLE_CHUNK_MAX_PAYLOAD);
-      const frame = new Uint8Array(6 + chunk.length);
-      frame[0] = msgId32 & 0xff;
-      frame[1] = (msgId32 >>> 8) & 0xff;
-      frame[2] = (msgId32 >>> 16) & 0xff;
-      frame[3] = (msgId32 >>> 24) & 0xff;
-      frame[4] = partIndex & 0xff;
-      frame[5] = partCount & 0xff;
-      frame.set(chunk, 6);
-      await writeCharacteristic(characteristic, frame);
-    }
-  }
-
   function buildEnvelope(msgType: string, payload: JsonRecord, requiresAck = true): Envelope {
     return {
       ver: PROTOCOL_VERSION,
@@ -1243,7 +838,7 @@
     const ackPromise = requiresAck && envelope.msgId ? makeAckPromise(envelope.msgId) : null;
 
     try {
-      await writeChunked(ble.controlTx, envelope.msgId as string, raw);
+      await writeChunked(ble.controlTx, envelope.msgId as string, raw, encoder);
       logLine(`tx ${msgType} msgId=${envelope.msgId}`);
       if (!ackPromise) {
         return null;
@@ -1257,61 +852,6 @@
       }
       throw error;
     }
-  }
-
-  function dataViewToBytes(view: DataView): Uint8Array {
-    return new Uint8Array(view.buffer, view.byteOffset, view.byteLength).slice();
-  }
-
-  function safeParseJson(raw: string): JsonRecord | null {
-    try {
-      const parsed = JSON.parse(raw);
-      return isObject(parsed) ? parsed : null;
-    } catch {
-      return null;
-    }
-  }
-
-  function toTrackPoint(value: unknown): TrackPoint | null {
-    if (!isObject(value)) {
-      return null;
-    }
-
-    const lat = toFiniteNumber(value.lat);
-    const lon = toFiniteNumber(value.lon);
-    if (lat === null || lon === null) {
-      return null;
-    }
-
-    const ts = toFiniteNumber(value.ts) ?? Date.now();
-    const sogKn = toFiniteNumber(value.sogKn) ?? 0;
-    const cogDeg = toFiniteNumber(value.cogDeg) ?? 0;
-    const headingDeg = toFiniteNumber(value.headingDeg) ?? cogDeg;
-
-    return {
-      ts,
-      lat,
-      lon,
-      sogKn,
-      cogDeg: (cogDeg + 360) % 360,
-      headingDeg: (headingDeg + 360) % 360,
-    };
-  }
-
-  function parseTrackSnapshot(payload: JsonRecord): TrackPoint[] {
-    const rawPoints = payload.points;
-    if (!Array.isArray(rawPoints)) {
-      return [];
-    }
-
-    const out: TrackPoint[] = [];
-    for (const point of rawPoints) {
-      const parsed = toTrackPoint(point);
-      if (parsed) {
-        out.push(parsed);
-      }
-    }
-    return out;
   }
 
   async function refreshAuthState(): Promise<void> {
@@ -2310,7 +1850,7 @@
   {#if activeView === "config" && activeConfigView === "settings"}
     <SettingsHomePage
       configSections={CONFIG_SECTIONS}
-      onOpenConfig={(id) => openConfigView(id as ConfigSectionId)}
+      onOpenConfig={openConfigView}
     />
   {/if}
 
