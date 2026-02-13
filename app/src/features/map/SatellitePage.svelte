@@ -1,7 +1,6 @@
 <script lang="ts">
   export let hasMapTilerKey = false;
   export let maptilerStatusText = "Map not ready.";
-  export let trackStatusText = "No track yet";
   export let container: HTMLDivElement | null = null;
 </script>
 
@@ -11,5 +10,4 @@
   {:else}
     <div class="maptiler-missing">{maptilerStatusText}</div>
   {/if}
-  <div class="viz-overlay mono">Track: {trackStatusText}</div>
 </section>

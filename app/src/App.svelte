@@ -99,11 +99,9 @@
   let stateSourceText = $state("Source: --");
   let connectionSelectionStatusText = $state("Not connected");
   let configuredWifiStatusText = $state("Connecting");
-  let trackStatusText = $state("No track yet");
   let currentLatText = $state("--");
   let currentLonText = $state("--");
   let currentSogText = $state("--");
-  let currentCogText = $state("--");
   let currentHeadingText = $state("--");
   let maptilerStatusText = $state("Map ready state pending.");
   let trackPoints = $state<TrackPoint[]>([]);
@@ -115,6 +113,11 @@
   let anchorActionInFlight = $state(false);
   let anchorRiseSlideOpen = $state(false);
   let anchorRiseSlideValue = $state(0);
+  let anchorMoveMode = $state(false);
+  let anchorMoveInFlight = $state(false);
+  let anchorMoveStartPosition = $state<GeoPoint | null>(null);
+  let anchorMoveDraftPosition = $state<GeoPoint | null>(null);
+  let anchorMoveHelperRadiusM = $state(0);
 
   let maptilerMapContainer = $state<HTMLDivElement | null>(null);
   let maptilerSatelliteContainer = $state<HTMLDivElement | null>(null);
@@ -132,11 +135,9 @@
     statePillText = appState.summary.statePillText;
     statePillClass = appState.summary.statePillClass;
     stateSourceText = appState.summary.stateSourceText;
-    trackStatusText = appState.track.statusText;
     currentLatText = appState.track.currentLatText;
     currentLonText = appState.track.currentLonText;
     currentSogText = appState.track.currentSogText;
-    currentCogText = appState.track.currentCogText;
     currentHeadingText = appState.track.currentHeadingText;
     maptilerStatusText = appState.maptilerStatusText;
     trackPoints = appState.track.points;
@@ -234,11 +235,12 @@
     const anchorStatus = readAnchorStatus(appState.latestState);
     anchorState = anchorStatus.state;
     anchorPosition = anchorStatus.position;
-    anchorPositionText = anchorStatus.position
-      ? `${anchorStatus.position.lat.toFixed(5)}, ${anchorStatus.position.lon.toFixed(5)}`
+    const visibleAnchorPosition = getVisualAnchorPosition(anchorStatus.position);
+    anchorPositionText = visibleAnchorPosition
+      ? `${visibleAnchorPosition.lat.toFixed(5)}, ${visibleAnchorPosition.lon.toFixed(5)}`
       : "--";
-    if (anchorStatus.position && currentGps) {
-      const { distanceM, bearingDeg } = geoDeltaMeters(anchorStatus.position, currentGps);
+    if (visibleAnchorPosition && currentGps) {
+      const { distanceM, bearingDeg } = geoDeltaMeters(visibleAnchorPosition, currentGps);
       anchorDistanceText = `${distanceM.toFixed(1)} m`;
       anchorBearingText = `${bearingDeg.toFixed(0)} deg`;
     } else {
@@ -261,9 +263,15 @@
   });
 
   $effect(() => {
-    if (!shouldShowAnchorActionButton() || anchorState !== "down") {
+    if (!shouldShowAnchorActionButton() || anchorState !== "down" || anchorMoveMode) {
       anchorRiseSlideOpen = false;
       anchorRiseSlideValue = 0;
+    }
+  });
+
+  $effect(() => {
+    if (anchorMoveMode && !canShowAnchorMoveButton()) {
+      resetAnchorMoveSession();
     }
   });
 
@@ -319,10 +327,11 @@
         map: maptilerMap,
         kind: "map",
         getTrackPoints: () => trackPoints,
-        getAnchorPosition: () => anchorPosition,
-        onMoveAnchor: (lat, lon) => {
-          void requestAnchorMove(lat, lon);
-        },
+        getAnchorPosition: () => getVisualAnchorPosition(anchorPosition),
+        showAnchorHelperCircle: anchorMoveMode,
+        anchorHelperRadiusM: anchorMoveHelperRadiusM,
+        moveMode: anchorMoveMode,
+        onPreviewAnchorMove: previewAnchorMoveFromViewport,
         maxPanDistanceM: MAPTILER_MAX_PAN_DISTANCE_M,
         maxVisibleAreaM2: MAPTILER_MAX_VISIBLE_AREA_M2,
       });
@@ -332,10 +341,11 @@
         map: maptilerSatellite,
         kind: "satellite",
         getTrackPoints: () => trackPoints,
-        getAnchorPosition: () => anchorPosition,
-        onMoveAnchor: (lat, lon) => {
-          void requestAnchorMove(lat, lon);
-        },
+        getAnchorPosition: () => getVisualAnchorPosition(anchorPosition),
+        showAnchorHelperCircle: anchorMoveMode,
+        anchorHelperRadiusM: anchorMoveHelperRadiusM,
+        moveMode: anchorMoveMode,
+        onPreviewAnchorMove: previewAnchorMoveFromViewport,
         maxPanDistanceM: MAPTILER_MAX_PAN_DISTANCE_M,
         maxVisibleAreaM2: MAPTILER_MAX_VISIBLE_AREA_M2,
       });
@@ -360,10 +370,11 @@
       existingMap: getMapTilerInstance(kind),
       container: kind === "map" ? maptilerMapContainer : maptilerSatelliteContainer,
       getTrackPoints: () => trackPoints,
-      getAnchorPosition: () => anchorPosition,
-      onMoveAnchor: (lat, lon) => {
-        void requestAnchorMove(lat, lon);
-      },
+      getAnchorPosition: () => getVisualAnchorPosition(anchorPosition),
+      getShowAnchorHelperCircle: () => anchorMoveMode,
+      getAnchorHelperRadiusM: () => anchorMoveHelperRadiusM,
+      getMoveMode: () => anchorMoveMode,
+      onPreviewAnchorMove: previewAnchorMoveFromViewport,
       apiKey: MAPTILER_API_KEY,
       defaultCenter: MAPTILER_DEFAULT_CENTER,
       defaultZoom: MAPTILER_DEFAULT_ZOOM,
@@ -507,6 +518,21 @@
     return isOperationalDataView() && connection.activeConnectionConnected && connection.hasConfiguredDevice;
   }
 
+  function isAnchorMoveViewActive(): boolean {
+    return navigation.activeView === "map" || navigation.activeView === "satellite" || navigation.activeView === "radar";
+  }
+
+  function canShowAnchorMoveButton(): boolean {
+    return shouldShowAnchorActionButton() && isAnchorMoveViewActive() && Boolean(anchorPosition);
+  }
+
+  function getVisualAnchorPosition(liveAnchorPosition: GeoPoint | null = anchorPosition): GeoPoint | null {
+    if (!anchorMoveMode) {
+      return liveAnchorPosition;
+    }
+    return anchorMoveDraftPosition ?? liveAnchorPosition;
+  }
+
   async function triggerAnchorRise(): Promise<void> {
     anchorActionInFlight = true;
     anchorRiseSlideOpen = false;
@@ -522,7 +548,7 @@
   }
 
   function handleAnchorActionClick(): void {
-    if (anchorActionInFlight) {
+    if (anchorActionInFlight || anchorMoveMode || anchorMoveInFlight) {
       return;
     }
     if (anchorState === "up") {
@@ -546,8 +572,64 @@
     }
   }
 
-  async function requestAnchorMove(lat: number, lon: number): Promise<void> {
-    await runAction("move anchor", () => moveAnchorToPosition(lat, lon));
+  function startAnchorMove(): void {
+    if (!canShowAnchorMoveButton() || !anchorPosition) {
+      return;
+    }
+    const currentGps = readCurrentGpsPosition(appState.latestState);
+    anchorMoveMode = true;
+    anchorMoveStartPosition = anchorPosition;
+    anchorMoveDraftPosition = anchorPosition;
+    anchorMoveHelperRadiusM = currentGps ? geoDeltaMeters(anchorPosition, currentGps).distanceM : 0;
+    anchorRiseSlideOpen = false;
+    anchorRiseSlideValue = 0;
+  }
+
+  function resetAnchorMoveSession(): void {
+    anchorMoveMode = false;
+    anchorMoveInFlight = false;
+    anchorMoveStartPosition = null;
+    anchorMoveDraftPosition = null;
+    anchorMoveHelperRadiusM = 0;
+  }
+
+  function cancelAnchorMove(): void {
+    resetAnchorMoveSession();
+  }
+
+  function previewAnchorMoveFromViewport(lat: number, lon: number): void {
+    if (!anchorMoveMode) {
+      return;
+    }
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+      return;
+    }
+    if (
+      anchorMoveDraftPosition
+      && Math.abs(anchorMoveDraftPosition.lat - lat) < 0.0000002
+      && Math.abs(anchorMoveDraftPosition.lon - lon) < 0.0000002
+    ) {
+      return;
+    }
+    anchorMoveDraftPosition = { lat, lon };
+  }
+
+  async function confirmAnchorMove(): Promise<void> {
+    if (!anchorMoveMode || !anchorMoveDraftPosition || anchorMoveInFlight) {
+      return;
+    }
+    const draft = anchorMoveDraftPosition;
+    if (
+      anchorMoveStartPosition
+      && Math.abs(anchorMoveStartPosition.lat - draft.lat) < 0.0000002
+      && Math.abs(anchorMoveStartPosition.lon - draft.lon) < 0.0000002
+    ) {
+      resetAnchorMoveSession();
+      return;
+    }
+    anchorMoveInFlight = true;
+    await runAction("move anchor", () => moveAnchorToPosition(draft.lat, draft.lon));
+    resetAnchorMoveSession();
   }
 
   onMount(() => {
@@ -655,7 +737,6 @@
     <SatellitePage
       hasMapTilerKey={Boolean(MAPTILER_API_KEY)}
       maptilerStatusText={maptilerStatusText}
-      trackStatusText={trackStatusText}
       bind:container={maptilerSatelliteContainer}
     />
   {/if}
@@ -664,10 +745,6 @@
     <MapPage
       hasMapTilerKey={Boolean(MAPTILER_API_KEY)}
       maptilerStatusText={maptilerStatusText}
-      currentLatText={currentLatText}
-      currentLonText={currentLonText}
-      currentSogText={currentSogText}
-      currentCogText={currentCogText}
       bind:container={maptilerMapContainer}
     />
   {/if}
@@ -675,9 +752,9 @@
   {#if navigation.activeView === "radar"}
     <RadarPage
       trackPoints={trackPoints}
-      anchorPosition={anchorPosition}
-      currentHeadingText={currentHeadingText}
-      onMoveAnchor={(lat: number, lon: number) => void requestAnchorMove(lat, lon)}
+      anchorPosition={getVisualAnchorPosition(anchorPosition)}
+      moveMode={anchorMoveMode}
+      onPreviewAnchorMove={previewAnchorMoveFromViewport}
     />
   {/if}
 
@@ -752,8 +829,51 @@
         <span class={`app-state-led-dot ${connection.linkLedState}`} aria-hidden="true"></span>
       </button>
     {/if}
+    {#if navigation.activeView === "map" || navigation.activeView === "satellite" || navigation.activeView === "radar"}
+      <div class="shared-viz-overlay mono" aria-live="polite">
+        <div>DIST {anchorDistanceText === "--" ? "--" : anchorDistanceText.replace(" ", "")}</div>
+        <div>BEAR {anchorBearingText === "--" ? "--" : anchorBearingText.replace(" deg", "")}</div>
+      </div>
+    {/if}
     {#if shouldShowAnchorActionButton()}
       <div class="anchor-action-stack">
+        {#if canShowAnchorMoveButton()}
+          {#if anchorMoveMode}
+            <div class="anchor-move-actions">
+              <button
+                type="button"
+                class="anchor-move-button cancel"
+                onclick={cancelAnchorMove}
+                disabled={anchorMoveInFlight}
+                aria-label="Cancel anchor move"
+                title="Cancel anchor move"
+              >
+                <span class="material-symbols-rounded anchor-move-icon" aria-hidden="true">close</span>
+              </button>
+              <button
+                type="button"
+                class="anchor-move-button confirm"
+                onclick={() => void confirmAnchorMove()}
+                disabled={anchorMoveInFlight}
+                aria-label="Confirm anchor move"
+                title="Confirm anchor move"
+              >
+                <span class="material-symbols-rounded anchor-move-icon" aria-hidden="true">check</span>
+              </button>
+            </div>
+          {:else}
+            <button
+              type="button"
+              class="anchor-move-button start"
+              onclick={startAnchorMove}
+              disabled={anchorActionInFlight}
+              aria-label="Start anchor move mode"
+              title="Start anchor move mode"
+            >
+              <span class="material-symbols-rounded anchor-move-icon" aria-hidden="true">edit_location_alt</span>
+            </button>
+          {/if}
+        {/if}
         {#if anchorRiseSlideOpen && anchorState === "down"}
           <div class="anchor-rise-slider-card">
             <div class="anchor-rise-slider-title">Slide to confirm anchor rise</div>
@@ -775,7 +895,7 @@
           type="button"
           class={`anchor-action-button ${anchorState === "up" ? "up" : "down"}`}
           onclick={handleAnchorActionClick}
-          disabled={anchorActionInFlight}
+          disabled={anchorActionInFlight || anchorMoveMode || anchorMoveInFlight}
           aria-label={anchorState === "up" ? "Drop anchor at current position" : "Raise anchor"}
           title={anchorState === "up" ? "Drop anchor at current position" : "Raise anchor"}
         >

@@ -34,7 +34,7 @@ import {
   hasCloudCredentialsConfigured,
   hasConfiguredDevice,
 } from "../services/connectivity-derive";
-import { deriveTelemetry } from "../services/state-derive";
+import { deriveTelemetry, readAnchorStatus } from "../services/state-derive";
 import { deriveTrackSummary, deriveRadarProjection } from "../services/track-derive";
 
 export interface BleUiState {
@@ -411,6 +411,23 @@ function applyTrackDerived(points: TrackPoint[]): void {
   appState.track.statusText = trackSummary.statusText;
 }
 
+function applyLiveTrackPoint(point: TrackPoint | null): void {
+  if (!point) {
+    appState.track.currentLatText = "--";
+    appState.track.currentLonText = "--";
+    appState.track.currentSogText = "--";
+    appState.track.currentCogText = "--";
+    appState.track.currentHeadingText = "--";
+    return;
+  }
+
+  appState.track.currentLatText = point.lat.toFixed(5);
+  appState.track.currentLonText = point.lon.toFixed(5);
+  appState.track.currentSogText = `${point.sogKn.toFixed(2)} kn`;
+  appState.track.currentCogText = `${point.cogDeg.toFixed(0)} deg`;
+  appState.track.currentHeadingText = `${point.headingDeg.toFixed(0)} deg`;
+}
+
 export function appendTrackPoint(point: TrackPoint): void {
   const previous = appState.track.points[appState.track.points.length - 1];
   if (previous && Math.abs(previous.lat - point.lat) < 0.000001 && Math.abs(previous.lon - point.lon) < 0.000001) {
@@ -428,7 +445,9 @@ export function replaceTrackPoints(points: TrackPoint[]): void {
 export function renderTelemetryFromLatestState(): void {
   const telemetry = deriveTelemetry(appState.latestState, Date.now());
   setTelemetry(telemetry.gpsAgeS, telemetry.dataAgeS, telemetry.depthM, telemetry.windKn);
-  if (telemetry.trackPoint) {
+  applyLiveTrackPoint(telemetry.trackPoint ?? null);
+  const anchorStatus = readAnchorStatus(appState.latestState);
+  if (telemetry.trackPoint && anchorStatus.state === "down") {
     appendTrackPoint(telemetry.trackPoint);
   }
 }

@@ -3,7 +3,8 @@
   import { clampNumber } from "../../services/data-utils";
   import { geoDeltaMeters, offsetGeoPoint, type GeoPoint } from "../../services/geo-nav";
 
-  const RANGE_OPTIONS_M = [50, 100, 200, 250] as const;
+  const RANGE_OPTIONS_M = [50, 100, 150, 200, 250] as const;
+  const RING_DISTANCE_OPTIONS_M = [5, 10, 20, 25, 50] as const;
   const VIEW_SIZE = 240;
   const VIEW_CENTER = VIEW_SIZE / 2;
   const VIEW_RADIUS = 108;
@@ -11,125 +12,115 @@
   interface Props {
     trackPoints?: TrackPoint[];
     anchorPosition?: GeoPoint | null;
-    currentHeadingText?: string;
-    onMoveAnchor?: (lat: number, lon: number) => void;
+    moveMode?: boolean;
+    onPreviewAnchorMove?: (lat: number, lon: number) => void;
   }
 
   let {
     trackPoints = [],
     anchorPosition = null,
-    currentHeadingText = "--",
-    onMoveAnchor = () => {},
+    moveMode = false,
+    onPreviewAnchorMove = () => {},
   }: Props = $props();
 
   let rangeIndex = $state(1);
   let hostElement = $state<HTMLElement | null>(null);
-  let pendingAnchorPosition = $state<GeoPoint | null>(null);
 
   const pointerPositions = new Map<number, { x: number; y: number }>();
   let pinchStartDistance = 0;
   let pinchStartRangeIndex = 1;
-  let draggingAnchorPointerId: number | null = null;
+  let directionMode = $state<"boat-up" | "north-up">("boat-up");
+  let moveDragPointerId: number | null = null;
+  let moveDragStartViewPoint: { x: number; y: number } | null = null;
+  let moveDragStartAnchor: GeoPoint | null = null;
 
-  const currentPosition = $derived.by<GeoPoint | null>(() => {
+  const radarCenter = $derived.by<GeoPoint | null>(() => anchorPosition ?? null);
+  const headingDeg = $derived.by<number>(() => {
     const latest = trackPoints[trackPoints.length - 1];
-    if (!latest) {
-      return null;
+    if (!latest || !Number.isFinite(latest.headingDeg)) {
+      return 0;
     }
-    return { lat: latest.lat, lon: latest.lon };
+    return (latest.headingDeg % 360 + 360) % 360;
   });
 
-  const radarCenterPosition = $derived.by<GeoPoint | null>(() => {
-    if (currentPosition) {
-      return currentPosition;
-    }
-    if (anchorPosition) {
-      return anchorPosition;
-    }
-    return null;
-  });
-
-  const effectiveAnchorPosition = $derived.by<GeoPoint | null>(() => pendingAnchorPosition || anchorPosition);
   const currentRangeM = $derived(RANGE_OPTIONS_M[rangeIndex]);
-  const ringDistanceM = $derived(currentRangeM / 10);
+
+  const ringDistanceM = $derived.by<number>(() => {
+    const targetSpacing = currentRangeM / 10;
+    let winner: number = RING_DISTANCE_OPTIONS_M[0];
+    let bestError = Number.POSITIVE_INFINITY;
+    for (const option of RING_DISTANCE_OPTIONS_M) {
+      const error = Math.abs(option - targetSpacing);
+      if (error < bestError) {
+        bestError = error;
+        winner = option;
+      }
+    }
+    return winner;
+  });
+
+  const ringCount = $derived(Math.max(1, Math.floor(currentRangeM / ringDistanceM)));
+
+  const ringAnnotations = $derived.by<Array<{ radiusPx: number; label: string }>>(() => {
+    const out: Array<{ radiusPx: number; label: string }> = [];
+    for (let index = 1; index <= ringCount; index += 1) {
+      const distanceM = index * ringDistanceM;
+      out.push({
+        radiusPx: (distanceM / currentRangeM) * VIEW_RADIUS,
+        label: `${distanceM} m`,
+      });
+    }
+    return out;
+  });
 
   const projectedTrack = $derived.by<Array<{ x: number; y: number }>>(() => {
-    if (!radarCenterPosition) {
+    if (!radarCenter) {
       return [];
     }
     const points: Array<{ x: number; y: number }> = [];
+    const headingRad = (headingDeg * Math.PI) / 180;
+    const cosHeading = Math.cos(headingRad);
+    const sinHeading = Math.sin(headingRad);
+
     for (const point of trackPoints) {
-      const delta = geoDeltaMeters(radarCenterPosition, { lat: point.lat, lon: point.lon });
-      points.push(projectMetersToView(delta.eastMeters, delta.northMeters, currentRangeM));
+      const delta = geoDeltaMeters(radarCenter, { lat: point.lat, lon: point.lon });
+      let eastMeters = delta.eastMeters;
+      let northMeters = delta.northMeters;
+
+      if (directionMode === "boat-up") {
+        const rotatedEast = eastMeters * cosHeading - northMeters * sinHeading;
+        const rotatedNorth = eastMeters * sinHeading + northMeters * cosHeading;
+        eastMeters = rotatedEast;
+        northMeters = rotatedNorth;
+      }
+
+      const rawX = (eastMeters / currentRangeM) * VIEW_RADIUS;
+      const rawY = (northMeters / currentRangeM) * VIEW_RADIUS;
+      const rawDistancePx = Math.sqrt(rawX * rawX + rawY * rawY);
+      const factor = rawDistancePx <= VIEW_RADIUS ? 1 : (VIEW_RADIUS / Math.max(rawDistancePx, 0.0001));
+      points.push({
+        x: VIEW_CENTER + (rawX * factor),
+        y: VIEW_CENTER - (rawY * factor),
+      });
     }
     return points;
   });
 
   const trackPolyline = $derived(projectedTrack.map((point) => `${point.x.toFixed(2)},${point.y.toFixed(2)}`).join(" "));
 
-  const anchorProjection = $derived.by<{
-    x: number;
-    y: number;
-    displayDistanceM: number;
-    offscreen: boolean;
-  } | null>(() => {
-    if (!radarCenterPosition || !effectiveAnchorPosition) {
+  function toViewPoint(event: PointerEvent): { x: number; y: number } | null {
+    if (!hostElement) {
       return null;
     }
-    const delta = geoDeltaMeters(radarCenterPosition, effectiveAnchorPosition);
-    const rawScale = VIEW_RADIUS / Math.max(1, currentRangeM);
-    const rawX = delta.eastMeters * rawScale;
-    const rawY = delta.northMeters * rawScale;
-    const rawDistancePx = Math.sqrt(rawX * rawX + rawY * rawY);
-    if (rawDistancePx <= VIEW_RADIUS) {
-      return {
-        x: VIEW_CENTER + rawX,
-        y: VIEW_CENTER - rawY,
-        displayDistanceM: delta.distanceM,
-        offscreen: false,
-      };
+    const rect = hostElement.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      return null;
     }
-    const factor = VIEW_RADIUS / Math.max(0.0001, rawDistancePx);
+    const px = clampNumber(event.clientX - rect.left, 0, rect.width);
+    const py = clampNumber(event.clientY - rect.top, 0, rect.height);
     return {
-      x: VIEW_CENTER + (rawX * factor),
-      y: VIEW_CENTER - (rawY * factor),
-      displayDistanceM: delta.distanceM,
-      offscreen: true,
-    };
-  });
-
-  const ringAnnotations = $derived.by<Array<{ radiusPx: number; label: string }>>(() => {
-    const out: Array<{ radiusPx: number; label: string }> = [];
-    for (let i = 1; i <= 10; i += 1) {
-      out.push({
-        radiusPx: (i / 10) * VIEW_RADIUS,
-        label: `${Math.round(i * ringDistanceM)} m`,
-      });
-    }
-    return out;
-  });
-
-  const anchorDistanceText = $derived(anchorProjection ? `${anchorProjection.displayDistanceM.toFixed(1)} m` : "--");
-
-  $effect(() => {
-    if (!anchorPosition && !pendingAnchorPosition) {
-      draggingAnchorPointerId = null;
-      return;
-    }
-    if (anchorPosition && pendingAnchorPosition) {
-      const same = Math.abs(anchorPosition.lat - pendingAnchorPosition.lat) < 0.0000001
-        && Math.abs(anchorPosition.lon - pendingAnchorPosition.lon) < 0.0000001;
-      if (same) {
-        pendingAnchorPosition = null;
-      }
-    }
-  });
-
-  function projectMetersToView(eastMeters: number, northMeters: number, rangeM: number): { x: number; y: number } {
-    const scale = VIEW_RADIUS / Math.max(1, rangeM);
-    return {
-      x: VIEW_CENTER + (eastMeters * scale),
-      y: VIEW_CENTER - (northMeters * scale),
+      x: (px / rect.width) * VIEW_SIZE,
+      y: (py / rect.height) * VIEW_SIZE,
     };
   }
 
@@ -161,7 +152,7 @@
   }
 
   function updatePinchZoom(): void {
-    if (draggingAnchorPointerId !== null || pointerPositions.size !== 2 || pinchStartDistance <= 0) {
+    if (pointerPositions.size !== 2 || pinchStartDistance <= 0) {
       return;
     }
     const distance = pointerDistance();
@@ -183,7 +174,21 @@
     if (pointerPositions.size === 2) {
       pinchStartDistance = pointerDistance();
       pinchStartRangeIndex = rangeIndex;
+      moveDragPointerId = null;
+      return;
     }
+
+    if (!moveMode || !anchorPosition || pointerPositions.size !== 1) {
+      return;
+    }
+
+    const point = toViewPoint(event);
+    if (!point) {
+      return;
+    }
+    moveDragPointerId = event.pointerId;
+    moveDragStartViewPoint = point;
+    moveDragStartAnchor = anchorPosition;
   }
 
   function onPointerMove(event: PointerEvent): void {
@@ -191,7 +196,41 @@
       return;
     }
     pointerPositions.set(event.pointerId, { x: event.clientX, y: event.clientY });
-    updatePinchZoom();
+
+    if (pointerPositions.size === 2) {
+      updatePinchZoom();
+      return;
+    }
+
+    if (moveDragPointerId !== event.pointerId || !moveDragStartViewPoint || !moveDragStartAnchor) {
+      return;
+    }
+    const point = toViewPoint(event);
+    if (!point) {
+      return;
+    }
+
+    const deltaX = point.x - moveDragStartViewPoint.x;
+    const deltaY = point.y - moveDragStartViewPoint.y;
+    const eastMetersDisplay = (deltaX / VIEW_RADIUS) * currentRangeM;
+    const northMetersDisplay = (-deltaY / VIEW_RADIUS) * currentRangeM;
+
+    let eastMeters = eastMetersDisplay;
+    let northMeters = northMetersDisplay;
+    if (directionMode === "boat-up") {
+      const headingRad = (headingDeg * Math.PI) / 180;
+      const cosHeading = Math.cos(headingRad);
+      const sinHeading = Math.sin(headingRad);
+      eastMeters = eastMetersDisplay * cosHeading + northMetersDisplay * sinHeading;
+      northMeters = -eastMetersDisplay * sinHeading + northMetersDisplay * cosHeading;
+    }
+
+    const nextAnchor = offsetGeoPoint(moveDragStartAnchor, -northMeters, -eastMeters);
+    onPreviewAnchorMove(nextAnchor.lat, nextAnchor.lon);
+  }
+
+  function toggleDirectionMode(): void {
+    directionMode = directionMode === "boat-up" ? "north-up" : "boat-up";
   }
 
   function onPointerUp(event: PointerEvent): void {
@@ -199,140 +238,65 @@
     if (pointerPositions.size < 2) {
       pinchStartDistance = 0;
     }
-
-    if (draggingAnchorPointerId !== event.pointerId) {
-      return;
+    if (moveDragPointerId === event.pointerId) {
+      moveDragPointerId = null;
+      moveDragStartViewPoint = null;
+      moveDragStartAnchor = null;
     }
-    draggingAnchorPointerId = null;
-    if (!pendingAnchorPosition) {
-      return;
-    }
-    onMoveAnchor(pendingAnchorPosition.lat, pendingAnchorPosition.lon);
-  }
-
-  function mapClientPointToView(event: PointerEvent): { x: number; y: number } | null {
-    if (!hostElement) {
-      return null;
-    }
-    const rect = hostElement.getBoundingClientRect();
-    if (rect.width <= 0 || rect.height <= 0) {
-      return null;
-    }
-    const px = clampNumber(event.clientX - rect.left, 0, rect.width);
-    const py = clampNumber(event.clientY - rect.top, 0, rect.height);
-    const scaleX = VIEW_SIZE / rect.width;
-    const scaleY = VIEW_SIZE / rect.height;
-    return {
-      x: px * scaleX,
-      y: py * scaleY,
-    };
-  }
-
-  function startAnchorDrag(event: PointerEvent): void {
-    if (!radarCenterPosition || !effectiveAnchorPosition) {
-      return;
-    }
-    event.preventDefault();
-    event.stopPropagation();
-    draggingAnchorPointerId = event.pointerId;
-    pendingAnchorPosition = effectiveAnchorPosition;
-  }
-
-  function tryStartAnchorDrag(event: PointerEvent): void {
-    if (!anchorProjection) {
-      return;
-    }
-    const mapped = mapClientPointToView(event);
-    if (!mapped) {
-      return;
-    }
-    const dx = mapped.x - anchorProjection.x;
-    const dy = mapped.y - anchorProjection.y;
-    if ((dx * dx) + (dy * dy) <= 120) {
-      startAnchorDrag(event);
-    }
-  }
-
-  function dragAnchor(event: PointerEvent): void {
-    if (draggingAnchorPointerId !== event.pointerId || !radarCenterPosition) {
-      return;
-    }
-    const mapped = mapClientPointToView(event);
-    if (!mapped) {
-      return;
-    }
-
-    const dx = mapped.x - VIEW_CENTER;
-    const dy = VIEW_CENTER - mapped.y;
-    const distancePx = Math.sqrt(dx * dx + dy * dy);
-    const clampedDistancePx = Math.min(VIEW_RADIUS, distancePx);
-    const factor = distancePx <= 0.0001 ? 0 : (clampedDistancePx / distancePx);
-    const clampedDx = dx * factor;
-    const clampedDy = dy * factor;
-
-    const eastMeters = (clampedDx / VIEW_RADIUS) * currentRangeM;
-    const northMeters = (clampedDy / VIEW_RADIUS) * currentRangeM;
-    pendingAnchorPosition = offsetGeoPoint(radarCenterPosition, northMeters, eastMeters);
   }
 </script>
 
-<section
-  class="viz-screen radar-screen"
-  role="application"
-  aria-label="Radar view"
-  bind:this={hostElement}
-  onwheel={onWheel}
-  onpointerdown={(event) => {
-    onPointerDown(event);
-    tryStartAnchorDrag(event);
-  }}
-  onpointermove={(event) => {
-    onPointerMove(event);
-    dragAnchor(event);
-  }}
-  onpointerup={onPointerUp}
-  onpointercancel={onPointerUp}
-  onpointerleave={onPointerUp}
->
-  <svg class="radar-fill" viewBox={`0 0 ${VIEW_SIZE} ${VIEW_SIZE}`} role="img" aria-label="Radar plot">
-    <defs>
-      <clipPath id="radarClip">
-        <circle cx={VIEW_CENTER} cy={VIEW_CENTER} r={VIEW_RADIUS} />
-      </clipPath>
-    </defs>
+<section class="viz-screen radar-screen" role="application" aria-label="Radar view" bind:this={hostElement}>
+  {#if anchorPosition}
+    <div
+      class="radar-fill-wrap"
+      role="application"
+      aria-label="Interactive radar plot"
+      onwheel={onWheel}
+      onpointerdown={onPointerDown}
+      onpointermove={onPointerMove}
+      onpointerup={onPointerUp}
+      onpointercancel={onPointerUp}
+      onpointerleave={onPointerUp}
+    >
+      <svg class="radar-fill" viewBox={`0 0 ${VIEW_SIZE} ${VIEW_SIZE}`} role="img" aria-label="Radar plot">
+        <defs>
+          <clipPath id="radarClip">
+            <circle cx={VIEW_CENTER} cy={VIEW_CENTER} r={VIEW_RADIUS} />
+          </clipPath>
+        </defs>
 
-    {#each ringAnnotations as ring}
-      <circle cx={VIEW_CENTER} cy={VIEW_CENTER} r={ring.radiusPx} class={`radar-ring ${ring.radiusPx === VIEW_RADIUS ? "outer" : ""}`} />
-      <text x={VIEW_CENTER + ring.radiusPx - 1} y={VIEW_CENTER - 3} class="radar-ring-label">{ring.label}</text>
-    {/each}
+        {#each ringAnnotations as ring}
+          <circle cx={VIEW_CENTER} cy={VIEW_CENTER} r={ring.radiusPx} class={`radar-ring ${ring.radiusPx >= VIEW_RADIUS ? "outer" : ""}`} />
+          <text x={VIEW_CENTER + ring.radiusPx - 1} y={VIEW_CENTER - 3} class="radar-ring-label">{ring.label}</text>
+        {/each}
 
-    <line x1={VIEW_CENTER} y1={VIEW_CENTER - VIEW_RADIUS} x2={VIEW_CENTER} y2={VIEW_CENTER + VIEW_RADIUS} class="radar-axis" />
-    <line x1={VIEW_CENTER - VIEW_RADIUS} y1={VIEW_CENTER} x2={VIEW_CENTER + VIEW_RADIUS} y2={VIEW_CENTER} class="radar-axis" />
+        <line x1={VIEW_CENTER} y1={VIEW_CENTER - VIEW_RADIUS} x2={VIEW_CENTER} y2={VIEW_CENTER + VIEW_RADIUS} class="radar-axis" />
+        <line x1={VIEW_CENTER - VIEW_RADIUS} y1={VIEW_CENTER} x2={VIEW_CENTER + VIEW_RADIUS} y2={VIEW_CENTER} class="radar-axis" />
 
-    <g clip-path="url(#radarClip)">
-      {#if projectedTrack.length >= 2}
-        <polyline points={trackPolyline} class="radar-track-line" />
-      {/if}
-    </g>
+        <g clip-path="url(#radarClip)">
+          {#if projectedTrack.length >= 2}
+            <polyline points={trackPolyline} class="radar-track-line" />
+          {/if}
+        </g>
 
-    <circle cx={VIEW_CENTER} cy={VIEW_CENTER} r="4.2" class="radar-current" />
+        <circle cx={VIEW_CENTER} cy={VIEW_CENTER} r="5.4" class={`radar-anchor-center ${moveMode ? "move-mode" : ""}`} />
+      </svg>
+    </div>
 
-    {#if anchorProjection}
-      <circle
-        cx={anchorProjection.x}
-        cy={anchorProjection.y}
-        r="6.2"
-        class={`radar-anchor ${anchorProjection.offscreen ? "offscreen" : ""}`}
-      />
-    {/if}
-  </svg>
-
-  <div class="radar-controls">
-    <button type="button" class="radar-zoom-button" onclick={zoomIn} disabled={rangeIndex === 0} aria-label="Zoom in radar">+</button>
-    <button type="button" class="radar-zoom-button" onclick={zoomOut} disabled={rangeIndex === RANGE_OPTIONS_M.length - 1} aria-label="Zoom out radar">-</button>
-  </div>
-
-  <div class="viz-overlay mono">
-    Range {currentRangeM} m · Ring {ringDistanceM} m · Anchor {anchorDistanceText} · Heading {currentHeadingText}
-  </div>
+    <div class="radar-controls">
+      <button
+        type="button"
+        class="radar-zoom-button radar-direction-button"
+        onclick={toggleDirectionMode}
+        aria-label={directionMode === "boat-up" ? "Switch radar to north-up" : "Switch radar to boat-direction"}
+      >
+        {directionMode === "boat-up" ? "BOAT" : "NORTH"}
+      </button>
+      <button type="button" class="radar-zoom-button" onclick={zoomIn} disabled={rangeIndex === 0} aria-label="Zoom in radar">+</button>
+      <button type="button" class="radar-zoom-button" onclick={zoomOut} disabled={rangeIndex === RANGE_OPTIONS_M.length - 1} aria-label="Zoom out radar">-</button>
+    </div>
+  {:else}
+    <div class="maptiler-missing">Set anchor first to open radar view.</div>
+  {/if}
 </section>

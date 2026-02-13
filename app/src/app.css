@@ -164,6 +164,50 @@ textarea {
   gap: 0.55rem;
 }
 
+.anchor-move-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.anchor-move-button {
+  border: 0;
+  width: 2.8rem;
+  height: 2.8rem;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 0.3rem 0.9rem rgba(0, 0, 0, 0.3);
+}
+
+.anchor-move-button.start {
+  background: #f1c83d;
+  color: #24221a;
+}
+
+.anchor-move-button.confirm {
+  background: #1b9e5a;
+  color: #fff;
+}
+
+.anchor-move-button.cancel {
+  background: rgba(24, 24, 24, 0.92);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.anchor-move-button:disabled {
+  opacity: 0.56;
+  cursor: not-allowed;
+}
+
+.anchor-move-icon {
+  font-size: 1.25rem;
+  line-height: 1;
+}
+
 .anchor-action-button {
   border: 0;
   width: 3.2rem;
@@ -370,19 +414,20 @@ pre {
   background: #08161b;
 }
 
-.viz-overlay {
-  position: absolute;
-  left: 0.7rem;
-  right: 0.7rem;
-  bottom: 0.8rem;
-  color: rgba(228, 244, 246, 0.92);
-  background: rgba(4, 18, 22, 0.56);
+.shared-viz-overlay {
+  position: fixed;
+  left: max(0.8rem, env(safe-area-inset-left));
+  bottom: calc(var(--am-tabbar-height) + 0.85rem);
+  z-index: 65;
+  color: rgba(228, 244, 246, 0.94);
+  background: rgba(4, 18, 22, 0.58);
   border-radius: 10px;
-  padding: 0.42rem 0.58rem;
-  font-size: 0.78rem;
-  line-height: 1.25;
+  padding: 0.46rem 0.62rem;
+  font-size: 0.8rem;
+  line-height: 1.28;
   letter-spacing: 0.01em;
   backdrop-filter: blur(4px);
+  min-width: 6.4rem;
 }
 
 .maptiler-host {
@@ -458,6 +503,16 @@ pre {
   stroke-width: 1.15;
 }
 
+.radar-anchor-center {
+  fill: #2f9dff;
+  stroke: rgba(255, 255, 255, 0.82);
+  stroke-width: 1.2;
+}
+
+.radar-anchor-center.move-mode {
+  fill: #f3b73f;
+}
+
 .radar-anchor {
   fill: #2f9dff;
   stroke: rgba(255, 255, 255, 0.75);
@@ -488,6 +543,13 @@ pre {
   cursor: pointer;
   font-size: 1.15rem;
   line-height: 1;
+}
+
+.radar-direction-button {
+  width: 3.2rem;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
 }
 
 .radar-zoom-button:disabled {
