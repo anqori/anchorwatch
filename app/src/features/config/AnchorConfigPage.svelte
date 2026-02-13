@@ -1,5 +1,14 @@
 <script lang="ts">
-  import { Block, BlockTitle, Button as KonstaButton } from "konsta/svelte";
+  import {
+    BlockTitle,
+    Button as KonstaButton,
+    List,
+    ListInput,
+    ListItem,
+    Navbar,
+    NavbarBackLink,
+    Toggle,
+  } from "konsta/svelte";
 
   export let anchorMode: "current" | "offset" | "auto" | "manual" = "offset";
   export let anchorOffsetDistanceM = "8.0";
@@ -14,63 +23,77 @@
   export let polygonPointsInput = "";
   export let manualAnchorLat = "";
   export let manualAnchorLon = "";
+  export let onBack: () => void = () => {};
   export let onApply: () => void = () => {};
 </script>
 
-<Block strong class="space-y-3">
-  <BlockTitle>Anchor Set Flow</BlockTitle>
-  <div class="hint">Saves anchor + zone preferences to `config.patch` keys from protocol v1.</div>
-  <div class="row">
-    <div>
-      <div class="hint field-label">Default set mode</div>
-      <select bind:value={anchorMode}>
-        <option value="current">current</option>
-        <option value="offset">offset</option>
-        <option value="auto">auto</option>
-        <option value="manual">manual</option>
-      </select>
-    </div>
-    <div>
-      <div class="hint field-label">Zone type</div>
-      <select bind:value={zoneType}>
-        <option value="circle">circle</option>
-        <option value="polygon">polygon</option>
-      </select>
-    </div>
-    <div><div class="hint field-label">Offset distance (m)</div><input type="number" bind:value={anchorOffsetDistanceM}></div>
-    <div><div class="hint field-label">Offset angle (deg)</div><input type="number" bind:value={anchorOffsetAngleDeg}></div>
-  </div>
+<Navbar title="Anchor Set Flow">
+  {#snippet left()}
+    <NavbarBackLink onclick={onBack} text="Settings" />
+  {/snippet}
+</Navbar>
 
-  <div class="hint" style="margin-top:0.7rem">Auto mode tuning</div>
-  <div class="row">
-    <label class="check">
-      <input type="checkbox" bind:checked={autoModeEnabled}>
-      Auto mode enabled
-    </label>
-    <div><div class="hint field-label">Min forward SOG (kn)</div><input type="number" bind:value={autoModeMinForwardSogKn}></div>
-    <div><div class="hint field-label">Stall max SOG (kn)</div><input type="number" bind:value={autoModeStallMaxSogKn}></div>
-    <div><div class="hint field-label">Reverse min SOG (kn)</div><input type="number" bind:value={autoModeReverseMinSogKn}></div>
-    <div><div class="hint field-label">Confirm seconds</div><input type="number" bind:value={autoModeConfirmSeconds}></div>
-  </div>
+<div class="space-y-3">
+  <div class="hint">Saves anchor + zone preferences to `config.patch` keys from protocol v1.</div>
+
+  <List strong inset>
+    <ListInput label="Default set mode" type="select" bind:value={anchorMode} dropdown>
+      <option value="current">current</option>
+      <option value="offset">offset</option>
+      <option value="auto">auto</option>
+      <option value="manual">manual</option>
+    </ListInput>
+
+    <ListInput label="Zone type" type="select" bind:value={zoneType} dropdown>
+      <option value="circle">circle</option>
+      <option value="polygon">polygon</option>
+    </ListInput>
+
+    <ListInput label="Offset distance (m)" type="number" bind:value={anchorOffsetDistanceM} />
+    <ListInput label="Offset angle (deg)" type="number" bind:value={anchorOffsetAngleDeg} />
+  </List>
+
+  <BlockTitle>Auto Mode</BlockTitle>
+  <List strong inset>
+    <ListItem title="Auto mode enabled" label>
+      {#snippet after()}
+        <Toggle component="div" checked={autoModeEnabled} onChange={() => (autoModeEnabled = !autoModeEnabled)} />
+      {/snippet}
+    </ListItem>
+    <ListInput label="Min forward SOG (kn)" type="number" bind:value={autoModeMinForwardSogKn} />
+    <ListInput label="Stall max SOG (kn)" type="number" bind:value={autoModeStallMaxSogKn} />
+    <ListInput label="Reverse min SOG (kn)" type="number" bind:value={autoModeReverseMinSogKn} />
+    <ListInput label="Confirm seconds" type="number" bind:value={autoModeConfirmSeconds} />
+  </List>
 
   {#if zoneType === "circle"}
-    <div class="row" style="margin-top:0.7rem">
-      <div><div class="hint field-label">Circle radius (m)</div><input type="number" bind:value={zoneRadiusM}></div>
-    </div>
+    <BlockTitle>Circle Zone</BlockTitle>
+    <List strong inset>
+      <ListInput label="Circle radius (m)" type="number" bind:value={zoneRadiusM} />
+    </List>
   {:else}
-    <div class="hint" style="margin-top:0.7rem">Polygon points (`lat,lon` per line)</div>
-    <textarea rows="5" bind:value={polygonPointsInput}></textarea>
+    <BlockTitle>Polygon Zone</BlockTitle>
+    <List strong inset>
+      <ListInput
+        label="Polygon points"
+        type="textarea"
+        placeholder="lat,lon per line"
+        bind:value={polygonPointsInput}
+        inputClass="!h-28 resize-none"
+      />
+    </List>
   {/if}
 
   {#if anchorMode === "manual"}
-    <div class="hint" style="margin-top:0.7rem">Manual drag/drop draft (runtime command id still pending in protocol docs)</div>
-    <div class="row">
-      <div><div class="hint field-label">Manual lat</div><input type="number" bind:value={manualAnchorLat}></div>
-      <div><div class="hint field-label">Manual lon</div><input type="number" bind:value={manualAnchorLon}></div>
-    </div>
+    <BlockTitle>Manual Anchor</BlockTitle>
+    <div class="hint">Manual drag/drop draft (runtime command id still pending in protocol docs)</div>
+    <List strong inset>
+      <ListInput label="Manual lat" type="number" bind:value={manualAnchorLat} />
+      <ListInput label="Manual lon" type="number" bind:value={manualAnchorLon} />
+    </List>
   {/if}
 
   <div class="actions">
     <KonstaButton onClick={onApply}>Apply Anchor + Zone Config</KonstaButton>
   </div>
-</Block>
+</div>

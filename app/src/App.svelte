@@ -16,7 +16,6 @@ import {
     InboundSource,
     JsonRecord,
     Mode,
-    OnboardingStep,
     PillClass,
     ProfileMode,
     Severity,
@@ -104,7 +103,6 @@ import {
   } from "./services/config-patch-builders";
   import {
     App as KonstaApp,
-    Button as KonstaButton,
     Icon,
     Page as KonstaPage,
     Tabbar,
@@ -112,7 +110,9 @@ import {
   } from "konsta/svelte";
   import SummaryPage from "./features/summary/SummaryPage.svelte";
   import SettingsHomePage from "./features/config/SettingsHomePage.svelte";
-  import OnboardingPage from "./features/config/OnboardingPage.svelte";
+  import DeviceBluetoothPage from "./features/config/DeviceBluetoothPage.svelte";
+  import InternetWlanPage from "./features/config/InternetWlanPage.svelte";
+  import InfoVersionPage from "./features/config/InfoVersionPage.svelte";
   import AnchorConfigPage from "./features/config/AnchorConfigPage.svelte";
   import TriggersConfigPage from "./features/config/TriggersConfigPage.svelte";
   import ProfilesConfigPage from "./features/config/ProfilesConfigPage.svelte";
@@ -159,8 +159,7 @@ import {
   let statePillClass: PillClass = "ok";
   let stateSourceText = "Source: --";
 
-  let installStatus = "";
-  let bleSupportedText = "--";
+  let bleSupported = false;
   let bleStatusText = "disconnected";
   let boatIdText = "--";
   let secretStatusText = "not stored";
@@ -182,12 +181,16 @@ import {
   let availableWifiNetworks: WifiScanNetwork[] = [];
   let selectedWifiSsid = "";
   let selectedWifiNetwork: WifiScanNetwork | null = null;
-  let onboardingStep: OnboardingStep = 1;
   let onboardingWifiSsid = "--";
   let onboardingWifiConnected = false;
   let onboardingWifiRssiText = "--";
   let onboardingWifiErrorText = "";
   let onboardingWifiStateText = "Waiting for Wi-Fi status...";
+  let connectedDeviceName = "";
+  let settingsDeviceStatusText = "No Device connected yet";
+  let settingsInternetStatusText = "Internet not configured";
+  let hasStoredDeviceCredentials = false;
+  let configSectionsWithStatus = CONFIG_SECTIONS;
   let activeView: ViewId = "summary";
   let activeConfigView: ConfigViewId = "settings";
   let navigationDepth = 0;
@@ -256,14 +259,19 @@ import {
   let tickInterval: ReturnType<typeof setInterval> | null = null;
   let wifiScanTimeout: ReturnType<typeof setTimeout> | null = null;
 
-  $: onboardingLogText = logLines.join("\n");
   $: isFullScreenVizView = activeView === "satellite" || activeView === "map" || activeView === "radar";
-  $: onboardingStepLabel = `Step ${onboardingStep} of 3`;
-  $: onboardingStepTitle = onboardingStep === 1
-    ? "Connect via Bluetooth"
-    : onboardingStep === 2
-      ? "Wi-Fi Settings"
-      : "Wi-Fi Connection Status";
+  $: isConfigView = activeView === "config";
+  $: connectedDeviceName = ble.connected ? (ble.device?.name?.trim() || "device") : "";
+  $: settingsDeviceStatusText = ble.connected ? `Connected to ${connectedDeviceName}` : "No Device connected yet";
+  $: settingsInternetStatusText = buildInternetSettingsStatusText();
+  $: configSectionsWithStatus = CONFIG_SECTIONS.map((section) => ({
+    ...section,
+    status: section.id === "device"
+      ? settingsDeviceStatusText
+      : section.id === "internet"
+        ? settingsInternetStatusText
+        : undefined,
+  }));
 
   $: {
     const wifiStatus = readOnboardingWifiStatus();
@@ -316,6 +324,30 @@ import {
 
   function readFirmwareVersionFromState(): string {
     return readFirmwareVersionFromStateDerived(latestState);
+  }
+
+  function hasCloudCredentialsConfigured(): boolean {
+    return Boolean(getRelayBaseUrl() && getBoatId() && getBoatSecret());
+  }
+
+  function buildInternetSettingsStatusText(): string {
+    const lastKnownSsid = onboardingWifiSsid !== "--" ? onboardingWifiSsid : wifiSsid.trim();
+    if (onboardingWifiConnected && lastKnownSsid) {
+      return `WLAN ${lastKnownSsid} connected`;
+    }
+    if (onboardingWifiErrorText) {
+      return lastKnownSsid ? `WLAN ${lastKnownSsid} failed` : "WLAN connection failed";
+    }
+    if (wifiScanInFlight) {
+      return "Scanning WLAN networks...";
+    }
+    if (wifiScanErrorText) {
+      return "WLAN scan failed";
+    }
+    if (lastKnownSsid) {
+      return `WLAN ${lastKnownSsid} pending`;
+    }
+    return hasCloudCredentialsConfigured() ? "Internet configured, WLAN pending" : "Internet not configured";
   }
 
   function prefillWifiSettingsFromCurrentState(): void {
@@ -616,7 +648,7 @@ import {
 
   function setBoatId(value: string): void {
     setBoatIdStored(value);
-    boatIdText = value;
+    refreshIdentityUi();
   }
 
   function getBoatSecret(): string {
@@ -635,6 +667,7 @@ import {
   function refreshIdentityUi(): void {
     const boatId = getBoatId();
     const boatSecret = getBoatSecret();
+    hasStoredDeviceCredentials = Boolean(boatId && boatSecret);
     boatIdText = boatId || "--";
     secretStatusText = maskSecret(boatSecret);
     relayBaseUrlInput = getRelayBaseUrl();
@@ -1001,9 +1034,7 @@ import {
   function onBleDisconnected(): void {
     clearWifiScanTimeout();
     wifiScanInFlight = false;
-    if (onboardingStep === 2) {
-      wifiScanStatusText = "BLE disconnected. Reconnect to scan WLAN networks.";
-    }
+    wifiScanStatusText = "BLE disconnected. Reconnect to scan WLAN networks.";
     ble.connected = false;
     ble.device = null;
     ble.server = null;
@@ -1154,49 +1185,40 @@ import {
     await sendConfigPatch(patch, "wifi");
   }
 
-  async function connectBleForOnboarding(): Promise<void> {
-    selectDeviceModeForOnboarding();
+  async function searchForDeviceViaBluetooth(): Promise<void> {
+    selectDeviceModeForSetup();
+    if (ble.connected) {
+      await disconnectBle();
+    }
     await connectBle();
   }
 
-  function continueToWifiStep(): void {
-    if (!ble.connected) {
-      throw new Error("Connect BLE before continuing");
-    }
-    prefillWifiSettingsFromCurrentState();
-    onboardingStep = 2;
-    void runAction("scan wlan networks", scanWifiNetworks);
-  }
-
-  async function applyWifiAndContinue(): Promise<void> {
+  async function applyWifiConfigFromInternetPage(): Promise<void> {
     await applyWiFiConfig();
-    onboardingStep = 3;
+    await readSnapshotFromBle();
   }
 
-  function backToWifiSettingsStep(): void {
-    onboardingStep = 2;
+  function clearWifiSelectionForManualEntry(): void {
+    selectedWifiSsid = "";
+    wifiSsid = "";
+    wifiScanErrorText = "";
   }
 
-  function goToSummaryFromOnboarding(): void {
-    setView("summary");
-  }
-
-  function selectDeviceModeForOnboarding(): void {
+  function selectDeviceModeForSetup(): void {
     if (mode === MODE_DEVICE) {
       return;
     }
     applyMode(MODE_DEVICE);
-    logLine("device mode selected for onboarding");
+    logLine("device mode selected for setup");
   }
 
-  async function skipOnboardingWithFakeMode(): Promise<void> {
+  async function useFakeModeAndReturnHome(): Promise<void> {
     applyMode(MODE_FAKE);
     if (ble.connected) {
       await disconnectBle();
     }
-    onboardingStep = 1;
     setView("summary");
-    logLine("fake mode selected; skipped BLE/cloud onboarding");
+    logLine("fake mode selected; skipped BLE/cloud setup");
   }
 
   async function sendConfigPatch(patch: JsonRecord, reason: string): Promise<void> {
@@ -1408,7 +1430,6 @@ import {
 
     if (nextView === "config") {
       activeConfigView = "settings";
-      onboardingStep = 1;
     } else if (activeConfigView !== "settings") {
       activeConfigView = "settings";
     }
@@ -1434,8 +1455,8 @@ import {
 
   function openConfigView(nextConfigView: ConfigSectionId): void {
     syncToNavLevel(2);
-    if (nextConfigView === "onboarding") {
-      onboardingStep = 1;
+    if (nextConfigView === "internet") {
+      prefillWifiSettingsFromCurrentState();
     }
     activeView = "config";
     activeConfigView = nextConfigView;
@@ -1471,7 +1492,6 @@ import {
       const previousView = activeView;
       activeView = "summary";
       activeConfigView = "settings";
-      onboardingStep = 1;
       if (previousView === "map") {
         destroyMapTilerView("map");
       } else if (previousView === "satellite") {
@@ -1678,13 +1698,6 @@ import {
     setState(ble.connected ? "DEVICE: WAITING DATA" : "DEVICE: NO LINK", "warn");
   }
 
-  function initInstallStatus(): void {
-    const standalone = window.matchMedia("(display-mode: standalone)").matches;
-    installStatus = standalone
-      ? "Installed app mode active."
-      : "Browser mode. You can install this app from the browser menu.";
-  }
-
   async function registerServiceWorker(): Promise<void> {
     if (!("serviceWorker" in navigator)) {
       return;
@@ -1697,7 +1710,7 @@ import {
   }
 
   function initBleSupportLabel(): void {
-    bleSupportedText = navigator.bluetooth ? "supported" : "not supported by this browser";
+    bleSupported = Boolean(navigator.bluetooth);
   }
 
   function initUiFromStorage(): void {
@@ -1750,7 +1763,6 @@ import {
       suppressedPopEvents = 0;
     }
     window.addEventListener("popstate", handlePopState);
-    initInstallStatus();
     initBleSupportLabel();
     initNotificationStatus();
     initUiFromStorage();
@@ -1759,7 +1771,7 @@ import {
     applyMode(mode, false);
     if (mode === MODE_FAKE || !hasPersistedSetup()) {
       setView("config");
-      logLine("startup route: onboarding required");
+      logLine("startup route: connection setup required");
     }
     setSource("--");
     logLine("app started (Svelte)");
@@ -1785,7 +1797,7 @@ import {
 
 <KonstaApp theme="material" safeAreas>
   <KonstaPage class="am-page">
-    <main class="am-main" class:full-screen-view={isFullScreenVizView}>
+    <main class="am-main" class:full-screen-view={isFullScreenVizView} class:config-view={isConfigView}>
   {#if activeView === "summary"}
     <SummaryPage
       gpsAgeText={gpsAgeText}
@@ -1808,32 +1820,27 @@ import {
 
   {#if activeView === "config" && activeConfigView === "settings"}
     <SettingsHomePage
-      configSections={CONFIG_SECTIONS}
+      configSections={configSectionsWithStatus}
       onOpenConfig={openConfigView}
     />
   {/if}
 
-  {#if activeView === "config" && activeConfigView !== "settings"}
-    <div class="config-subpage-header">
-      <KonstaButton clear onClick={() => goToSettingsView()}>&larr; Settings</KonstaButton>
-    </div>
-  {/if}
-
-  {#if activeView === "config" && activeConfigView === "onboarding"}
-    <OnboardingPage
-      onboardingStep={onboardingStep}
-      onboardingStepLabel={onboardingStepLabel}
-      onboardingStepTitle={onboardingStepTitle}
-      installStatus={installStatus}
-      bleSupportedText={bleSupportedText}
-      modeIsFake={mode === MODE_FAKE}
+  {#if activeView === "config" && activeConfigView === "device"}
+    <DeviceBluetoothPage
+      isConfigured={hasStoredDeviceCredentials}
+      bleSupported={bleSupported}
       bleStatusText={bleStatusText}
       boatIdText={boatIdText}
       secretStatusText={secretStatusText}
-      cloudStatusText={cloudStatusText}
-      pwaVersionText={pwaVersionText}
-      firmwareVersionText={firmwareVersionText}
-      cloudVersionText={cloudVersionText}
+      connectedDeviceName={connectedDeviceName}
+      onBack={() => goToSettingsView()}
+      onSearchDevice={() => void runAction("search device via bluetooth", searchForDeviceViaBluetooth)}
+      onUseDemoData={() => void runAction("use fake mode", useFakeModeAndReturnHome)}
+    />
+  {/if}
+
+  {#if activeView === "config" && activeConfigView === "internet"}
+    <InternetWlanPage
       bleConnected={ble.connected}
       wifiScanInFlight={wifiScanInFlight}
       wifiScanStatusText={wifiScanStatusText}
@@ -1852,23 +1859,25 @@ import {
       onboardingWifiRssiText={onboardingWifiRssiText}
       bind:relayBaseUrlInput
       relayResult={relayResult}
-      onboardingLogText={onboardingLogText}
       formatWifiSecurity={(security) => formatWifiSecurity(security as WifiSecurity)}
-      onSelectDeviceMode={selectDeviceModeForOnboarding}
-      onUseFakeMode={() => void runAction("use fake mode", skipOnboardingWithFakeMode)}
-      onConnectBle={() => void runAction("ble connect", connectBleForOnboarding)}
-      onDisconnectBle={() => void runAction("ble disconnect", disconnectBle)}
-      onContinueToWifiStep={() => void runAction("continue to wlan settings", async () => continueToWifiStep())}
       onScanWifiNetworks={() => void runAction("scan wlan networks", scanWifiNetworks)}
       onSelectWifiNetwork={selectWifiNetwork}
-      onApplyWifiAndContinue={() => void runAction("apply wlan settings", applyWifiAndContinue)}
-      onBackToBleStep={() => { onboardingStep = 1; }}
-      onBackToWifiSettingsStep={backToWifiSettingsStep}
-      onGoToSummary={goToSummaryFromOnboarding}
+      onApplyWifiConfig={() => void runAction("apply wlan settings", applyWifiConfigFromInternetPage)}
+      onClearSelectedNetwork={clearWifiSelectionForManualEntry}
       onRefreshStatus={() => void runAction("refresh status snapshot", readSnapshotFromBle)}
       onSaveRelayUrl={saveRelayUrl}
       onProbeRelay={() => void runAction("relay ping", probeRelay)}
       onVerifyCloud={() => void runAction("verify cloud", verifyCloudAuth)}
+      onBack={() => goToSettingsView()}
+    />
+  {/if}
+
+  {#if activeView === "config" && activeConfigView === "information"}
+    <InfoVersionPage
+      pwaVersionText={pwaVersionText}
+      firmwareVersionText={firmwareVersionText}
+      cloudVersionText={cloudVersionText}
+      onBack={() => goToSettingsView()}
     />
   {/if}
 
@@ -1918,6 +1927,7 @@ import {
       bind:polygonPointsInput
       bind:manualAnchorLat
       bind:manualAnchorLon
+      onBack={() => goToSettingsView()}
       onApply={() => void runAction("apply anchor config", applyAnchorConfig)}
     />
   {/if}
@@ -1935,6 +1945,7 @@ import {
       bind:triggerGpsAgeMaxMs
       bind:triggerGpsAgeHoldMs
       bind:triggerGpsAgeSeverity
+      onBack={() => goToSettingsView()}
       onApply={() => void runAction("apply trigger config", applyTriggerConfig)}
     />
   {/if}
@@ -1953,6 +1964,7 @@ import {
       bind:profileNightOutputProfile
       notificationPermissionText={notificationPermissionText}
       notificationStatusText={notificationStatusText}
+      onBack={() => goToSettingsView()}
       onApply={() => void runAction("apply profile config", applyProfilesConfig)}
       onRequestPermission={() => void runAction("request notification permission", requestNotificationPermission)}
       onSendTestNotification={() => void runAction("send test notification", sendTestNotification)}

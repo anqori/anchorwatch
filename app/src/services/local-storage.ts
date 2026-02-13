@@ -22,8 +22,8 @@ export function maskSecret(secret: string): string {
   if (!secret) {
     return "not stored";
   }
-  if (secret.length <= 10) {
-    return "stored";
+  if (secret.length <= 6) {
+    return `${secret.slice(0, 1)}*****${secret.slice(-1)}`;
   }
-  return `stored (${secret.slice(0, 6)}...${secret.slice(-4)})`;
+  return `${secret.slice(0, 3)}*****${secret.slice(-3)}`;
 }

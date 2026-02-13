@@ -46,10 +46,12 @@ export const VIEW_TABS: Array<{ id: ViewId; label: string; icon: string }> = [
 ];
 
 export const CONFIG_SECTIONS: Array<{ id: ConfigSectionId; label: string; icon: string }> = [
-  { id: "onboarding", label: "Connection", icon: "bluetooth" },
+  { id: "device", label: "Device / Bluetooth", icon: "bluetooth" },
+  { id: "internet", label: "Internet & WLAN", icon: "wifi" },
   { id: "anchor", label: "Anchor", icon: "anchor" },
   { id: "triggers", label: "Triggers", icon: "warning" },
   { id: "profiles", label: "Profiles", icon: "tune" },
+  { id: "information", label: "Information / Version", icon: "info" },
 ];
 
 export const TABBAR_LINK_COLORS = {

@@ -6,6 +6,7 @@
     id: ConfigSectionId;
     label: string;
     icon: string;
+    status?: string;
   }
 
   export let configSections: ConfigSection[] = [];
@@ -18,6 +19,7 @@
     <ListItem
       link
       title={configSection.label}
+      subtitle={configSection.status ?? ""}
       onClick={() => onOpenConfig(configSection.id)}
     >
       {#snippet media()}

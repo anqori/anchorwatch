@@ -1,5 +1,14 @@
 <script lang="ts">
-  import { Block, BlockTitle, Button as KonstaButton } from "konsta/svelte";
+  import {
+    BlockTitle,
+    Button as KonstaButton,
+    List,
+    ListInput,
+    ListItem,
+    Navbar,
+    NavbarBackLink,
+    Toggle,
+  } from "konsta/svelte";
 
   export let triggerWindAboveEnabled = true;
   export let triggerWindAboveThresholdKn = "30.0";
@@ -12,58 +21,64 @@
   export let triggerGpsAgeMaxMs = "5000";
   export let triggerGpsAgeHoldMs = "5000";
   export let triggerGpsAgeSeverity: "warning" | "alarm" = "warning";
+  export let onBack: () => void = () => {};
   export let onApply: () => void = () => {};
 </script>
 
-<Block strong class="space-y-3">
-  <BlockTitle>Trigger Config</BlockTitle>
+<Navbar title="Trigger Config">
+  {#snippet left()}
+    <NavbarBackLink onclick={onBack} text="Settings" />
+  {/snippet}
+</Navbar>
+
+<div class="space-y-3">
   <div class="hint">Phase 7 scaffold for key trigger thresholds and severities.</div>
 
-  <div class="subcard">
-    <div class="row">
-      <label class="check"><input type="checkbox" bind:checked={triggerWindAboveEnabled}> wind_above enabled</label>
-      <div><div class="hint field-label">thresholdKn</div><input type="number" bind:value={triggerWindAboveThresholdKn}></div>
-      <div><div class="hint field-label">holdMs</div><input type="number" bind:value={triggerWindAboveHoldMs}></div>
-      <div>
-        <div class="hint field-label">severity</div>
-        <select bind:value={triggerWindAboveSeverity}>
-          <option value="warning">warning</option>
-          <option value="alarm">alarm</option>
-        </select>
-      </div>
-    </div>
-  </div>
+  <BlockTitle>Wind Above</BlockTitle>
+  <List strong inset>
+    <ListItem title="Enabled" label>
+      {#snippet after()}
+        <Toggle component="div" checked={triggerWindAboveEnabled} onChange={() => (triggerWindAboveEnabled = !triggerWindAboveEnabled)} />
+      {/snippet}
+    </ListItem>
+    <ListInput label="Threshold (kn)" type="number" bind:value={triggerWindAboveThresholdKn} />
+    <ListInput label="Hold (ms)" type="number" bind:value={triggerWindAboveHoldMs} />
+    <ListInput label="Severity" type="select" bind:value={triggerWindAboveSeverity} dropdown>
+      <option value="warning">warning</option>
+      <option value="alarm">alarm</option>
+    </ListInput>
+  </List>
 
-  <div class="subcard">
-    <div class="row">
-      <label class="check"><input type="checkbox" bind:checked={triggerOutsideAreaEnabled}> outside_area enabled</label>
-      <div><div class="hint field-label">holdMs</div><input type="number" bind:value={triggerOutsideAreaHoldMs}></div>
-      <div>
-        <div class="hint field-label">severity</div>
-        <select bind:value={triggerOutsideAreaSeverity}>
-          <option value="warning">warning</option>
-          <option value="alarm">alarm</option>
-        </select>
-      </div>
-    </div>
-  </div>
+  <BlockTitle>Outside Area</BlockTitle>
+  <List strong inset>
+    <ListItem title="Enabled" label>
+      {#snippet after()}
+        <Toggle component="div" checked={triggerOutsideAreaEnabled} onChange={() => (triggerOutsideAreaEnabled = !triggerOutsideAreaEnabled)} />
+      {/snippet}
+    </ListItem>
+    <ListInput label="Hold (ms)" type="number" bind:value={triggerOutsideAreaHoldMs} />
+    <ListInput label="Severity" type="select" bind:value={triggerOutsideAreaSeverity} dropdown>
+      <option value="warning">warning</option>
+      <option value="alarm">alarm</option>
+    </ListInput>
+  </List>
 
-  <div class="subcard">
-    <div class="row">
-      <label class="check"><input type="checkbox" bind:checked={triggerGpsAgeEnabled}> gps_age enabled</label>
-      <div><div class="hint field-label">maxAgeMs</div><input type="number" bind:value={triggerGpsAgeMaxMs}></div>
-      <div><div class="hint field-label">holdMs</div><input type="number" bind:value={triggerGpsAgeHoldMs}></div>
-      <div>
-        <div class="hint field-label">severity</div>
-        <select bind:value={triggerGpsAgeSeverity}>
-          <option value="warning">warning</option>
-          <option value="alarm">alarm</option>
-        </select>
-      </div>
-    </div>
-  </div>
+  <BlockTitle>GPS Age</BlockTitle>
+  <List strong inset>
+    <ListItem title="Enabled" label>
+      {#snippet after()}
+        <Toggle component="div" checked={triggerGpsAgeEnabled} onChange={() => (triggerGpsAgeEnabled = !triggerGpsAgeEnabled)} />
+      {/snippet}
+    </ListItem>
+    <ListInput label="Max age (ms)" type="number" bind:value={triggerGpsAgeMaxMs} />
+    <ListInput label="Hold (ms)" type="number" bind:value={triggerGpsAgeHoldMs} />
+    <ListInput label="Severity" type="select" bind:value={triggerGpsAgeSeverity} dropdown>
+      <option value="warning">warning</option>
+      <option value="alarm">alarm</option>
+    </ListInput>
+  </List>
 
   <div class="actions">
     <KonstaButton onClick={onApply}>Apply Trigger Config</KonstaButton>
   </div>
-</Block>
+</div>
