@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { List, ListItem, Navbar } from "konsta/svelte";
+  import { BlockTitle, List, ListItem, Navbar } from "konsta/svelte";
   import type { ConfigSectionId } from "../../core/types";
 
   interface ConfigSection {
@@ -13,11 +13,13 @@
   export let onOpenConfig: (id: ConfigSectionId) => void = () => {};
 </script>
 
-<Navbar title="Settings" large transparent centerTitle />
+<Navbar title="Settings" />
+
+<BlockTitle>Settings</BlockTitle>
 <List strong inset aria-label="Settings pages">
   {#each configSections as configSection}
     <ListItem
-      link
+      menuListItem
       title={configSection.label}
       subtitle={configSection.status ?? ""}
       onClick={() => onOpenConfig(configSection.id)}

@@ -72,8 +72,6 @@
   import { makeMsgId, writeCharacteristic, writeChunked } from "./services/ble-transport";
   import {
     fetchCloudBuildVersion,
-    fetchCloudSnapshot,
-    fetchCloudTrackSnapshot,
     probeCloudRelay,
     verifyCloudStateAuth,
   } from "./services/cloud-runtime";
@@ -140,7 +138,8 @@
     mapProfilesDraftToConfigInput,
     mapTriggerDraftToConfigInput,
   } from "./services/config-draft-mappers";
-  import { dispatchConfigPatch } from "./services/config-transport";
+  import { buildProtocolEnvelope, type ConfigPatchCommand } from "./services/protocol-messages";
+  import { resolveActivePostSetupMessenger } from "./services/post-setup-messaging";
   import {
     App as KonstaApp,
     Icon,
@@ -426,6 +425,28 @@
     return credentials;
   }
 
+  function resolveActiveMessenger() {
+    return resolveActivePostSetupMessenger({
+      mode: connection.mode,
+      bleConnected: ble.connected,
+      sendControlMessage,
+      readBleSnapshotEnvelope,
+      readCloudCredentials,
+      protocolVersion: PROTOCOL_VERSION,
+      getDeviceId: ensurePhoneIdStored,
+    });
+  }
+
+  function messengerTransportLabel(transport: "bluetooth" | "cloud-relay" | "fake"): string {
+    if (transport === "bluetooth") {
+      return "BLE";
+    }
+    if (transport === "cloud-relay") {
+      return "cloud";
+    }
+    return "fake";
+  }
+
   function prefillWifiSettingsFromCurrentState(): void {
     const wifiStatus = readOnboardingWifiStatus();
     if (wifiStatus.ssid) {
@@ -615,26 +636,21 @@
     setState(tick.stateText, tick.stateClass);
   }
 
-  function buildEnvelope(msgType: string, payload: JsonRecord, requiresAck = true): Envelope {
-    return {
-      ver: PROTOCOL_VERSION,
-      msgType,
-      msgId: makeMsgId(),
-      boatId: getBoatIdStored() || "boat_unknown",
-      deviceId: ensurePhoneIdStored(),
-      seq: ble.seq++,
-      ts: Date.now(),
-      requiresAck,
-      payload,
-    };
-  }
-
   async function sendControlMessage(msgType: string, payload: JsonRecord, requiresAck = true): Promise<JsonRecord | null> {
     if (!ble.connected || !ble.controlTx) {
       throw new Error("BLE not connected");
     }
 
-    const envelope = buildEnvelope(msgType, payload, requiresAck);
+    const envelope = buildProtocolEnvelope({
+      protocolVersion: PROTOCOL_VERSION,
+      msgType,
+      msgId: makeMsgId(),
+      boatId: getBoatIdStored() || "boat_unknown",
+      deviceId: ensurePhoneIdStored(),
+      seq: ble.seq++,
+      requiresAck,
+      payload,
+    });
     const raw = JSON.stringify(envelope);
     const ackPromise = requiresAck && envelope.msgId ? makeAckPromiseSession(ble.pendingAcks, envelope.msgId) : null;
 
@@ -833,7 +849,7 @@
     onBleDisconnected();
   }
 
-  async function readSnapshotFromBle(): Promise<void> {
+  async function readBleSnapshotEnvelope(): Promise<Envelope | null> {
     if (!ble.connected || !ble.snapshot) {
       throw new Error("BLE snapshot characteristic unavailable");
     }
@@ -843,7 +859,19 @@
     if (!parsed) {
       throw new Error("invalid snapshot JSON");
     }
-    handleEnvelope(parsed, "ble/snapshot");
+    return parsed;
+  }
+
+  async function readSnapshotFromBle(): Promise<void> {
+    const messenger = resolveActiveMessenger();
+    if (messenger.transport !== "bluetooth") {
+      throw new Error("Active messenger is not Bluetooth");
+    }
+    const envelope = await readBleSnapshotEnvelope();
+    if (!envelope) {
+      throw new Error("empty BLE snapshot envelope");
+    }
+    handleEnvelope(envelope, "ble/snapshot");
     logLine("status.snapshot read");
   }
 
@@ -956,19 +984,11 @@
 
   async function sendConfigPatch(patch: JsonRecord, reason: string): Promise<void> {
     const version = nextConfigVersionStored();
-    const transport = await dispatchConfigPatch({
-      patch,
-      version,
-      bleConnected: ble.connected,
-      sendViaBle: async (nextVersion, nextPatch) => {
-        await sendControlMessage("config.patch", { version: nextVersion, patch: nextPatch }, true);
-      },
-      cloudCredentials: readCloudCredentials(),
-      protocolVersion: PROTOCOL_VERSION,
-      deviceId: ensurePhoneIdStored(),
-    });
+    const messenger = resolveActiveMessenger();
+    const command: ConfigPatchCommand = { version, patch };
+    await messenger.sendConfigPatch(command);
     setConfigVersionStored(version);
-    logLine(`config.patch sent via ${transport === "ble" ? "BLE" : "cloud"} (${reason}) version=${version}`);
+    logLine(`config.patch sent via ${messengerTransportLabel(messenger.transport)} (${reason}) version=${version}`);
   }
 
   async function applyAnchorConfig(): Promise<void> {
@@ -993,22 +1013,28 @@
   }
 
   async function fetchTrackSnapshot(): Promise<void> {
-    const cloudCredentials = readCloudCredentials();
-    if (!cloudCredentials) {
-      throw new Error("Track fetch requires relay URL + boatId + boatSecret");
+    const messenger = resolveActiveMessenger();
+    const points = await messenger.requestTrackSnapshot(TRACK_SNAPSHOT_LIMIT);
+    if (points === null) {
+      if (messenger.transport === "cloud-relay") {
+        trackStatusText = "No cloud track available yet.";
+        logLine("track snapshot not found (404)");
+        return;
+      }
+      if (messenger.transport === "fake") {
+        trackStatusText = "Track snapshots are unavailable in fake mode.";
+        logLine("track snapshot skipped in fake mode");
+        return;
+      }
+      throw new Error("Bluetooth transport does not provide track snapshots");
     }
-    const snapshot = await fetchCloudTrackSnapshot(cloudCredentials, TRACK_SNAPSHOT_LIMIT);
-    if (snapshot.status === 404) {
-      trackStatusText = "No cloud track available yet.";
-      logLine("track snapshot not found (404)");
-      return;
-    }
-    replaceTrackPoints(snapshot.points);
-    logLine(`track snapshot loaded (${snapshot.points.length} points)`);
+    replaceTrackPoints(points);
+    logLine(`track snapshot loaded (${points.length} points)`);
   }
 
   function setView(nextView: ViewId): void {
     const transition = applyViewChange(navigation, nextView);
+    navigation = { ...navigation };
     if (transition.leftMapView) {
       destroyMapTilerView(transition.leftMapView);
     }
@@ -1025,13 +1051,17 @@
 
   function openConfigView(nextConfigView: ConfigSectionId): void {
     applyOpenConfigSection(navigation, nextConfigView);
+    navigation = { ...navigation };
     if (nextConfigView === "internet") {
       prefillWifiSettingsFromCurrentState();
     }
   }
 
   function goToSettingsView(syncHistory = true): void {
-    applyGoToSettings(navigation, syncHistory);
+    const changed = applyGoToSettings(navigation, syncHistory);
+    if (changed) {
+      navigation = { ...navigation };
+    }
   }
 
   function handlePopState(): void {
@@ -1049,6 +1079,7 @@
       } else if (previousView === "satellite") {
         destroyMapTilerView("satellite");
       }
+      navigation = { ...navigation };
     }
   }
 
@@ -1114,27 +1145,36 @@
     throw new Error(`cloud verify failed ${authVerify.status}: ${authVerify.errorText}`);
   }
 
-  async function pollCloudState(nowMs: number): Promise<void> {
+  async function pollActiveState(nowMs: number): Promise<void> {
     if (nowMs - lastCloudPollMs < CLOUD_POLL_MS) {
       return;
     }
     lastCloudPollMs = nowMs;
 
-    const cloudCredentials = readCloudCredentials();
-    if (!cloudCredentials) {
+    const messenger = resolveActiveMessenger();
+    if (messenger.transport === "fake") {
       return;
     }
-    const { base } = cloudCredentials;
 
     try {
-      await refreshCloudVersion(base);
-      const cloudSnapshot = await fetchCloudSnapshot(cloudCredentials);
-      if (cloudSnapshot.status === 404 || cloudSnapshot.snapshot === null) {
+      if (messenger.transport === "cloud-relay") {
+        const credentials = readCloudCredentials();
+        if (credentials) {
+          await refreshCloudVersion(credentials.base);
+        }
+      }
+      const snapshot = await messenger.requestStateSnapshot();
+      if (snapshot === null) {
         return;
       }
-      applyStateSnapshot(cloudSnapshot.snapshot, "cloud/status.snapshot");
+      if (messenger.transport === "bluetooth") {
+        applyStateSnapshot(snapshot, "ble/snapshot");
+        lastBleMessageAtMs = Date.now();
+        return;
+      }
+      applyStateSnapshot(snapshot, "cloud/status.snapshot");
     } catch (error) {
-      logLine(`cloud poll failed: ${String(error)}`);
+      logLine(`${messengerTransportLabel(messenger.transport)} poll failed: ${String(error)}`);
     }
   }
 
@@ -1149,7 +1189,7 @@
       return;
     }
 
-    await pollCloudState(nowReal);
+    await pollActiveState(nowReal);
     if (Object.keys(latestState).length > 0) {
       renderTelemetryFromState();
       setSource(latestStateSource || "cloud");
@@ -1168,6 +1208,16 @@
       return;
     }
     try {
+      if (import.meta.env.DEV) {
+        const registrations = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(registrations.map((registration) => registration.unregister()));
+        if ("caches" in window) {
+          const keys = await caches.keys();
+          const appCacheKeys = keys.filter((key) => key.startsWith("anchorwatch-"));
+          await Promise.all(appCacheKeys.map((key) => caches.delete(key)));
+        }
+        return;
+      }
       await navigator.serviceWorker.register("./sw.js", { scope: "./" });
     } catch (error) {
       logLine(`service worker registration failed: ${String(error)}`);

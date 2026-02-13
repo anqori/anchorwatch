@@ -1,4 +1,5 @@
 import type { JsonRecord } from "../core/types";
+import { buildConfigPatchPayload } from "./protocol-messages";
 
 export interface CloudCredentials {
   base: string;
@@ -42,6 +43,10 @@ export async function fetchCloudTracks(credentials: CloudCredentials, limit: num
 
 export async function postCloudConfigPatch(credentials: CloudCredentials, request: CloudConfigPatchRequest): Promise<Response> {
   const { base, boatId, boatSecret } = credentials;
+  const payload = buildConfigPatchPayload({
+    version: request.version,
+    patch: request.patch,
+  });
   return fetch(`${base}/v1/config`, {
     method: "POST",
     headers: {
@@ -55,8 +60,7 @@ export async function postCloudConfigPatch(credentials: CloudCredentials, reques
       boatId,
       deviceId: request.deviceId,
       ts: request.nowTs ?? Date.now(),
-      version: request.version,
-      patch: request.patch,
+      ...payload,
     }),
   });
 }
