@@ -21,8 +21,6 @@
   import {
     buildInternetSettingsStatusText,
     deriveAppConnectivityState,
-    deriveLinkLedState,
-    linkLedTitle,
   } from "./services/connectivity-derive";
   import { readAnchorStatus, readCurrentGpsPosition, readFirmwareVersionFromState, readOnboardingWifiStatus } from "./services/state-derive";
   import {
@@ -48,7 +46,6 @@
     applyProfilesConfig,
     applyTriggerConfig,
     connectToWifiNetwork,
-    dropAnchorAtCurrentPosition,
     fetchTrackSnapshot,
     moveAnchorToPosition,
     raiseAnchor,
@@ -61,7 +58,7 @@
     useFakeMode,
   } from "./actions/device-actions";
   import { geoDeltaMeters, type GeoPoint } from "./services/geo-nav";
-  import { appState, initAppStateEnvironment, logLine } from "./state/app-state.svelte";
+  import { appState, initAppStateEnvironment, logLine, replaceTrackPoints } from "./state/app-state.svelte";
   import {
     App as KonstaApp,
     Icon,
@@ -107,17 +104,20 @@
   let trackPoints = $state<TrackPoint[]>([]);
   let anchorState = $state<AnchorRuntimeState>("up");
   let anchorPosition = $state<GeoPoint | null>(null);
+  let boatPosition = $state<GeoPoint | null>(null);
   let anchorPositionText = $state("--");
   let anchorDistanceText = $state("--");
   let anchorBearingText = $state("--");
   let anchorActionInFlight = $state(false);
-  let anchorRiseSlideOpen = $state(false);
-  let anchorRiseSlideValue = $state(0);
+  let anchorRiseConfirmOpen = $state(false);
   let anchorMoveMode = $state(false);
   let anchorMoveInFlight = $state(false);
   let anchorMoveStartPosition = $state<GeoPoint | null>(null);
   let anchorMoveDraftPosition = $state<GeoPoint | null>(null);
   let anchorMoveHelperRadiusM = $state(0);
+  let lastDroppedAnchorPosition = $state<GeoPoint | null>(null);
+  let trackBeforeLastAnchorMove = $state<TrackPoint[] | null>(null);
+  let vizMenuOpen = $state(false);
 
   let maptilerMapContainer = $state<HTMLDivElement | null>(null);
   let maptilerSatelliteContainer = $state<HTMLDivElement | null>(null);
@@ -159,12 +159,6 @@
 
   $effect(() => {
     connection.appState = deriveAppConnectivityState(connection.hasConfiguredDevice, connection.activeConnectionConnected);
-    connection.linkLedState = deriveLinkLedState(
-      connection.hasConfiguredDevice,
-      connection.activeConnectionConnected,
-      connection.activeConnection,
-    );
-    connection.linkLedTitle = linkLedTitle(connection.linkLedState);
 
     if (!connection.activeConnectionConnected) {
       connectionSelectionStatusText = "Not connected";
@@ -232,9 +226,13 @@
   $effect(() => {
     const wifiStatus = readOnboardingWifiStatus(appState.latestState);
     const currentGps = readCurrentGpsPosition(appState.latestState);
+    boatPosition = currentGps ? { lat: currentGps.lat, lon: currentGps.lon } : null;
     const anchorStatus = readAnchorStatus(appState.latestState);
     anchorState = anchorStatus.state;
     anchorPosition = anchorStatus.position;
+    if (anchorStatus.state !== "up" && anchorStatus.position) {
+      lastDroppedAnchorPosition = anchorStatus.position;
+    }
     const visibleAnchorPosition = getVisualAnchorPosition(anchorStatus.position);
     anchorPositionText = visibleAnchorPosition
       ? `${visibleAnchorPosition.lat.toFixed(5)}, ${visibleAnchorPosition.lon.toFixed(5)}`
@@ -264,14 +262,19 @@
 
   $effect(() => {
     if (!shouldShowAnchorActionButton() || anchorState !== "down" || anchorMoveMode) {
-      anchorRiseSlideOpen = false;
-      anchorRiseSlideValue = 0;
+      anchorRiseConfirmOpen = false;
     }
   });
 
   $effect(() => {
     if (anchorMoveMode && !canShowAnchorMoveButton()) {
       resetAnchorMoveSession();
+    }
+  });
+
+  $effect(() => {
+    if (navigation.activeView !== "map" && navigation.activeView !== "satellite" && navigation.activeView !== "radar") {
+      vizMenuOpen = false;
     }
   });
 
@@ -327,7 +330,8 @@
         map: maptilerMap,
         kind: "map",
         getTrackPoints: () => trackPoints,
-        getAnchorPosition: () => getVisualAnchorPosition(anchorPosition),
+        getAnchorPosition: () => getVizAnchorPosition(anchorPosition),
+        getBoatPosition: () => boatPosition,
         showAnchorHelperCircle: anchorMoveMode,
         anchorHelperRadiusM: anchorMoveHelperRadiusM,
         moveMode: anchorMoveMode,
@@ -341,7 +345,8 @@
         map: maptilerSatellite,
         kind: "satellite",
         getTrackPoints: () => trackPoints,
-        getAnchorPosition: () => getVisualAnchorPosition(anchorPosition),
+        getAnchorPosition: () => getVizAnchorPosition(anchorPosition),
+        getBoatPosition: () => boatPosition,
         showAnchorHelperCircle: anchorMoveMode,
         anchorHelperRadiusM: anchorMoveHelperRadiusM,
         moveMode: anchorMoveMode,
@@ -370,7 +375,8 @@
       existingMap: getMapTilerInstance(kind),
       container: kind === "map" ? maptilerMapContainer : maptilerSatelliteContainer,
       getTrackPoints: () => trackPoints,
-      getAnchorPosition: () => getVisualAnchorPosition(anchorPosition),
+      getAnchorPosition: () => getVizAnchorPosition(anchorPosition),
+      getBoatPosition: () => boatPosition,
       getShowAnchorHelperCircle: () => anchorMoveMode,
       getAnchorHelperRadiusM: () => anchorMoveHelperRadiusM,
       getMoveMode: () => anchorMoveMode,
@@ -409,7 +415,12 @@
     internetRescanTimer = null;
   }
 
+  function cloneTrackPoints(points: TrackPoint[]): TrackPoint[] {
+    return points.map((point) => ({ ...point }));
+  }
+
   function setView(nextView: ViewId): void {
+    vizMenuOpen = false;
     const transition = applyViewChange(navigation, nextView);
     if (transition.leftMapView) {
       destroyMapTilerView(transition.leftMapView);
@@ -499,14 +510,6 @@
     }
   }
 
-  function openConfigFromStatusLed(): void {
-    if (connection.linkLedState === "unconfigured") {
-      openConfigView("device");
-      return;
-    }
-    setView("config");
-  }
-
   function isOperationalDataView(): boolean {
     return navigation.activeView === "summary"
       || navigation.activeView === "map"
@@ -526,6 +529,27 @@
     return shouldShowAnchorActionButton() && isAnchorMoveViewActive() && Boolean(anchorPosition);
   }
 
+  function canShowVizMenu(): boolean {
+    return navigation.activeView === "map" || navigation.activeView === "satellite" || navigation.activeView === "radar";
+  }
+
+  function toggleVizMenu(): void {
+    if (!canShowVizMenu()) {
+      vizMenuOpen = false;
+      return;
+    }
+    vizMenuOpen = !vizMenuOpen;
+  }
+
+  function closeVizMenu(): void {
+    vizMenuOpen = false;
+  }
+
+  function startAnchorMoveFromMenu(): void {
+    closeVizMenu();
+    startAnchorMove();
+  }
+
   function getVisualAnchorPosition(liveAnchorPosition: GeoPoint | null = anchorPosition): GeoPoint | null {
     if (!anchorMoveMode) {
       return liveAnchorPosition;
@@ -533,17 +557,42 @@
     return anchorMoveDraftPosition ?? liveAnchorPosition;
   }
 
+  function getVizAnchorPosition(liveAnchorPosition: GeoPoint | null = anchorPosition): GeoPoint | null {
+    if (anchorState === "up") {
+      return null;
+    }
+    return getVisualAnchorPosition(liveAnchorPosition);
+  }
+
+  async function executeAnchorDownAt(lat: number, lon: number, actionName: string, resetTrack = true): Promise<boolean> {
+    const previousTrack = cloneTrackPoints(trackPoints);
+    try {
+      await moveAnchorToPosition(lat, lon, resetTrack);
+      trackBeforeLastAnchorMove = previousTrack;
+      lastDroppedAnchorPosition = { lat, lon };
+      return true;
+    } catch (error) {
+      logLine(`${actionName} failed: ${String(error)}`);
+      return false;
+    }
+  }
+
   async function triggerAnchorRise(): Promise<void> {
     anchorActionInFlight = true;
-    anchorRiseSlideOpen = false;
-    anchorRiseSlideValue = 0;
+    anchorRiseConfirmOpen = false;
     await runAction("anchor rise", raiseAnchor);
     anchorActionInFlight = false;
   }
 
   async function triggerAnchorDown(): Promise<void> {
     anchorActionInFlight = true;
-    await runAction("anchor down", dropAnchorAtCurrentPosition);
+    const currentGps = readCurrentGpsPosition(appState.latestState);
+    if (!currentGps) {
+      logLine("anchor down failed: Current GPS position unavailable.");
+      anchorActionInFlight = false;
+      return;
+    }
+    await executeAnchorDownAt(currentGps.lat, currentGps.lon, "anchor down");
     anchorActionInFlight = false;
   }
 
@@ -559,30 +608,20 @@
       void triggerAnchorRise();
       return;
     }
-    anchorRiseSlideOpen = !anchorRiseSlideOpen;
-    anchorRiseSlideValue = 0;
-  }
-
-  function handleRiseSliderInput(event: Event): void {
-    const input = event.currentTarget as HTMLInputElement | null;
-    const value = input ? Number(input.value) : 0;
-    anchorRiseSlideValue = Number.isFinite(value) ? value : 0;
-    if (anchorRiseSlideValue >= 98) {
-      void triggerAnchorRise();
-    }
+    anchorRiseConfirmOpen = !anchorRiseConfirmOpen;
   }
 
   function startAnchorMove(): void {
     if (!canShowAnchorMoveButton() || !anchorPosition) {
       return;
     }
+    vizMenuOpen = false;
     const currentGps = readCurrentGpsPosition(appState.latestState);
     anchorMoveMode = true;
     anchorMoveStartPosition = anchorPosition;
     anchorMoveDraftPosition = anchorPosition;
     anchorMoveHelperRadiusM = currentGps ? geoDeltaMeters(anchorPosition, currentGps).distanceM : 0;
-    anchorRiseSlideOpen = false;
-    anchorRiseSlideValue = 0;
+    anchorRiseConfirmOpen = false;
   }
 
   function resetAnchorMoveSession(): void {
@@ -595,6 +634,31 @@
 
   function cancelAnchorMove(): void {
     resetAnchorMoveSession();
+  }
+
+  async function restoreLastAnchorPositionFromMenu(): Promise<void> {
+    if (anchorState === "down" || !lastDroppedAnchorPosition || anchorActionInFlight || anchorMoveInFlight) {
+      return;
+    }
+    closeVizMenu();
+    anchorActionInFlight = true;
+    await executeAnchorDownAt(lastDroppedAnchorPosition.lat, lastDroppedAnchorPosition.lon, "restore last anchor position");
+    anchorActionInFlight = false;
+  }
+
+  function resetTrackBeforeLastAnchorMoveFromMenu(): void {
+    if (!trackBeforeLastAnchorMove) {
+      return;
+    }
+    closeVizMenu();
+    replaceTrackPoints(cloneTrackPoints(trackBeforeLastAnchorMove));
+    logLine(`track restored before last anchor move (${trackBeforeLastAnchorMove.length} points)`);
+  }
+
+  function resetTrackFromMenu(): void {
+    closeVizMenu();
+    replaceTrackPoints([]);
+    logLine("track reset from menu");
   }
 
   function previewAnchorMoveFromViewport(lat: number, lon: number): void {
@@ -628,7 +692,7 @@
       return;
     }
     anchorMoveInFlight = true;
-    await runAction("move anchor", () => moveAnchorToPosition(draft.lat, draft.lon));
+    await executeAnchorDownAt(draft.lat, draft.lon, "move anchor", false);
     resetAnchorMoveSession();
   }
 
@@ -752,7 +816,7 @@
   {#if navigation.activeView === "radar"}
     <RadarPage
       trackPoints={trackPoints}
-      anchorPosition={getVisualAnchorPosition(anchorPosition)}
+      anchorPosition={getVizAnchorPosition(anchorPosition)}
       moveMode={anchorMoveMode}
       onPreviewAnchorMove={previewAnchorMoveFromViewport}
     />
@@ -818,21 +882,68 @@
   {/if}
 
     </main>
-    {#if navigation.activeView !== "config"}
-      <button
-        type="button"
-        class="app-state-led-button"
-        onclick={openConfigFromStatusLed}
-        aria-label={connection.linkLedTitle}
-        title={connection.linkLedTitle}
-      >
-        <span class={`app-state-led-dot ${connection.linkLedState}`} aria-hidden="true"></span>
-      </button>
-    {/if}
     {#if navigation.activeView === "map" || navigation.activeView === "satellite" || navigation.activeView === "radar"}
       <div class="shared-viz-overlay mono" aria-live="polite">
         <div>DIST {anchorDistanceText === "--" ? "--" : anchorDistanceText.replace(" ", "")}</div>
         <div>BEAR {anchorBearingText === "--" ? "--" : anchorBearingText.replace(" deg", "")}</div>
+      </div>
+    {/if}
+    {#if canShowVizMenu()}
+      {#if vizMenuOpen}
+        <button type="button" class="viz-menu-backdrop" aria-label="Close view actions" onclick={closeVizMenu}></button>
+      {/if}
+      <div class="viz-menu-shell">
+        <button
+          type="button"
+          class="viz-menu-trigger"
+          onclick={toggleVizMenu}
+          aria-label="Open view actions"
+          aria-expanded={vizMenuOpen}
+          aria-haspopup="menu"
+          title="View actions"
+        >
+          <span class="material-symbols-rounded" aria-hidden="true">more_vert</span>
+        </button>
+        {#if vizMenuOpen}
+          <div class="viz-menu-panel" role="menu" aria-label="View actions">
+            <button
+              type="button"
+              class="viz-menu-item"
+              role="menuitem"
+              disabled={anchorState === "up" || !anchorPosition || anchorMoveMode || anchorActionInFlight || anchorMoveInFlight}
+              onclick={startAnchorMoveFromMenu}
+            >
+              Move anchor
+            </button>
+            <button
+              type="button"
+              class="viz-menu-item"
+              role="menuitem"
+              disabled={anchorState === "down" || !lastDroppedAnchorPosition || anchorMoveMode || anchorActionInFlight || anchorMoveInFlight}
+              onclick={() => void restoreLastAnchorPositionFromMenu()}
+            >
+              Restore last anchor position
+            </button>
+            <button
+              type="button"
+              class="viz-menu-item"
+              role="menuitem"
+              disabled={!trackBeforeLastAnchorMove}
+              onclick={resetTrackBeforeLastAnchorMoveFromMenu}
+            >
+              Reset track before last anchor move
+            </button>
+            <button
+              type="button"
+              class="viz-menu-item"
+              role="menuitem"
+              disabled={trackPoints.length === 0}
+              onclick={resetTrackFromMenu}
+            >
+              Reset track
+            </button>
+          </div>
+        {/if}
       </div>
     {/if}
     {#if shouldShowAnchorActionButton()}
@@ -849,6 +960,7 @@
                 title="Cancel anchor move"
               >
                 <span class="material-symbols-rounded anchor-move-icon" aria-hidden="true">close</span>
+                <span class="anchor-move-label">Cancel</span>
               </button>
               <button
                 type="button"
@@ -859,36 +971,37 @@
                 title="Confirm anchor move"
               >
                 <span class="material-symbols-rounded anchor-move-icon" aria-hidden="true">check</span>
+                <span class="anchor-move-label">Confirm</span>
               </button>
             </div>
-          {:else}
-            <button
-              type="button"
-              class="anchor-move-button start"
-              onclick={startAnchorMove}
-              disabled={anchorActionInFlight}
-              aria-label="Start anchor move mode"
-              title="Start anchor move mode"
-            >
-              <span class="material-symbols-rounded anchor-move-icon" aria-hidden="true">edit_location_alt</span>
-            </button>
           {/if}
         {/if}
-        {#if anchorRiseSlideOpen && anchorState === "down"}
-          <div class="anchor-rise-slider-card">
-            <div class="anchor-rise-slider-title">Slide to confirm anchor rise</div>
-            <input
-              class="anchor-rise-slider"
-              type="range"
-              min="0"
-              max="100"
-              step="1"
-              value={anchorRiseSlideValue}
-              oninput={handleRiseSliderInput}
+        {#if anchorRiseConfirmOpen && anchorState === "down"}
+          <div class="anchor-move-actions anchor-rise-actions">
+            <button
+              type="button"
+              class="anchor-move-button cancel"
+              onclick={() => {
+                anchorRiseConfirmOpen = false;
+              }}
               disabled={anchorActionInFlight}
-              aria-label="Slide to confirm anchor rise"
-            />
-            <div class="anchor-rise-slider-hint mono">Anchor position: {anchorPositionText}</div>
+              aria-label="Cancel anchor rise"
+              title="Cancel anchor rise"
+            >
+              <span class="material-symbols-rounded anchor-move-icon" aria-hidden="true">close</span>
+              <span class="anchor-move-label">Cancel</span>
+            </button>
+            <button
+              type="button"
+              class="anchor-move-button raise"
+              onclick={() => void triggerAnchorRise()}
+              disabled={anchorActionInFlight}
+              aria-label="Confirm anchor rise"
+              title="Confirm anchor rise"
+            >
+              <span class="material-symbols-rounded anchor-move-icon" aria-hidden="true">anchor</span>
+              <span class="anchor-move-label">Raise</span>
+            </button>
           </div>
         {/if}
         <button

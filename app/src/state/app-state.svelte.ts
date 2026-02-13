@@ -208,8 +208,6 @@ function defaultConnectionState(): ExtendedConnectionState {
   return {
     mode: loadMode(),
     appState: "UNCONFIGURED",
-    linkLedState: "unconfigured",
-    linkLedTitle: "Unconfigured. Open device setup.",
     bleSupported: false,
     bleStatusText: "disconnected",
     boatIdText: "--",

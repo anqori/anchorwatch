@@ -18,6 +18,7 @@ export interface MapTilerTrackViewportInput {
   kind: MapTilerKind;
   getTrackPoints: () => TrackPoint[];
   getAnchorPosition: () => GeoPoint | null;
+  getBoatPosition: () => GeoPoint | null;
   showAnchorHelperCircle: boolean;
   anchorHelperRadiusM: number;
   moveMode: boolean;
@@ -30,6 +31,7 @@ export interface EnsureMapTilerViewInput {
   kind: MapTilerKind;
   getTrackPoints: () => TrackPoint[];
   getAnchorPosition: () => GeoPoint | null;
+  getBoatPosition: () => GeoPoint | null;
   getShowAnchorHelperCircle: () => boolean;
   getAnchorHelperRadiusM: () => number;
   getMoveMode: () => boolean;
@@ -48,7 +50,29 @@ export interface EnsureMapTilerViewInput {
 
 const applyingViewportLimits = new WeakSet<MapTilerMap>();
 const anchorMarkers = new WeakMap<MapTilerMap, MapTilerMarker>();
+const boatMarkers = new WeakMap<MapTilerMap, MapTilerMarker>();
 const anchorMoveStates = new WeakMap<MapTilerMap, { active: boolean; fixedPoint: { x: number; y: number } | null }>();
+const lastViewportEnforcement = new WeakMap<MapTilerMap, {
+  minLon: number;
+  minLat: number;
+  maxLon: number;
+  maxLat: number;
+  minZoom: number;
+}>();
+
+function hasMeaningfulBoundsChange(
+  previous: { minLon: number; minLat: number; maxLon: number; maxLat: number; minZoom: number } | undefined,
+  next: { minLon: number; minLat: number; maxLon: number; maxLat: number; minZoom: number },
+): boolean {
+  if (!previous) {
+    return true;
+  }
+  return Math.abs(previous.minLon - next.minLon) > 0.0000001
+    || Math.abs(previous.minLat - next.minLat) > 0.0000001
+    || Math.abs(previous.maxLon - next.maxLon) > 0.0000001
+    || Math.abs(previous.maxLat - next.maxLat) > 0.0000001
+    || Math.abs(previous.minZoom - next.minZoom) > 0.001;
+}
 
 function runtimeViewportInput(map: MapTilerMap, input: EnsureMapTilerViewInput): MapTilerTrackViewportInput {
   return {
@@ -56,6 +80,7 @@ function runtimeViewportInput(map: MapTilerMap, input: EnsureMapTilerViewInput):
     kind: input.kind,
     getTrackPoints: input.getTrackPoints,
     getAnchorPosition: input.getAnchorPosition,
+    getBoatPosition: input.getBoatPosition,
     showAnchorHelperCircle: input.getShowAnchorHelperCircle(),
     anchorHelperRadiusM: input.getAnchorHelperRadiusM(),
     moveMode: input.getMoveMode(),
@@ -134,23 +159,9 @@ function ensureTrackLayers(map: MapTilerMap, kind: MapTilerKind, trackPoints: Tr
       type: "line",
       filter: ["==", ["get", "kind"], "track"],
       paint: {
-        "line-color": kind === "map" ? "#5ce1ff" : "#ffd166",
+        "line-color": "#16bf73",
         "line-width": 3,
         "line-opacity": 0.92,
-      },
-    });
-  }
-  if (!map.getLayer(ids.pointLayer)) {
-    map.addLayer({
-      id: ids.pointLayer,
-      source: ids.source,
-      type: "circle",
-      filter: ["==", ["get", "kind"], "current"],
-      paint: {
-        "circle-radius": 6,
-        "circle-color": "#ffffff",
-        "circle-stroke-color": kind === "map" ? "#5ce1ff" : "#ffd166",
-        "circle-stroke-width": 2,
       },
     });
   }
@@ -167,16 +178,13 @@ function updateTrackData(map: MapTilerMap, kind: MapTilerKind, trackPoints: Trac
   }
 }
 
-function createAnchorElement(kind: MapTilerKind): HTMLDivElement {
+function createPinElement(kind: MapTilerKind, type: "anchor" | "boat"): HTMLDivElement {
   const element = document.createElement("div");
-  element.className = "aw-anchor-marker";
-  element.style.width = "16px";
-  element.style.height = "16px";
-  element.style.borderRadius = "999px";
-  element.style.border = "2px solid #fff";
-  element.style.boxSizing = "border-box";
-  element.style.boxShadow = "0 0 0 2px rgba(0,0,0,0.24)";
-  element.style.background = kind === "map" ? "#2f9dff" : "#f3b73f";
+  element.className = `aw-map-pin ${type} ${kind === "map" ? "map" : "satellite"}`;
+  const icon = document.createElement("span");
+  icon.className = "material-symbols-rounded aw-map-pin-icon";
+  icon.textContent = type === "anchor" ? "anchor" : "directions_boat";
+  element.append(icon);
   return element;
 }
 
@@ -192,7 +200,7 @@ function ensureAnchorMarker(map: MapTilerMap, kind: MapTilerKind, anchorPosition
 
   if (!existing) {
     const marker = new MapTilerMarker({
-      element: createAnchorElement(kind),
+      element: createPinElement(kind, "anchor"),
       draggable: false,
       pitchAlignment: "map",
       rotationAlignment: "map",
@@ -206,6 +214,36 @@ function ensureAnchorMarker(map: MapTilerMap, kind: MapTilerKind, anchorPosition
   const lngLat = existing.getLngLat();
   if (Math.abs(lngLat.lat - anchorPosition.lat) > 0.0000001 || Math.abs(lngLat.lng - anchorPosition.lon) > 0.0000001) {
     existing.setLngLat([anchorPosition.lon, anchorPosition.lat]);
+  }
+}
+
+function ensureBoatMarker(map: MapTilerMap, kind: MapTilerKind, boatPosition: GeoPoint | null): void {
+  const existing = boatMarkers.get(map);
+
+  if (!boatPosition) {
+    if (existing) {
+      existing.remove();
+      boatMarkers.delete(map);
+    }
+    return;
+  }
+
+  if (!existing) {
+    const marker = new MapTilerMarker({
+      element: createPinElement(kind, "boat"),
+      draggable: false,
+      pitchAlignment: "map",
+      rotationAlignment: "map",
+    })
+      .setLngLat([boatPosition.lon, boatPosition.lat])
+      .addTo(map);
+    boatMarkers.set(map, marker);
+    return;
+  }
+
+  const lngLat = existing.getLngLat();
+  if (Math.abs(lngLat.lat - boatPosition.lat) > 0.0000001 || Math.abs(lngLat.lng - boatPosition.lon) > 0.0000001) {
+    existing.setLngLat([boatPosition.lon, boatPosition.lat]);
   }
 }
 
@@ -295,23 +333,33 @@ function enforceViewportLimits(
 
   applyingViewportLimits.add(map);
   try {
+    if (map.isMoving() || map.isZooming()) {
+      return;
+    }
+
     const anchorPoint = getMapTilerAnchorPoint(trackPoints, anchorPosition);
     const panBounds = buildMapTilerPanBounds(anchorPoint, maxPanDistanceM);
     const [[minLon, minLat], [maxLon, maxLat]] = panBounds;
-
-    map.setMaxBounds(panBounds);
-
     const center = map.getCenter();
     const clampedCenter: [number, number] = [
       clampNumber(center.lng, minLon, maxLon),
       clampNumber(center.lat, minLat, maxLat),
     ];
+
+    const canvas = map.getCanvas();
+    const minZoom = mapTilerMinZoomForArea(clampedCenter[1], canvas.clientWidth, canvas.clientHeight, maxVisibleAreaM2);
+
+    const previous = lastViewportEnforcement.get(map);
+    const next = { minLon, minLat, maxLon, maxLat, minZoom };
+    if (hasMeaningfulBoundsChange(previous, next)) {
+      map.setMaxBounds(panBounds);
+      lastViewportEnforcement.set(map, next);
+    }
+
     if (Math.abs(clampedCenter[0] - center.lng) > 0.0000001 || Math.abs(clampedCenter[1] - center.lat) > 0.0000001) {
       map.setCenter(clampedCenter);
     }
 
-    const canvas = map.getCanvas();
-    const minZoom = mapTilerMinZoomForArea(clampedCenter[1], canvas.clientWidth, canvas.clientHeight, maxVisibleAreaM2);
     if (Math.abs(map.getMinZoom() - minZoom) > 0.001) {
       map.setMinZoom(minZoom);
     }
@@ -326,9 +374,11 @@ function enforceViewportLimits(
 export function updateMapTrackAndViewport(input: MapTilerTrackViewportInput): void {
   const trackPoints = input.getTrackPoints();
   const liveAnchorPosition = input.getAnchorPosition();
+  const boatPosition = input.getBoatPosition();
   const anchorPosition = resolveRenderAnchorPosition(input, liveAnchorPosition);
   updateTrackData(input.map, input.kind, trackPoints);
   ensureAnchorMarker(input.map, input.kind, anchorPosition);
+  ensureBoatMarker(input.map, input.kind, boatPosition);
   ensureAnchorHelperLayer(
     input.map,
     input.kind,
@@ -402,8 +452,14 @@ export function destroyMapTilerView(map: MapTilerMap | null): null {
     marker.remove();
     anchorMarkers.delete(map);
   }
+  const boatMarker = boatMarkers.get(map);
+  if (boatMarker) {
+    boatMarker.remove();
+    boatMarkers.delete(map);
+  }
   map.remove();
   applyingViewportLimits.delete(map);
   anchorMoveStates.delete(map);
+  lastViewportEnforcement.delete(map);
   return null;
 }

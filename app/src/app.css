@@ -104,59 +104,10 @@ textarea {
   min-width: 8.5rem;
 }
 
-.app-state-led-button {
-  position: fixed;
-  top: calc(env(safe-area-inset-top) + 0.7rem);
-  left: 0.7rem;
-  z-index: 60;
-  width: 2rem;
-  height: 2rem;
-  border-radius: 999px;
-  border: 1px solid rgba(110, 110, 110, 0.35);
-  background: rgba(248, 248, 248, 0.8);
-  backdrop-filter: blur(6px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  cursor: pointer;
-}
-
-.app-state-led-dot {
-  width: 0.78rem;
-  height: 0.78rem;
-  border-radius: 999px;
-}
-
-.app-state-led-dot.bt {
-  background: #1dc35f;
-  box-shadow: 0 0 8px rgba(29, 195, 95, 0.7);
-}
-
-.app-state-led-dot.relay {
-  background: #e7b61e;
-  box-shadow: 0 0 8px rgba(231, 182, 30, 0.7);
-}
-
-.app-state-led-dot.fake {
-  background: #2da2ff;
-  box-shadow: 0 0 8px rgba(45, 162, 255, 0.72);
-}
-
-.app-state-led-dot.unconnected {
-  background: #e44646;
-  box-shadow: 0 0 8px rgba(228, 70, 70, 0.68);
-}
-
-.app-state-led-dot.unconfigured {
-  background: #8d8d8d;
-  box-shadow: 0 0 8px rgba(141, 141, 141, 0.62);
-}
-
 .anchor-action-stack {
   position: fixed;
   right: max(0.8rem, env(safe-area-inset-right));
-  bottom: calc(var(--am-tabbar-height) + 0.8rem);
+  bottom: calc(var(--am-tabbar-height) + 2.2rem);
   z-index: 70;
   display: flex;
   flex-direction: column;
@@ -165,19 +116,26 @@ textarea {
 }
 
 .anchor-move-actions {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(var(--am-tabbar-height) + 2.2rem);
+  z-index: 72;
   display: flex;
   align-items: center;
-  gap: 0.45rem;
+  gap: 0.55rem;
 }
 
 .anchor-move-button {
   border: 0;
-  width: 2.8rem;
+  min-width: 7rem;
   height: 2.8rem;
-  border-radius: 999px;
+  padding: 0 0.85rem;
+  border-radius: 0.85rem;
   display: flex;
   align-items: center;
   justify-content: center;
+  gap: 0.35rem;
   cursor: pointer;
   box-shadow: 0 0.3rem 0.9rem rgba(0, 0, 0, 0.3);
 }
@@ -189,6 +147,11 @@ textarea {
 
 .anchor-move-button.confirm {
   background: #1b9e5a;
+  color: #fff;
+}
+
+.anchor-move-button.raise {
+  background: #d53939;
   color: #fff;
 }
 
@@ -205,6 +168,12 @@ textarea {
 
 .anchor-move-icon {
   font-size: 1.25rem;
+  line-height: 1;
+}
+
+.anchor-move-label {
+  font-size: 0.82rem;
+  font-weight: 600;
   line-height: 1;
 }
 
@@ -266,30 +235,8 @@ textarea {
   text-shadow: 0 0 2px rgba(0, 0, 0, 0.45);
 }
 
-.anchor-rise-slider-card {
-  width: min(18rem, calc(100vw - 1.7rem));
-  border-radius: 0.8rem;
-  background: rgba(16, 16, 16, 0.94);
-  color: #fff;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  padding: 0.55rem 0.7rem 0.7rem;
-}
-
-.anchor-rise-slider-title {
-  font-size: 0.79rem;
-  font-weight: 600;
-  margin-bottom: 0.46rem;
-}
-
-.anchor-rise-slider {
-  width: 100%;
-  accent-color: #f04646;
-}
-
-.anchor-rise-slider-hint {
-  margin-top: 0.35rem;
-  font-size: 0.73rem;
-  opacity: 0.86;
+.anchor-rise-actions {
+  z-index: 73;
 }
 
 .device-corner-action {
@@ -416,8 +363,8 @@ pre {
 
 .shared-viz-overlay {
   position: fixed;
-  left: max(0.8rem, env(safe-area-inset-left));
-  bottom: calc(var(--am-tabbar-height) + 0.85rem);
+  left: calc(max(0.8rem, env(safe-area-inset-left)) + 2.85rem);
+  top: max(0.8rem, env(safe-area-inset-top));
   z-index: 65;
   color: rgba(228, 244, 246, 0.94);
   background: rgba(4, 18, 22, 0.58);
@@ -430,6 +377,77 @@ pre {
   min-width: 6.4rem;
 }
 
+.viz-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 71;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+}
+
+.viz-menu-shell {
+  position: fixed;
+  top: max(0.8rem, env(safe-area-inset-top));
+  left: max(0.8rem, env(safe-area-inset-left));
+  z-index: 72;
+}
+
+.viz-menu-trigger {
+  width: 2.15rem;
+  height: 2.15rem;
+  border-radius: 0.55rem;
+  border: 1px solid rgba(240, 255, 249, 0.25);
+  background: rgba(7, 22, 19, 0.8);
+  color: rgba(235, 250, 245, 0.96);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.viz-menu-trigger > .material-symbols-rounded {
+  font-size: 1.2rem;
+  line-height: 1;
+}
+
+.viz-menu-panel {
+  margin-top: 0.42rem;
+  min-width: 14.75rem;
+  border-radius: 0.62rem;
+  border: 1px solid rgba(230, 248, 242, 0.22);
+  background: rgba(7, 20, 17, 0.94);
+  box-shadow: 0 0.4rem 1rem rgba(0, 0, 0, 0.34);
+  overflow: hidden;
+}
+
+.viz-menu-item {
+  display: block;
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid rgba(230, 248, 242, 0.1);
+  background: transparent;
+  color: rgba(238, 251, 246, 0.96);
+  text-align: left;
+  padding: 0.56rem 0.72rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.viz-menu-item:last-child {
+  border-bottom: 0;
+}
+
+.viz-menu-item:disabled {
+  color: rgba(191, 203, 198, 0.52);
+  cursor: not-allowed;
+}
+
+.viz-menu-item:not(:disabled):hover {
+  background: rgba(94, 228, 177, 0.12);
+}
+
 .maptiler-host {
   width: 100%;
   height: 100%;
@@ -438,6 +456,38 @@ pre {
   max-width: none;
   border: 0;
   border-radius: 0;
+}
+
+.aw-map-pin {
+  position: relative;
+  width: 1.2rem;
+  height: 1.2rem;
+  border-radius: 999px;
+  border: 1.8px solid rgba(255, 255, 255, 0.96);
+  box-shadow: 0 0 0 1.8px rgba(0, 0, 0, 0.24);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.aw-map-pin.anchor {
+  background: #2f9dff;
+  color: #fff;
+  z-index: 5;
+}
+
+.aw-map-pin.boat {
+  background: #16bf73;
+  color: #fff;
+  z-index: 6;
+}
+
+.aw-map-pin-icon {
+  display: block;
+  font-size: 0.7rem;
+  font-variation-settings: "FILL" 1, "wght" 600, "GRAD" 0, "opsz" 20;
+  transform: translateY(0.02rem);
 }
 
 .maptiler-missing {
@@ -484,6 +534,14 @@ pre {
   font-size: 6.3px;
 }
 
+.radar-compass-label {
+  fill: rgba(210, 248, 234, 0.92);
+  font-size: 7.2px;
+  font-weight: 700;
+  dominant-baseline: middle;
+  letter-spacing: 0.03em;
+}
+
 .radar-axis {
   stroke: rgba(89, 230, 175, 0.25);
   stroke-width: 0.95;
@@ -491,7 +549,7 @@ pre {
 
 .radar-track-line {
   fill: none;
-  stroke: #8df8cf;
+  stroke: #16bf73;
   stroke-width: 1.8;
   stroke-linecap: round;
   stroke-linejoin: round;
@@ -503,6 +561,12 @@ pre {
   stroke-width: 1.15;
 }
 
+.radar-boat-symbol {
+  fill: #16bf73;
+  stroke: rgba(255, 255, 255, 0.82);
+  stroke-width: 1.1;
+}
+
 .radar-anchor-center {
   fill: #2f9dff;
   stroke: rgba(255, 255, 255, 0.82);
@@ -511,6 +575,23 @@ pre {
 
 .radar-anchor-center.move-mode {
   fill: #f3b73f;
+}
+
+.radar-symbol-label {
+  fill: rgba(250, 252, 252, 0.96);
+  font-size: 6.4px;
+  text-anchor: middle;
+  dominant-baseline: central;
+  font-weight: 700;
+  pointer-events: none;
+}
+
+.radar-symbol-icon {
+  font-family: "Material Symbols Rounded";
+  font-size: 5.9px;
+  font-weight: 400;
+  letter-spacing: 0;
+  font-variation-settings: "FILL" 1, "wght" 650, "GRAD" 0, "opsz" 24;
 }
 
 .radar-anchor {
@@ -543,13 +624,6 @@ pre {
   cursor: pointer;
   font-size: 1.15rem;
   line-height: 1;
-}
-
-.radar-direction-button {
-  width: 3.2rem;
-  font-size: 0.62rem;
-  font-weight: 700;
-  letter-spacing: 0.03em;
 }
 
 .radar-zoom-button:disabled {

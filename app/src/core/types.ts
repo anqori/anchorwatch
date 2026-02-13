@@ -1,6 +1,5 @@
 export type Mode = "fake" | "device";
 export type AppConnectivityState = "UNCONFIGURED" | "CONFIGURED_BUT_UNCONNECTED" | "CONNECTED";
-export type LinkLedState = "bt" | "relay" | "fake" | "unconnected" | "unconfigured";
 export type InboundSource = "ble/eventRx" | "ble/snapshot" | "cloud/status.snapshot" | "fake/snapshot";
 export type PillClass = "ok" | "warn" | "alarm";
 export type ViewId = "summary" | "satellite" | "map" | "radar" | "config";
@@ -26,8 +25,6 @@ export interface ConfigSectionStatusItem {
 export interface ConnectionState {
   mode: Mode;
   appState: AppConnectivityState;
-  linkLedState: LinkLedState;
-  linkLedTitle: string;
   bleSupported: boolean;
   bleStatusText: string;
   boatIdText: string;

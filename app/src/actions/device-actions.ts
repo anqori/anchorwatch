@@ -286,11 +286,15 @@ export async function raiseAnchor(): Promise<void> {
   await refreshStateSnapshot();
 }
 
-export async function moveAnchorToPosition(lat: number, lon: number): Promise<void> {
+export async function moveAnchorToPosition(lat: number, lon: number, resetTrack = true): Promise<void> {
   const connection = deviceLinker.getConnection();
   const result = await connection.commandAnchorDown(lat, lon);
   if (!result.accepted) {
     throw new Error(result.errorDetail || result.errorCode || "anchor.down rejected");
+  }
+  if (resetTrack) {
+    replaceTrackPoints([]);
+    logLine("track reset after anchor.down");
   }
   logLine(`anchor moved via ${connection.kind} to lat=${lat.toFixed(5)} lon=${lon.toFixed(5)}`);
   await refreshStateSnapshot();

@@ -1,4 +1,4 @@
-import type { AppConnectivityState, InboundSource, LinkLedState } from "../core/types";
+import type { AppConnectivityState, InboundSource } from "../core/types";
 
 export interface InternetSettingsStatusInput {
   onboardingWifiConnected: boolean;
@@ -38,42 +38,6 @@ export function deriveAppConnectivityState(configured: boolean, activeConnected:
     return "UNCONFIGURED";
   }
   return activeConnected ? "CONNECTED" : "CONFIGURED_BUT_UNCONNECTED";
-}
-
-export function deriveLinkLedState(
-  configured: boolean,
-  activeConnected: boolean,
-  activeConnection: "fake" | "bluetooth" | "cloud-relay",
-): LinkLedState {
-  if (!configured) {
-    return "unconfigured";
-  }
-  if (!activeConnected) {
-    return "unconnected";
-  }
-  if (activeConnection === "fake") {
-    return "fake";
-  }
-  if (activeConnection === "bluetooth") {
-    return "bt";
-  }
-  return "relay";
-}
-
-export function linkLedTitle(state: LinkLedState): string {
-  if (state === "bt") {
-    return "Connected via Bluetooth. Open configuration.";
-  }
-  if (state === "relay") {
-    return "Connected via relay. Open configuration.";
-  }
-  if (state === "fake") {
-    return "Demo mode active. Open configuration.";
-  }
-  if (state === "unconnected") {
-    return "Configured but currently unconnected. Open configuration.";
-  }
-  return "Unconfigured. Open device setup.";
 }
 
 export function buildInternetSettingsStatusText(input: InternetSettingsStatusInput): string {

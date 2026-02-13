@@ -1,6 +1,7 @@
 import type { JsonRecord, PillClass, TrackPoint, WifiScanNetwork } from "../core/types";
 import type { ConfigPatchCommand } from "../services/protocol-messages";
 import { getBoatId } from "../services/persistence-domain";
+import { geoDeltaMeters } from "../services/geo-nav";
 import type {
   DeviceConnection,
   DeviceCommandResult,
@@ -17,6 +18,31 @@ interface FakeTick {
   trackPoint: TrackPoint;
   stateText: string;
   stateClass: PillClass;
+}
+
+const FAKE_HEADING_MAX_RATE_DEG_PER_S = 1;
+const ANCHOR_DOWN_HEADING_MAX_OFFSET_DEG = 20;
+
+function normalizeAngle360(value: number): number {
+  return (value % 360 + 360) % 360;
+}
+
+function shortestAngleDelta(fromDeg: number, toDeg: number): number {
+  return ((toDeg - fromDeg + 540) % 360) - 180;
+}
+
+function moveAngleToward(fromDeg: number, toDeg: number, maxStepDeg: number): number {
+  const delta = shortestAngleDelta(fromDeg, toDeg);
+  if (Math.abs(delta) <= maxStepDeg) {
+    return normalizeAngle360(toDeg);
+  }
+  return normalizeAngle360(fromDeg + Math.sign(delta) * maxStepDeg);
+}
+
+function clampAngleAround(angleDeg: number, centerDeg: number, maxOffsetDeg: number): number {
+  const offset = shortestAngleDelta(centerDeg, angleDeg);
+  const clampedOffset = Math.max(-maxOffsetDeg, Math.min(maxOffsetDeg, offset));
+  return normalizeAngle360(centerDeg + clampedOffset);
 }
 
 export class DeviceConnectionFake implements DeviceConnection {
@@ -40,6 +66,10 @@ export class DeviceConnectionFake implements DeviceConnection {
 
   private anchorLon: number | null = null;
 
+  private simulatedHeadingDeg = 0;
+
+  private lastHeadingUpdateMs = 0;
+
   async connect(): Promise<void> {
     if (this.connected) {
       this.emitStatus();
@@ -52,6 +82,8 @@ export class DeviceConnectionFake implements DeviceConnection {
     this.anchorState = "up";
     this.anchorLat = null;
     this.anchorLon = null;
+    this.simulatedHeadingDeg = 0;
+    this.lastHeadingUpdateMs = 0;
 
     this.publishInterval = setInterval(() => {
       this.publishSnapshot();
@@ -119,9 +151,13 @@ export class DeviceConnectionFake implements DeviceConnection {
   }
 
   async commandAnchorDown(lat: number, lon: number): Promise<DeviceCommandResult> {
+    const wasAnchorUp = this.anchorState === "up";
     this.anchorState = "down";
     this.anchorLat = Number.isFinite(lat) ? lat : null;
     this.anchorLon = Number.isFinite(lon) ? lon : null;
+    if (wasAnchorUp) {
+      this.points = [];
+    }
     this.publishSnapshot();
     return {
       accepted: true,
@@ -244,7 +280,9 @@ export class DeviceConnectionFake implements DeviceConnection {
     const lon = 10.1402 + Math.cos(t / 60) * 0.0011;
     const sogKn = 0.4 + Math.abs(Math.sin(t / 10)) * 0.8;
     const cogDeg = (t * 16) % 360;
-    const headingDeg = (cogDeg + Math.sin(t / 7) * 14 + 360) % 360;
+    const headingTargetDeg = normalizeAngle360(cogDeg + Math.sin(t / 9) * 10);
+    const anchorBearingDeg = this.readAnchorBearingDeg(lat, lon);
+    const headingDeg = this.computeSimulatedHeading(nowMs, headingTargetDeg, anchorBearingDeg);
 
     if (depthM < 2.0) {
       return {
@@ -300,5 +338,36 @@ export class DeviceConnectionFake implements DeviceConnection {
       stateText: "FAKE: MONITORING",
       stateClass: "ok",
     };
+  }
+
+  private readAnchorBearingDeg(lat: number, lon: number): number | null {
+    if (this.anchorState !== "down" || this.anchorLat === null || this.anchorLon === null) {
+      return null;
+    }
+    return geoDeltaMeters(
+      { lat: this.anchorLat, lon: this.anchorLon },
+      { lat, lon },
+    ).bearingDeg;
+  }
+
+  private computeSimulatedHeading(nowMs: number, targetDeg: number, anchorBearingDeg: number | null): number {
+    const normalizedTarget = normalizeAngle360(targetDeg);
+    if (this.lastHeadingUpdateMs <= 0) {
+      this.simulatedHeadingDeg = normalizedTarget;
+      this.lastHeadingUpdateMs = nowMs;
+    }
+
+    const elapsedS = Math.max(0, (nowMs - this.lastHeadingUpdateMs) / 1000);
+    this.lastHeadingUpdateMs = nowMs;
+
+    const maxStepDeg = FAKE_HEADING_MAX_RATE_DEG_PER_S * elapsedS;
+    let headingDeg = moveAngleToward(this.simulatedHeadingDeg, normalizedTarget, maxStepDeg);
+
+    if (anchorBearingDeg !== null) {
+      headingDeg = clampAngleAround(headingDeg, anchorBearingDeg, ANCHOR_DOWN_HEADING_MAX_OFFSET_DEG);
+    }
+
+    this.simulatedHeadingDeg = headingDeg;
+    return headingDeg;
   }
 }
