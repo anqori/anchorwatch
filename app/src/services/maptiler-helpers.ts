@@ -2,6 +2,7 @@ import type { Feature, FeatureCollection, Geometry, Position } from "geojson";
 import { MAPTILER_DEFAULT_CENTER, MAPTILER_MAX_ZOOM, WEB_MERCATOR_EARTH_CIRCUMFERENCE_M, WEB_MERCATOR_TILE_SIZE } from "../core/constants";
 import type { TrackPoint } from "../core/types";
 import { clampNumber } from "./data-utils";
+import type { GeoPoint } from "./geo-nav";
 
 export function buildTrackGeoJson(points: TrackPoint[]): FeatureCollection<Geometry> {
   const coordinates: Position[] = points.map((point) => [point.lon, point.lat]);
@@ -56,7 +57,10 @@ export function resolveMapTilerStyleUrl(styleRef: string, apiKey: string): strin
   return `https://api.maptiler.com/maps/${encodeURIComponent(trimmed)}/style.json?key=${encodeURIComponent(apiKey)}`;
 }
 
-export function getMapTilerAnchorPoint(trackPoints: TrackPoint[]): [number, number] {
+export function getMapTilerAnchorPoint(trackPoints: TrackPoint[], anchorPosition: GeoPoint | null): [number, number] {
+  if (anchorPosition) {
+    return [anchorPosition.lon, anchorPosition.lat];
+  }
   const latestPoint = trackPoints[trackPoints.length - 1];
   if (latestPoint) {
     return [latestPoint.lon, latestPoint.lat];

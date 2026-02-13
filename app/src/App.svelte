@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import type { Map as MapTilerMap } from "@maptiler/sdk";
-  import type { ConfigSectionId, TrackPoint, ViewId, WifiScanNetwork, WifiSecurity } from "./core/types";
+  import type { AnchorRuntimeState, ConfigSectionId, TrackPoint, ViewId, WifiScanNetwork, WifiSecurity } from "./core/types";
   import {
     CONFIG_SECTIONS,
     MAPTILER_API_KEY,
@@ -24,7 +24,7 @@
     deriveLinkLedState,
     linkLedTitle,
   } from "./services/connectivity-derive";
-  import { readFirmwareVersionFromState, readOnboardingWifiStatus } from "./services/state-derive";
+  import { readAnchorStatus, readCurrentGpsPosition, readFirmwareVersionFromState, readOnboardingWifiStatus } from "./services/state-derive";
   import {
     applyGoToSettings,
     applyOpenConfigSection,
@@ -48,7 +48,10 @@
     applyProfilesConfig,
     applyTriggerConfig,
     connectToWifiNetwork,
+    dropAnchorAtCurrentPosition,
     fetchTrackSnapshot,
+    moveAnchorToPosition,
+    raiseAnchor,
     scanWifiNetworks,
     selectBluetoothConnection,
     selectRelayConnection,
@@ -57,6 +60,7 @@
     stopDeviceRuntime,
     useFakeMode,
   } from "./actions/device-actions";
+  import { geoDeltaMeters, type GeoPoint } from "./services/geo-nav";
   import { appState, initAppStateEnvironment, logLine } from "./state/app-state.svelte";
   import {
     App as KonstaApp,
@@ -101,12 +105,16 @@
   let currentSogText = $state("--");
   let currentCogText = $state("--");
   let currentHeadingText = $state("--");
-  let radarTargetX = $state(110);
-  let radarTargetY = $state(110);
-  let radarDistanceText = $state("--");
-  let radarBearingText = $state("--");
   let maptilerStatusText = $state("Map ready state pending.");
   let trackPoints = $state<TrackPoint[]>([]);
+  let anchorState = $state<AnchorRuntimeState>("up");
+  let anchorPosition = $state<GeoPoint | null>(null);
+  let anchorPositionText = $state("--");
+  let anchorDistanceText = $state("--");
+  let anchorBearingText = $state("--");
+  let anchorActionInFlight = $state(false);
+  let anchorRiseSlideOpen = $state(false);
+  let anchorRiseSlideValue = $state(0);
 
   let maptilerMapContainer = $state<HTMLDivElement | null>(null);
   let maptilerSatelliteContainer = $state<HTMLDivElement | null>(null);
@@ -130,10 +138,6 @@
     currentSogText = appState.track.currentSogText;
     currentCogText = appState.track.currentCogText;
     currentHeadingText = appState.track.currentHeadingText;
-    radarTargetX = appState.track.radarTargetX;
-    radarTargetY = appState.track.radarTargetY;
-    radarDistanceText = appState.track.radarDistanceText;
-    radarBearingText = appState.track.radarBearingText;
     maptilerStatusText = appState.maptilerStatusText;
     trackPoints = appState.track.points;
   });
@@ -226,6 +230,21 @@
 
   $effect(() => {
     const wifiStatus = readOnboardingWifiStatus(appState.latestState);
+    const currentGps = readCurrentGpsPosition(appState.latestState);
+    const anchorStatus = readAnchorStatus(appState.latestState);
+    anchorState = anchorStatus.state;
+    anchorPosition = anchorStatus.position;
+    anchorPositionText = anchorStatus.position
+      ? `${anchorStatus.position.lat.toFixed(5)}, ${anchorStatus.position.lon.toFixed(5)}`
+      : "--";
+    if (anchorStatus.position && currentGps) {
+      const { distanceM, bearingDeg } = geoDeltaMeters(anchorStatus.position, currentGps);
+      anchorDistanceText = `${distanceM.toFixed(1)} m`;
+      anchorBearingText = `${bearingDeg.toFixed(0)} deg`;
+    } else {
+      anchorDistanceText = "--";
+      anchorBearingText = "--";
+    }
     network.onboardingWifiConnected = wifiStatus.connected;
     network.onboardingWifiSsid = wifiStatus.ssid || "--";
     network.onboardingWifiRssiText = wifiStatus.rssi === null ? "--" : `${wifiStatus.rssi} dBm`;
@@ -239,6 +258,13 @@
     }
     network.selectedWifiNetwork = network.availableWifiNetworks.find((wifiNetwork) => wifiNetwork.ssid === network.selectedWifiSsid) ?? null;
     versions.firmware = readFirmwareVersionFromState(appState.latestState);
+  });
+
+  $effect(() => {
+    if (!shouldShowAnchorActionButton() || anchorState !== "down") {
+      anchorRiseSlideOpen = false;
+      anchorRiseSlideValue = 0;
+    }
   });
 
   $effect(() => {
@@ -293,6 +319,10 @@
         map: maptilerMap,
         kind: "map",
         getTrackPoints: () => trackPoints,
+        getAnchorPosition: () => anchorPosition,
+        onMoveAnchor: (lat, lon) => {
+          void requestAnchorMove(lat, lon);
+        },
         maxPanDistanceM: MAPTILER_MAX_PAN_DISTANCE_M,
         maxVisibleAreaM2: MAPTILER_MAX_VISIBLE_AREA_M2,
       });
@@ -302,6 +332,10 @@
         map: maptilerSatellite,
         kind: "satellite",
         getTrackPoints: () => trackPoints,
+        getAnchorPosition: () => anchorPosition,
+        onMoveAnchor: (lat, lon) => {
+          void requestAnchorMove(lat, lon);
+        },
         maxPanDistanceM: MAPTILER_MAX_PAN_DISTANCE_M,
         maxVisibleAreaM2: MAPTILER_MAX_VISIBLE_AREA_M2,
       });
@@ -326,6 +360,10 @@
       existingMap: getMapTilerInstance(kind),
       container: kind === "map" ? maptilerMapContainer : maptilerSatelliteContainer,
       getTrackPoints: () => trackPoints,
+      getAnchorPosition: () => anchorPosition,
+      onMoveAnchor: (lat, lon) => {
+        void requestAnchorMove(lat, lon);
+      },
       apiKey: MAPTILER_API_KEY,
       defaultCenter: MAPTILER_DEFAULT_CENTER,
       defaultZoom: MAPTILER_DEFAULT_ZOOM,
@@ -458,6 +496,60 @@
     setView("config");
   }
 
+  function isOperationalDataView(): boolean {
+    return navigation.activeView === "summary"
+      || navigation.activeView === "map"
+      || navigation.activeView === "satellite"
+      || navigation.activeView === "radar";
+  }
+
+  function shouldShowAnchorActionButton(): boolean {
+    return isOperationalDataView() && connection.activeConnectionConnected && connection.hasConfiguredDevice;
+  }
+
+  async function triggerAnchorRise(): Promise<void> {
+    anchorActionInFlight = true;
+    anchorRiseSlideOpen = false;
+    anchorRiseSlideValue = 0;
+    await runAction("anchor rise", raiseAnchor);
+    anchorActionInFlight = false;
+  }
+
+  async function triggerAnchorDown(): Promise<void> {
+    anchorActionInFlight = true;
+    await runAction("anchor down", dropAnchorAtCurrentPosition);
+    anchorActionInFlight = false;
+  }
+
+  function handleAnchorActionClick(): void {
+    if (anchorActionInFlight) {
+      return;
+    }
+    if (anchorState === "up") {
+      void triggerAnchorDown();
+      return;
+    }
+    if (anchorState === "auto-pending") {
+      void triggerAnchorRise();
+      return;
+    }
+    anchorRiseSlideOpen = !anchorRiseSlideOpen;
+    anchorRiseSlideValue = 0;
+  }
+
+  function handleRiseSliderInput(event: Event): void {
+    const input = event.currentTarget as HTMLInputElement | null;
+    const value = input ? Number(input.value) : 0;
+    anchorRiseSlideValue = Number.isFinite(value) ? value : 0;
+    if (anchorRiseSlideValue >= 98) {
+      void triggerAnchorRise();
+    }
+  }
+
+  async function requestAnchorMove(lat: number, lon: number): Promise<void> {
+    await runAction("move anchor", () => moveAnchorToPosition(lat, lon));
+  }
+
   onMount(() => {
     initNavigationHistoryRoot(navigation);
     window.addEventListener("popstate", handlePopState);
@@ -488,21 +580,13 @@
     <main class="am-main" class:full-screen-view={navigation.isFullScreenVizView} class:config-view={navigation.isConfigView}>
   {#if navigation.activeView === "summary"}
     <SummaryPage
-      gpsAgeText={gpsAgeText}
-      dataAgeText={dataAgeText}
-      depthText={depthText}
-      windText={windText}
-      statePillClass={statePillClass}
-      statePillText={statePillText}
-      stateSourceText={stateSourceText}
       currentLatText={currentLatText}
       currentLonText={currentLonText}
       currentSogText={currentSogText}
       currentHeadingText={currentHeadingText}
-      pwaVersionText={versions.pwa}
-      firmwareVersionText={versions.firmware}
-      cloudVersionText={versions.cloud}
-      trackStatusText={trackStatusText}
+      anchorPositionText={anchorPositionText}
+      anchorDistanceText={anchorDistanceText}
+      anchorBearingText={anchorBearingText}
     />
   {/if}
 
@@ -590,11 +674,10 @@
 
   {#if navigation.activeView === "radar"}
     <RadarPage
-      radarTargetX={radarTargetX}
-      radarTargetY={radarTargetY}
-      radarDistanceText={radarDistanceText}
-      radarBearingText={radarBearingText}
+      trackPoints={trackPoints}
+      anchorPosition={anchorPosition}
       currentHeadingText={currentHeadingText}
+      onMoveAnchor={(lat: number, lon: number) => void requestAnchorMove(lat, lon)}
     />
   {/if}
 
@@ -668,6 +751,42 @@
       >
         <span class={`app-state-led-dot ${connection.linkLedState}`} aria-hidden="true"></span>
       </button>
+    {/if}
+    {#if shouldShowAnchorActionButton()}
+      <div class="anchor-action-stack">
+        {#if anchorRiseSlideOpen && anchorState === "down"}
+          <div class="anchor-rise-slider-card">
+            <div class="anchor-rise-slider-title">Slide to confirm anchor rise</div>
+            <input
+              class="anchor-rise-slider"
+              type="range"
+              min="0"
+              max="100"
+              step="1"
+              value={anchorRiseSlideValue}
+              oninput={handleRiseSliderInput}
+              disabled={anchorActionInFlight}
+              aria-label="Slide to confirm anchor rise"
+            />
+            <div class="anchor-rise-slider-hint mono">Anchor position: {anchorPositionText}</div>
+          </div>
+        {/if}
+        <button
+          type="button"
+          class={`anchor-action-button ${anchorState === "up" ? "up" : "down"}`}
+          onclick={handleAnchorActionClick}
+          disabled={anchorActionInFlight}
+          aria-label={anchorState === "up" ? "Drop anchor at current position" : "Raise anchor"}
+          title={anchorState === "up" ? "Drop anchor at current position" : "Raise anchor"}
+        >
+          <span class={`anchor-action-icon-wrap ${anchorState === "up" ? "" : "striked"}`}>
+            <span class="material-symbols-rounded anchor-action-icon" aria-hidden="true">anchor</span>
+            {#if anchorState === "up"}
+              <span class="material-symbols-rounded anchor-action-down-indicator" aria-hidden="true">south</span>
+            {/if}
+          </span>
+        </button>
+      </div>
     {/if}
     <Tabbar icons class="am-tabbar fixed bottom-0 left-0 right-0 z-40" aria-label="Anqori AnchorWatch sections">
       {#each VIEW_TABS as tab}

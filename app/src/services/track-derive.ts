@@ -1,5 +1,6 @@
 import type { TrackPoint } from "../core/types";
 import { clampNumber } from "./data-utils";
+import { geoDeltaMeters } from "./geo-nav";
 
 export interface RadarProjection {
   targetX: number;
@@ -29,13 +30,10 @@ export function deriveRadarProjection(points: TrackPoint[]): RadarProjection {
 
   const anchor = points[0];
   const current = points[points.length - 1];
-  const meanLatRad = ((anchor.lat + current.lat) / 2) * Math.PI / 180;
-  const metersPerLat = 111_320;
-  const metersPerLon = Math.max(1, 111_320 * Math.cos(meanLatRad));
-  const northMeters = (current.lat - anchor.lat) * metersPerLat;
-  const eastMeters = (current.lon - anchor.lon) * metersPerLon;
-  const distanceM = Math.sqrt(northMeters * northMeters + eastMeters * eastMeters);
-  const bearingDeg = (Math.atan2(eastMeters, northMeters) * 180 / Math.PI + 360) % 360;
+  const { distanceM, bearingDeg } = geoDeltaMeters(
+    { lat: anchor.lat, lon: anchor.lon },
+    { lat: current.lat, lon: current.lon },
+  );
   const displayRadius = 92;
   const scale = clampNumber(distanceM / 80, 0, 1);
   const radius = scale * displayRadius;

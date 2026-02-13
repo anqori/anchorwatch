@@ -1,4 +1,4 @@
-import type { JsonRecord, TrackPoint } from "../core/types";
+import type { AnchorRuntimeState, JsonRecord, TrackPoint } from "../core/types";
 import { isObject, toFiniteNumber } from "./data-utils";
 
 export interface OnboardingWifiStatus {
@@ -14,6 +14,16 @@ export interface TelemetryDerived {
   depthM: number;
   windKn: number;
   trackPoint: TrackPoint | null;
+}
+
+export interface CurrentGpsPosition {
+  lat: number;
+  lon: number;
+}
+
+export interface AnchorStatusDerived {
+  state: AnchorRuntimeState;
+  position: CurrentGpsPosition | null;
 }
 
 export function readOnboardingWifiStatus(latestState: JsonRecord): OnboardingWifiStatus {
@@ -32,6 +42,38 @@ export function readFirmwareVersionFromState(latestState: JsonRecord): string {
   const firmware = isObject(system.firmware) ? system.firmware : {};
   const version = typeof firmware.version === "string" ? firmware.version.trim() : "";
   return version || "--";
+}
+
+export function readCurrentGpsPosition(latestState: JsonRecord): CurrentGpsPosition | null {
+  const telemetry = isObject(latestState.telemetry) ? latestState.telemetry : {};
+  const gps = isObject(telemetry.gps) ? telemetry.gps : {};
+  const lat = toFiniteNumber(gps.lat);
+  const lon = toFiniteNumber(gps.lon);
+  if (lat === null || lon === null) {
+    return null;
+  }
+  return { lat, lon };
+}
+
+export function readAnchorStatus(latestState: JsonRecord): AnchorStatusDerived {
+  const anchor = isObject(latestState.anchor) ? latestState.anchor : {};
+  const stateRaw = typeof anchor.state === "string" ? anchor.state.trim() : "";
+  const state: AnchorRuntimeState = stateRaw === "down" || stateRaw === "auto-pending" ? stateRaw : "up";
+
+  const positionRaw = isObject(anchor.position) ? anchor.position : {};
+  const lat = toFiniteNumber(positionRaw.lat);
+  const lon = toFiniteNumber(positionRaw.lon);
+
+  if (lat === null || lon === null) {
+    return {
+      state,
+      position: null,
+    };
+  }
+  return {
+    state,
+    position: { lat, lon },
+  };
 }
 
 export function deriveTelemetry(latestState: JsonRecord, nowTs = Date.now()): TelemetryDerived {

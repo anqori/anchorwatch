@@ -15,6 +15,14 @@ export interface CloudConfigPatchRequest {
   nowTs?: number;
 }
 
+export interface CloudEventRequest {
+  protocolVersion: string;
+  deviceId: string;
+  msgType: string;
+  payload: JsonRecord;
+  nowTs?: number;
+}
+
 export async function fetchCloudHealth(base: string): Promise<Response> {
   return fetch(`${base}/health`, { method: "GET" });
 }
@@ -61,6 +69,26 @@ export async function postCloudConfigPatch(credentials: CloudCredentials, reques
       deviceId: request.deviceId,
       ts: request.nowTs ?? Date.now(),
       ...payload,
+    }),
+  });
+}
+
+export async function postCloudEvent(credentials: CloudCredentials, request: CloudEventRequest): Promise<Response> {
+  const { base, boatId, boatSecret } = credentials;
+  return fetch(`${base}/v1/events`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${boatSecret}`,
+      "content-type": "application/json",
+      "X-AnchorWatch-Client": "app",
+    },
+    body: JSON.stringify({
+      ver: request.protocolVersion,
+      msgType: request.msgType,
+      boatId,
+      deviceId: request.deviceId,
+      ts: request.nowTs ?? Date.now(),
+      payload: request.payload,
     }),
   });
 }

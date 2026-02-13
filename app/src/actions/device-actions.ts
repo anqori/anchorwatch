@@ -3,6 +3,7 @@ import type { JsonRecord, WifiSecurity } from "../core/types";
 import { mapAnchorDraftToConfigInput, mapProfilesDraftToConfigInput, mapTriggerDraftToConfigInput } from "../services/config-draft-mappers";
 import { buildAnchorConfigPatch, buildProfilesConfigPatch, buildTriggerConfigPatch, manualAnchorLogMessage } from "../services/config-patch-builders";
 import { normalizeRelayBaseUrl } from "../services/local-storage";
+import { readCurrentGpsPosition } from "../services/state-derive";
 import {
   getRelayBaseUrl,
   markConnectedViaBleOnce,
@@ -273,6 +274,34 @@ export async function applyTriggerConfig(): Promise<void> {
 export async function applyProfilesConfig(): Promise<void> {
   const patch = buildProfilesConfigPatch(mapProfilesDraftToConfigInput(appState.configDrafts.profiles));
   await sendConfigPatch(patch, "profiles");
+}
+
+export async function raiseAnchor(): Promise<void> {
+  const connection = deviceLinker.getConnection();
+  const result = await connection.commandAnchorRise();
+  if (!result.accepted) {
+    throw new Error(result.errorDetail || result.errorCode || "anchor.rise rejected");
+  }
+  logLine(`anchor.rise sent via ${connection.kind}`);
+  await refreshStateSnapshot();
+}
+
+export async function moveAnchorToPosition(lat: number, lon: number): Promise<void> {
+  const connection = deviceLinker.getConnection();
+  const result = await connection.commandAnchorDown(lat, lon);
+  if (!result.accepted) {
+    throw new Error(result.errorDetail || result.errorCode || "anchor.down rejected");
+  }
+  logLine(`anchor moved via ${connection.kind} to lat=${lat.toFixed(5)} lon=${lon.toFixed(5)}`);
+  await refreshStateSnapshot();
+}
+
+export async function dropAnchorAtCurrentPosition(): Promise<void> {
+  const gps = readCurrentGpsPosition(appState.latestState);
+  if (!gps) {
+    throw new Error("Current GPS position unavailable.");
+  }
+  await moveAnchorToPosition(gps.lat, gps.lon);
 }
 
 export async function fetchTrackSnapshot(): Promise<void> {

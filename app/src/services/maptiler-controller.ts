@@ -1,6 +1,7 @@
-import { Map as MapTilerMap, config as maptilerConfig, type GeoJSONSource } from "@maptiler/sdk";
+import { Map as MapTilerMap, Marker as MapTilerMarker, config as maptilerConfig, type GeoJSONSource } from "@maptiler/sdk";
 import type { TrackPoint } from "../core/types";
 import { clampNumber } from "./data-utils";
+import type { GeoPoint } from "./geo-nav";
 import {
   buildMapTilerPanBounds,
   buildTrackGeoJson,
@@ -16,6 +17,8 @@ export interface MapTilerTrackViewportInput {
   map: MapTilerMap;
   kind: MapTilerKind;
   getTrackPoints: () => TrackPoint[];
+  getAnchorPosition: () => GeoPoint | null;
+  onMoveAnchor: (lat: number, lon: number) => void;
   maxPanDistanceM: number;
   maxVisibleAreaM2: number;
 }
@@ -23,6 +26,8 @@ export interface MapTilerTrackViewportInput {
 export interface EnsureMapTilerViewInput {
   kind: MapTilerKind;
   getTrackPoints: () => TrackPoint[];
+  getAnchorPosition: () => GeoPoint | null;
+  onMoveAnchor: (lat: number, lon: number) => void;
   existingMap: MapTilerMap | null;
   container: HTMLDivElement | null;
   apiKey: string;
@@ -36,6 +41,7 @@ export interface EnsureMapTilerViewInput {
 }
 
 const applyingViewportLimits = new WeakSet<MapTilerMap>();
+const anchorMarkers = new WeakMap<MapTilerMap, MapTilerMarker>();
 
 function ensureTrackLayers(map: MapTilerMap, kind: MapTilerKind, trackPoints: TrackPoint[]): void {
   const ids = maptilerIds(kind);
@@ -85,9 +91,61 @@ function updateTrackData(map: MapTilerMap, kind: MapTilerKind, trackPoints: Trac
   }
 }
 
+function createAnchorElement(kind: MapTilerKind): HTMLDivElement {
+  const element = document.createElement("div");
+  element.className = "aw-anchor-marker";
+  element.style.width = "16px";
+  element.style.height = "16px";
+  element.style.borderRadius = "999px";
+  element.style.border = "2px solid #fff";
+  element.style.boxSizing = "border-box";
+  element.style.boxShadow = "0 0 0 2px rgba(0,0,0,0.24)";
+  element.style.background = kind === "map" ? "#2f9dff" : "#f3b73f";
+  return element;
+}
+
+function ensureAnchorMarker(
+  map: MapTilerMap,
+  kind: MapTilerKind,
+  anchorPosition: GeoPoint | null,
+  onMoveAnchor: (lat: number, lon: number) => void,
+): void {
+  const existing = anchorMarkers.get(map);
+  if (!anchorPosition) {
+    if (existing) {
+      existing.remove();
+      anchorMarkers.delete(map);
+    }
+    return;
+  }
+
+  if (!existing) {
+    const marker = new MapTilerMarker({
+      element: createAnchorElement(kind),
+      draggable: true,
+      pitchAlignment: "map",
+      rotationAlignment: "map",
+    })
+      .setLngLat([anchorPosition.lon, anchorPosition.lat])
+      .addTo(map);
+    marker.on("dragend", () => {
+      const lngLat = marker.getLngLat();
+      onMoveAnchor(lngLat.lat, lngLat.lng);
+    });
+    anchorMarkers.set(map, marker);
+    return;
+  }
+
+  const lngLat = existing.getLngLat();
+  if (Math.abs(lngLat.lat - anchorPosition.lat) > 0.0000001 || Math.abs(lngLat.lng - anchorPosition.lon) > 0.0000001) {
+    existing.setLngLat([anchorPosition.lon, anchorPosition.lat]);
+  }
+}
+
 function enforceViewportLimits(
   map: MapTilerMap,
   trackPoints: TrackPoint[],
+  anchorPosition: GeoPoint | null,
   maxPanDistanceM: number,
   maxVisibleAreaM2: number,
 ): void {
@@ -97,7 +155,7 @@ function enforceViewportLimits(
 
   applyingViewportLimits.add(map);
   try {
-    const anchorPoint = getMapTilerAnchorPoint(trackPoints);
+    const anchorPoint = getMapTilerAnchorPoint(trackPoints, anchorPosition);
     const panBounds = buildMapTilerPanBounds(anchorPoint, maxPanDistanceM);
     const [[minLon, minLat], [maxLon, maxLat]] = panBounds;
 
@@ -127,8 +185,10 @@ function enforceViewportLimits(
 
 export function updateMapTrackAndViewport(input: MapTilerTrackViewportInput): void {
   const trackPoints = input.getTrackPoints();
+  const anchorPosition = input.getAnchorPosition();
   updateTrackData(input.map, input.kind, trackPoints);
-  enforceViewportLimits(input.map, trackPoints, input.maxPanDistanceM, input.maxVisibleAreaM2);
+  ensureAnchorMarker(input.map, input.kind, anchorPosition, input.onMoveAnchor);
+  enforceViewportLimits(input.map, trackPoints, anchorPosition, input.maxPanDistanceM, input.maxVisibleAreaM2);
 }
 
 export function ensureMapTilerView(input: EnsureMapTilerViewInput): MapTilerMap | null {
@@ -143,6 +203,8 @@ export function ensureMapTilerView(input: EnsureMapTilerViewInput): MapTilerMap 
       map: input.existingMap,
       kind: input.kind,
       getTrackPoints: input.getTrackPoints,
+      getAnchorPosition: input.getAnchorPosition,
+      onMoveAnchor: input.onMoveAnchor,
       maxPanDistanceM: input.maxPanDistanceM,
       maxVisibleAreaM2: input.maxVisibleAreaM2,
     });
@@ -175,6 +237,8 @@ export function ensureMapTilerView(input: EnsureMapTilerViewInput): MapTilerMap 
       map,
       kind: input.kind,
       getTrackPoints: input.getTrackPoints,
+      getAnchorPosition: input.getAnchorPosition,
+      onMoveAnchor: input.onMoveAnchor,
       maxPanDistanceM: input.maxPanDistanceM,
       maxVisibleAreaM2: input.maxVisibleAreaM2,
     });
@@ -185,6 +249,8 @@ export function ensureMapTilerView(input: EnsureMapTilerViewInput): MapTilerMap 
       map,
       kind: input.kind,
       getTrackPoints: input.getTrackPoints,
+      getAnchorPosition: input.getAnchorPosition,
+      onMoveAnchor: input.onMoveAnchor,
       maxPanDistanceM: input.maxPanDistanceM,
       maxVisibleAreaM2: input.maxVisibleAreaM2,
     });
@@ -194,6 +260,8 @@ export function ensureMapTilerView(input: EnsureMapTilerViewInput): MapTilerMap 
       map,
       kind: input.kind,
       getTrackPoints: input.getTrackPoints,
+      getAnchorPosition: input.getAnchorPosition,
+      onMoveAnchor: input.onMoveAnchor,
       maxPanDistanceM: input.maxPanDistanceM,
       maxVisibleAreaM2: input.maxVisibleAreaM2,
     });
@@ -209,6 +277,11 @@ export function ensureMapTilerView(input: EnsureMapTilerViewInput): MapTilerMap 
 export function destroyMapTilerView(map: MapTilerMap | null): null {
   if (!map) {
     return null;
+  }
+  const marker = anchorMarkers.get(map);
+  if (marker) {
+    marker.remove();
+    anchorMarkers.delete(map);
   }
   map.remove();
   applyingViewportLimits.delete(map);

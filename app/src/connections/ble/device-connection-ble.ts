@@ -21,6 +21,7 @@ import { buildConfigPatchPayload, buildProtocolEnvelope, type ConfigPatchCommand
 import { ensurePhoneId, getBoatId } from "../../services/persistence-domain";
 import type {
   DeviceConnection,
+  DeviceCommandResult,
   DeviceEvent,
   DeviceConnectionProbeResult,
   DeviceConnectionStatus,
@@ -143,6 +144,16 @@ export class DeviceConnectionBle implements DeviceConnection {
     return parseWifiScanNetworks(ack?.networks);
   }
 
+  async commandAnchorRise(): Promise<DeviceCommandResult> {
+    const ack = await this.sendBleCommand("anchor.rise", {}, true);
+    return this.parseCommandResult(ack);
+  }
+
+  async commandAnchorDown(lat: number, lon: number): Promise<DeviceCommandResult> {
+    const ack = await this.sendBleCommand("anchor.down", { lat, lon }, true);
+    return this.parseCommandResult(ack);
+  }
+
   private async sendBleCommand(msgType: string, payload: JsonRecord, requiresAck = true): Promise<JsonRecord | null> {
     if (!this.state.connected || !this.state.controlTx) {
       throw new Error("BLE not connected");
@@ -176,6 +187,26 @@ export class DeviceConnectionBle implements DeviceConnection {
       }
       throw error;
     }
+  }
+
+  private parseCommandResult(ack: JsonRecord | null): DeviceCommandResult {
+    const rawStatus = typeof ack?.status === "string" ? ack.status.trim() : "";
+    if (rawStatus === "ok" || rawStatus === "accepted" || rawStatus === "failed" || rawStatus === "rejected") {
+      const errorCode = typeof ack?.errorCode === "string" && ack.errorCode.trim() ? ack.errorCode : null;
+      const errorDetail = typeof ack?.errorDetail === "string" && ack.errorDetail.trim() ? ack.errorDetail : null;
+      return {
+        accepted: rawStatus === "ok" || rawStatus === "accepted",
+        status: rawStatus,
+        errorCode,
+        errorDetail,
+      };
+    }
+    return {
+      accepted: true,
+      status: "ok",
+      errorCode: null,
+      errorDetail: null,
+    };
   }
 
   async requestStateSnapshot(): Promise<JsonRecord | null> {

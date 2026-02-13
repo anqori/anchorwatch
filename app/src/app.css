@@ -153,6 +153,101 @@ textarea {
   box-shadow: 0 0 8px rgba(141, 141, 141, 0.62);
 }
 
+.anchor-action-stack {
+  position: fixed;
+  right: max(0.8rem, env(safe-area-inset-right));
+  bottom: calc(var(--am-tabbar-height) + 0.8rem);
+  z-index: 70;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.55rem;
+}
+
+.anchor-action-button {
+  border: 0;
+  width: 3.2rem;
+  height: 3.2rem;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 0.35rem 1rem rgba(0, 0, 0, 0.32);
+}
+
+.anchor-action-button.up {
+  background: #1b9e5a;
+  color: #fff;
+}
+
+.anchor-action-button.down {
+  background: #d53939;
+  color: #fff;
+}
+
+.anchor-action-button:disabled {
+  opacity: 0.58;
+  cursor: not-allowed;
+}
+
+.anchor-action-icon-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.anchor-action-icon-wrap.striked::after {
+  content: "";
+  position: absolute;
+  width: 1.45rem;
+  height: 0.13rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.95);
+  transform: rotate(-34deg);
+}
+
+.anchor-action-icon {
+  font-size: 1.45rem;
+  line-height: 1;
+}
+
+.anchor-action-down-indicator {
+  position: absolute;
+  right: -0.18rem;
+  bottom: -0.26rem;
+  font-size: 0.78rem;
+  line-height: 1;
+  text-shadow: 0 0 2px rgba(0, 0, 0, 0.45);
+}
+
+.anchor-rise-slider-card {
+  width: min(18rem, calc(100vw - 1.7rem));
+  border-radius: 0.8rem;
+  background: rgba(16, 16, 16, 0.94);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  padding: 0.55rem 0.7rem 0.7rem;
+}
+
+.anchor-rise-slider-title {
+  font-size: 0.79rem;
+  font-weight: 600;
+  margin-bottom: 0.46rem;
+}
+
+.anchor-rise-slider {
+  width: 100%;
+  accent-color: #f04646;
+}
+
+.anchor-rise-slider-hint {
+  margin-top: 0.35rem;
+  font-size: 0.73rem;
+  opacity: 0.86;
+}
+
 .device-corner-action {
   margin-top: 1rem;
   display: flex;
@@ -313,18 +408,17 @@ pre {
 }
 
 .radar-screen {
-  display: flex;
-  min-height: calc(100dvh - var(--am-tabbar-height));
-  align-items: center;
-  justify-content: center;
+  display: grid;
+  place-items: center;
   background: radial-gradient(circle at center, #062018, #03120d 75%);
+  touch-action: none;
 }
 
 .radar-fill {
-  width: min(100vw, calc(100dvh - var(--am-tabbar-height) - 3rem));
-  height: min(100vw, calc(100dvh - var(--am-tabbar-height) - 3rem));
-  max-width: 92vh;
-  max-height: 92vh;
+  width: min(100vw, calc(100dvh - var(--am-tabbar-height) - 1.4rem));
+  height: min(100vw, calc(100dvh - var(--am-tabbar-height) - 1.4rem));
+  max-width: 96vh;
+  max-height: 96vh;
   border-radius: 0;
   border: 0;
   background: transparent;
@@ -333,31 +427,72 @@ pre {
 .radar-ring {
   fill: none;
   stroke: rgba(89, 230, 175, 0.22);
-  stroke-width: 1.1;
+  stroke-width: 0.95;
 }
 
 .radar-ring.outer {
   stroke: rgba(89, 230, 175, 0.42);
 }
 
+.radar-ring-label {
+  fill: rgba(150, 241, 205, 0.82);
+  font-size: 6.3px;
+}
+
 .radar-axis {
   stroke: rgba(89, 230, 175, 0.25);
-  stroke-width: 1;
+  stroke-width: 0.95;
 }
 
-.radar-vector {
+.radar-track-line {
+  fill: none;
   stroke: #8df8cf;
   stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
-.radar-center {
+.radar-current {
   fill: #8df8cf;
+  stroke: rgba(255, 255, 255, 0.72);
+  stroke-width: 1.15;
 }
 
-.radar-target {
-  fill: #f85b6f;
+.radar-anchor {
+  fill: #2f9dff;
   stroke: rgba(255, 255, 255, 0.75);
   stroke-width: 1.1;
+  cursor: grab;
+}
+
+.radar-anchor.offscreen {
+  fill: #f3b73f;
+}
+
+.radar-controls {
+  position: absolute;
+  top: max(0.8rem, env(safe-area-inset-top));
+  right: max(0.8rem, env(safe-area-inset-right));
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.radar-zoom-button {
+  width: 2.1rem;
+  height: 2.1rem;
+  border-radius: 0.55rem;
+  border: 1px solid rgba(240, 255, 249, 0.25);
+  background: rgba(8, 27, 22, 0.78);
+  color: rgba(235, 250, 245, 0.94);
+  cursor: pointer;
+  font-size: 1.15rem;
+  line-height: 1;
+}
+
+.radar-zoom-button:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
 }
 
 @media (max-width: 700px) {
@@ -376,11 +511,6 @@ pre {
 }
 
 @media (max-width: 540px) {
-  .radar-fill {
-    width: min(100vw, calc(100dvh - var(--am-tabbar-height) - 2.4rem));
-    height: min(100vw, calc(100dvh - var(--am-tabbar-height) - 2.4rem));
-  }
-
   .row {
     grid-template-columns: 1fr;
   }

@@ -3,6 +3,7 @@ import type { ConfigPatchCommand } from "../services/protocol-messages";
 import { getBoatId } from "../services/persistence-domain";
 import type {
   DeviceConnection,
+  DeviceCommandResult,
   DeviceEvent,
   DeviceConnectionProbeResult,
   DeviceConnectionStatus,
@@ -33,6 +34,12 @@ export class DeviceConnectionFake implements DeviceConnection {
 
   private points: TrackPoint[] = [];
 
+  private anchorState: "up" | "down" | "auto-pending" = "up";
+
+  private anchorLat: number | null = null;
+
+  private anchorLon: number | null = null;
+
   async connect(): Promise<void> {
     if (this.connected) {
       this.emitStatus();
@@ -42,6 +49,9 @@ export class DeviceConnectionFake implements DeviceConnection {
     this.connected = true;
     this.bootMs = performance.now();
     this.points = [];
+    this.anchorState = "up";
+    this.anchorLat = null;
+    this.anchorLon = null;
 
     this.publishInterval = setInterval(() => {
       this.publishSnapshot();
@@ -94,6 +104,31 @@ export class DeviceConnectionFake implements DeviceConnection {
       ? [...networks, hiddenNetwork]
       : [...networks];
     return resultNetworks.slice(0, Math.max(0, maxResults));
+  }
+
+  async commandAnchorRise(): Promise<DeviceCommandResult> {
+    this.anchorState = "up";
+    this.points = [];
+    this.publishSnapshot();
+    return {
+      accepted: true,
+      status: "ok",
+      errorCode: null,
+      errorDetail: null,
+    };
+  }
+
+  async commandAnchorDown(lat: number, lon: number): Promise<DeviceCommandResult> {
+    this.anchorState = "down";
+    this.anchorLat = Number.isFinite(lat) ? lat : null;
+    this.anchorLon = Number.isFinite(lon) ? lon : null;
+    this.publishSnapshot();
+    return {
+      accepted: true,
+      status: "ok",
+      errorCode: null,
+      errorDetail: null,
+    };
   }
 
   async requestStateSnapshot(): Promise<JsonRecord | null> {
@@ -184,6 +219,15 @@ export class DeviceConnectionFake implements DeviceConnection {
       simulation: {
         stateText: tick.stateText,
         stateClass: tick.stateClass,
+      },
+      anchor: {
+        state: this.anchorState,
+        position: this.anchorLat === null || this.anchorLon === null
+          ? null
+          : {
+            lat: this.anchorLat,
+            lon: this.anchorLon,
+          },
       },
     };
 

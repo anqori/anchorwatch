@@ -127,6 +127,9 @@ Payload:
     "telemetry.wind.knots": 14.8,
     "telemetry.wind.dirDeg": 205.0,
     "telemetry.wind.ageMs": 700,
+    "anchor.state": "down",
+    "anchor.position.lat": 54.3200,
+    "anchor.position.lon": 10.1400,
     "triggers.wind_above.active": false,
     "triggers.wind_above.severity": "info"
   }
@@ -153,6 +156,10 @@ Payload:
     },
     "triggers": {
       "wind_above": { "active": false, "severity": "info" }
+    },
+    "anchor": {
+      "state": "down",
+      "position": { "lat": 54.3200, "lon": 10.1400 }
     }
   },
   "updatedAt": 1770897600456
@@ -165,6 +172,9 @@ App state-update contract:
 2. This applies equally to cloud and BLE paths.
 3. Transport-specific framing/metadata must not change the `statePatch`/`snapshot` schema.
 4. Historical track initialization uses `track.snapshot`; ongoing track updates come from `status.patch` GPS updates.
+5. Anchor runtime state keys:
+   - `anchor.state` enum: `up`, `down`, `auto-pending`
+   - `anchor.position.lat` and `anchor.position.lon` (present when anchor position is known)
 
 ## 6.2.1 `track.snapshot.request` (app -> device/cloud)
 
@@ -595,6 +605,43 @@ Notes:
 4. Devices should avoid duplicates by SSID when possible (or provide strongest reading first).
 5. App uses selected network + passphrase to send regular `config.patch` with `network.wifi.*`.
 
+## 6.15 `anchor.down` (app -> device/cloud)
+
+Payload:
+
+```json
+{
+  "lat": 54.3201,
+  "lon": 10.1402
+}
+```
+
+Notes:
+
+1. Runtime command to mark anchor as set/dropped.
+2. `lat`/`lon` should be current vessel position from latest telemetry.
+3. Device responds with `command.ack`.
+4. Device publishes updated `status.patch` / `status.snapshot` with:
+   - `anchor.state = "down"`
+   - `anchor.position.lat`
+   - `anchor.position.lon`
+
+## 6.16 `anchor.rise` (app -> device/cloud)
+
+Payload:
+
+```json
+{}
+```
+
+Notes:
+
+1. Runtime command to mark anchor as raised.
+2. Device responds with `command.ack`.
+3. Device publishes updated `status.patch` / `status.snapshot` with:
+   - `anchor.state = "up"`
+   - `anchor.position = null` (or omitted)
+
 ## 7. Path A: Device -> HTTPS -> Cloudflare -> App (HTTPS + Web Push)
 
 ## 7.1 Endpoints
@@ -607,7 +654,7 @@ Notes:
 | `/v1/state` | `POST` | device -> cloud | Merge status patch into latest boat state. |
 | `/v1/state?boatId=...` | `GET` | app <- cloud | Fetch latest state as `status.snapshot` (no history replay). |
 | `/v1/tracks?boatId=...` | `GET` | app <- cloud | Fetch derived historical track as `track.snapshot`. |
-| `/v1/events` | `POST` | device/app -> cloud | Ingest discrete events only (for example alarm lifecycle). |
+| `/v1/events` | `POST` | device/app -> cloud | Ingest discrete events and runtime commands (for example alarm lifecycle, `anchor.down`, `anchor.rise`). |
 
 Note: in scaffold code, `/v1/config`, `/v1/state`, `/v1/tracks`, and `/v1/events` are available.
 
@@ -814,6 +861,7 @@ Onboarding flow (BLE required):
    - `onboarding.wifi.scan`
    - `onboarding.wifi.scan_result`
    - `status.patch` onboarding progress fields (`statePatch.system.wifi.*`, `statePatch.system.cloud.*`)
+   - runtime anchor commands (`anchor.down`, `anchor.rise`)
 2. Constraint:
    - no fallback onboarding path for non-BLE-capable clients in v1
 

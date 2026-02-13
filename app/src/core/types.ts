@@ -13,6 +13,7 @@ export type ProfileMode = "manual" | "auto";
 export type ColorScheme = "full" | "red" | "blue";
 export type AutoSwitchSource = "time" | "sun";
 export type WifiSecurity = "open" | "wpa2" | "wpa3" | "unknown";
+export type AnchorRuntimeState = "up" | "down" | "auto-pending";
 
 export interface ConfigSectionStatusItem {
   id: ConfigSectionId;

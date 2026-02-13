@@ -1,6 +1,6 @@
 import type { TrackPoint, WifiScanNetwork } from "../../core/types";
 import type { ConfigPatchCommand } from "../../services/protocol-messages";
-import { postCloudConfigPatch } from "./cloud-client";
+import { postCloudConfigPatch, postCloudEvent } from "./cloud-client";
 import {
   fetchCloudSnapshot,
   fetchCloudTrackSnapshot,
@@ -8,6 +8,7 @@ import {
 } from "./cloud-runtime";
 import type {
   DeviceConnection,
+  DeviceCommandResult,
   DeviceEvent,
   DeviceConnectionProbeResult,
   DeviceConnectionStatus,
@@ -93,6 +94,14 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
 
   async commandWifiScan(_maxResults: number, _includeHidden: boolean): Promise<WifiScanNetwork[]> {
     throw new Error("Wi-Fi scan requires an active Bluetooth or fake connection");
+  }
+
+  async commandAnchorRise(): Promise<DeviceCommandResult> {
+    return this.postAnchorEvent("anchor.rise", {});
+  }
+
+  async commandAnchorDown(lat: number, lon: number): Promise<DeviceCommandResult> {
+    return this.postAnchorEvent("anchor.down", { lat, lon });
   }
 
   async requestStateSnapshot(): Promise<Record<string, unknown> | null> {
@@ -183,5 +192,39 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
       throw new Error("Cloud relay credentials missing (relay URL + boatId + boatSecret)");
     }
     return credentials;
+  }
+
+  private async postAnchorEvent(msgType: string, payload: Record<string, unknown>): Promise<DeviceCommandResult> {
+    const credentials = this.requireCredentials();
+    try {
+      const response = await postCloudEvent(credentials, {
+        protocolVersion: this.protocolVersion,
+        deviceId: this.getDeviceId(),
+        msgType,
+        payload,
+      });
+      const text = await response.text();
+      let parsed: Record<string, unknown> | null = null;
+      try {
+        parsed = JSON.parse(text) as Record<string, unknown>;
+      } catch {
+        parsed = null;
+      }
+      const ok = response.ok && parsed?.ok === true;
+      this.setConnected(ok);
+
+      const error = parsed?.error && typeof parsed.error === "object"
+        ? parsed.error as Record<string, unknown>
+        : null;
+      return {
+        accepted: ok,
+        status: ok ? "accepted" : "failed",
+        errorCode: typeof error?.code === "string" ? error.code : null,
+        errorDetail: typeof error?.detail === "string" ? error.detail : (ok ? null : `HTTP ${response.status}`),
+      };
+    } catch (error) {
+      this.setConnected(false);
+      throw error;
+    }
   }
 }

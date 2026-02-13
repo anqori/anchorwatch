@@ -114,6 +114,7 @@ bool bleConnected = false;
 bool wifiConnectPending = false;
 bool pairModeWasActive = false;
 bool secretSentInCurrentPairWindow = false;
+bool anchorPositionValid = false;
 
 uint32_t txSeq = 1;
 uint32_t txMsgCounter = 1;
@@ -122,8 +123,11 @@ String boatId;
 String deviceId;
 String boatSecret;
 String wifiLastError = "";
+String anchorState = "up";
 WiFiConfig wifiConfig = {};
 BleChunkAssembler bleAssembler = {};
+float anchorLat = 0.0f;
+float anchorLon = 0.0f;
 
 BLEServer *bleServer = nullptr;
 BLEService *bleService = nullptr;
@@ -362,6 +366,37 @@ bool extractJsonIntValue(const String &json, const String &key, int &out) {
     return false;
   }
   out = json.substring(start, index).toInt();
+  return true;
+}
+
+bool extractJsonFloatValue(const String &json, const String &key, float &out) {
+  const int colon = findKeyColon(json, key);
+  if (colon < 0) {
+    return false;
+  }
+  int index = skipWs(json, colon + 1);
+  const int start = index;
+  if (index < (int)json.length() && (json[index] == '-' || json[index] == '+')) {
+    index++;
+  }
+  bool seenDigit = false;
+  while (index < (int)json.length()) {
+    const char c = json[index];
+    if (isdigit((unsigned char)c)) {
+      seenDigit = true;
+      index++;
+      continue;
+    }
+    if (c == '.' || c == 'e' || c == 'E' || c == '-' || c == '+') {
+      index++;
+      continue;
+    }
+    break;
+  }
+  if (!seenDigit) {
+    return false;
+  }
+  out = json.substring(start, index).toFloat();
   return true;
 }
 
@@ -632,6 +667,22 @@ String buildStatusSnapshotPayload() {
 
   system += "}";
   appendJsonField(snapshot, firstSnapshot, "system", system);
+
+  String anchor = "{";
+  bool firstAnchor = true;
+  appendJsonField(anchor, firstAnchor, "state", jsonString(anchorState));
+  if (anchorPositionValid) {
+    String position = "{";
+    bool firstPosition = true;
+    appendJsonField(position, firstPosition, "lat", String(anchorLat, 6));
+    appendJsonField(position, firstPosition, "lon", String(anchorLon, 6));
+    position += "}";
+    appendJsonField(anchor, firstAnchor, "position", position);
+  } else {
+    appendJsonField(anchor, firstAnchor, "position", "null");
+  }
+  anchor += "}";
+  appendJsonField(snapshot, firstSnapshot, "anchor", anchor);
   snapshot += "}";
 
   appendJsonField(payload, firstPayload, "snapshot", snapshot);
@@ -693,6 +744,13 @@ void sendStatusPatch() {
   appendJsonField(statePatch, firstPatch, "system.pairMode.active", jsonBool(isPairModeActive(millis())));
   appendJsonField(statePatch, firstPatch, "system.pairMode.remainingMs", String(isPairModeActive(millis()) ? (pairModeUntilMs - millis()) : 0));
   appendJsonField(statePatch, firstPatch, "system.pairMode.sessionPaired", jsonBool(isPrivilegedSessionActive(millis())));
+  appendJsonField(statePatch, firstPatch, "anchor.state", jsonString(anchorState));
+  if (anchorPositionValid) {
+    appendJsonField(statePatch, firstPatch, "anchor.position.lat", String(anchorLat, 6));
+    appendJsonField(statePatch, firstPatch, "anchor.position.lon", String(anchorLon, 6));
+  } else {
+    appendJsonField(statePatch, firstPatch, "anchor.position", "null");
+  }
   statePatch += "}";
 
   appendJsonField(payload, firstPayload, "statePatch", statePatch);
@@ -954,6 +1012,35 @@ CommandResult handleOnboardingRequestSecret() {
   return makeResult("ok");
 }
 
+CommandResult handleAnchorRise() {
+  anchorState = "up";
+  anchorPositionValid = false;
+  sendStatusPatch();
+  return makeResult("ok");
+}
+
+CommandResult handleAnchorDown(const String &raw) {
+  float requestedLat = 0.0f;
+  float requestedLon = 0.0f;
+  const bool hasLat = extractJsonFloatValue(raw, "lat", requestedLat);
+  const bool hasLon = extractJsonFloatValue(raw, "lon", requestedLon);
+
+  if (hasLat && hasLon) {
+    anchorLat = requestedLat;
+    anchorLon = requestedLon;
+  } else if (sample.gpsValid) {
+    anchorLat = sample.latDeg;
+    anchorLon = sample.lonDeg;
+  } else {
+    return makeResult("rejected", "INVALID_PAYLOAD", "anchor.down requires lat/lon or valid GPS");
+  }
+
+  anchorPositionValid = true;
+  anchorState = "down";
+  sendStatusPatch();
+  return makeResult("ok");
+}
+
 CommandResult dispatchMessage(const ParsedEnvelope &envelope, const String &raw, InboundSource source) {
   (void)source;
   if (envelope.msgType == "config.patch") {
@@ -969,6 +1056,12 @@ CommandResult dispatchMessage(const ParsedEnvelope &envelope, const String &raw,
   if (envelope.msgType == "track.snapshot.request") {
     sendTrackSnapshot();
     return makeResult("ok");
+  }
+  if (envelope.msgType == "anchor.rise") {
+    return handleAnchorRise();
+  }
+  if (envelope.msgType == "anchor.down") {
+    return handleAnchorDown(raw);
   }
   return makeResult("rejected", "UNSUPPORTED_MSG_TYPE", "unsupported msgType");
 }
