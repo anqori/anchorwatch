@@ -1,0 +1,27 @@
+{
+  "name": "anchorwatch-app",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host",
+    "build": "vite build",
+    "preview": "vite preview --host",
+    "check": "svelte-check --tsconfig ./tsconfig.json"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^6.2.4",
+    "@tailwindcss/vite": "^4.1.18",
+    "@tsconfig/svelte": "^5.0.7",
+    "@types/web-bluetooth": "^0.0.21",
+    "svelte": "^5.50.2",
+    "svelte-check": "^4.3.6",
+    "tailwindcss": "^4.1.18",
+    "typescript": "^5.6.3",
+    "vite": "^7.3.1"
+  },
+  "dependencies": {
+    "@material-symbols/font-400": "^0.40.2",
+    "konsta": "^5.0.6"
+  }
+}

@@ -1,0 +1,35 @@
+name = "anqori-anchorwatch-relay"
+main = "src/index.js"
+compatibility_date = "2026-02-12"
+workers_dev = false
+routes = [{ pattern = "aw-cloud.anqori.com", custom_domain = true }]
+
+[vars]
+ALLOWED_ORIGIN = "*"
+BUILD_VERSION = "run-unknown"
+# Optional non-secret boat scope lock (auth still uses BOAT_SECRET secret).
+# BOAT_ID = "boat_demo_001"
+
+[env.dev]
+name = "anqori-anchorwatch-relay-dev"
+workers_dev = false
+routes = [{ pattern = "dev-aw-cloud.anqori.com", custom_domain = true }]
+
+[env.dev.vars]
+ALLOWED_ORIGIN = "*"
+BUILD_VERSION = "dev-unknown"
+# Optional non-secret boat scope lock for dev lane.
+# BOAT_ID = "boat_demo_dev_001"
+
+# Durable storage binding (recommended in production).
+# If RELAY_KV is not bound, worker falls back to in-memory storage (dev/test only).
+# Configure with:
+#   just worker-kv-create
+# Use .env.secret for token and .env for non-secret overrides:
+#   CF_KV_NAMESPACE_NAME=anqori-anchorwatch-relay
+#   CF_KV_BINDING=RELAY_KV
+# `worker-kv-create` injects the block below via wrangler --update-config.
+# [[kv_namespaces]]
+# binding = "RELAY_KV"
+# id = "<KV_NAMESPACE_ID>"
+# preview_id = "<KV_PREVIEW_NAMESPACE_ID>"

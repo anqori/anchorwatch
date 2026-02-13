@@ -1,0 +1,6 @@
+# Arduino CLI configuration for this project (ESP32-S3 baseline).
+board_manager:
+  additional_urls:
+    - https://espressif.github.io/arduino-esp32/package_esp32_index.json
+sketch:
+  always_export_binaries: false
