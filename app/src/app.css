@@ -115,11 +115,17 @@ textarea {
   gap: 0.55rem;
 }
 
+.anchor-action-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
 .anchor-move-actions {
   position: fixed;
   left: 50%;
   transform: translateX(-50%);
-  bottom: calc(var(--am-tabbar-height) + 2.2rem);
+  bottom: calc(var(--am-tabbar-height) + 6.1rem);
   z-index: 72;
   display: flex;
   align-items: center;
@@ -237,6 +243,7 @@ textarea {
 
 .anchor-rise-actions {
   z-index: 73;
+  bottom: calc(var(--am-tabbar-height) + 6.1rem);
 }
 
 .device-corner-action {
@@ -363,7 +370,7 @@ pre {
 
 .shared-viz-overlay {
   position: fixed;
-  left: calc(max(0.8rem, env(safe-area-inset-left)) + 2.85rem);
+  left: max(0.8rem, env(safe-area-inset-left));
   top: max(0.8rem, env(safe-area-inset-top));
   z-index: 65;
   color: rgba(228, 244, 246, 0.94);
@@ -380,46 +387,47 @@ pre {
 .viz-menu-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 71;
+  z-index: 69;
   border: 0;
   padding: 0;
   margin: 0;
   background: transparent;
 }
 
-.viz-menu-shell {
-  position: fixed;
-  top: max(0.8rem, env(safe-area-inset-top));
-  left: max(0.8rem, env(safe-area-inset-left));
-  z-index: 72;
-}
-
-.viz-menu-trigger {
-  width: 2.15rem;
-  height: 2.15rem;
-  border-radius: 0.55rem;
-  border: 1px solid rgba(240, 255, 249, 0.25);
-  background: rgba(7, 22, 19, 0.8);
-  color: rgba(235, 250, 245, 0.96);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-}
-
-.viz-menu-trigger > .material-symbols-rounded {
-  font-size: 1.2rem;
-  line-height: 1;
-}
-
 .viz-menu-panel {
-  margin-top: 0.42rem;
   min-width: 14.75rem;
   border-radius: 0.62rem;
   border: 1px solid rgba(230, 248, 242, 0.22);
   background: rgba(7, 20, 17, 0.94);
   box-shadow: 0 0.4rem 1rem rgba(0, 0, 0, 0.34);
   overflow: hidden;
+}
+
+.viz-menu-floating-panel {
+  position: fixed;
+  right: max(0.8rem, env(safe-area-inset-right));
+  bottom: calc(var(--am-tabbar-height) + 5.9rem);
+  z-index: 72;
+}
+
+.viz-menu-fab {
+  border: 0;
+  width: 3.2rem;
+  height: 3.2rem;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  background: rgba(24, 24, 24, 0.92);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  box-shadow: 0 0.35rem 1rem rgba(0, 0, 0, 0.32);
+}
+
+.viz-menu-fab > .material-symbols-rounded {
+  font-size: 1.4rem;
+  line-height: 1;
 }
 
 .viz-menu-item {

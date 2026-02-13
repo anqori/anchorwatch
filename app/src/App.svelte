@@ -888,65 +888,10 @@
         <div>BEAR {anchorBearingText === "--" ? "--" : anchorBearingText.replace(" deg", "")}</div>
       </div>
     {/if}
-    {#if canShowVizMenu()}
-      {#if vizMenuOpen}
+    {#if shouldShowAnchorActionButton()}
+      {#if canShowVizMenu() && vizMenuOpen}
         <button type="button" class="viz-menu-backdrop" aria-label="Close view actions" onclick={closeVizMenu}></button>
       {/if}
-      <div class="viz-menu-shell">
-        <button
-          type="button"
-          class="viz-menu-trigger"
-          onclick={toggleVizMenu}
-          aria-label="Open view actions"
-          aria-expanded={vizMenuOpen}
-          aria-haspopup="menu"
-          title="View actions"
-        >
-          <span class="material-symbols-rounded" aria-hidden="true">more_vert</span>
-        </button>
-        {#if vizMenuOpen}
-          <div class="viz-menu-panel" role="menu" aria-label="View actions">
-            <button
-              type="button"
-              class="viz-menu-item"
-              role="menuitem"
-              disabled={anchorState === "up" || !anchorPosition || anchorMoveMode || anchorActionInFlight || anchorMoveInFlight}
-              onclick={startAnchorMoveFromMenu}
-            >
-              Move anchor
-            </button>
-            <button
-              type="button"
-              class="viz-menu-item"
-              role="menuitem"
-              disabled={anchorState === "down" || !lastDroppedAnchorPosition || anchorMoveMode || anchorActionInFlight || anchorMoveInFlight}
-              onclick={() => void restoreLastAnchorPositionFromMenu()}
-            >
-              Restore last anchor position
-            </button>
-            <button
-              type="button"
-              class="viz-menu-item"
-              role="menuitem"
-              disabled={!trackBeforeLastAnchorMove}
-              onclick={resetTrackBeforeLastAnchorMoveFromMenu}
-            >
-              Reset track before last anchor move
-            </button>
-            <button
-              type="button"
-              class="viz-menu-item"
-              role="menuitem"
-              disabled={trackPoints.length === 0}
-              onclick={resetTrackFromMenu}
-            >
-              Reset track
-            </button>
-          </div>
-        {/if}
-      </div>
-    {/if}
-    {#if shouldShowAnchorActionButton()}
       <div class="anchor-action-stack">
         {#if canShowAnchorMoveButton()}
           {#if anchorMoveMode}
@@ -1004,21 +949,76 @@
             </button>
           </div>
         {/if}
-        <button
-          type="button"
-          class={`anchor-action-button ${anchorState === "up" ? "up" : "down"}`}
-          onclick={handleAnchorActionClick}
-          disabled={anchorActionInFlight || anchorMoveMode || anchorMoveInFlight}
-          aria-label={anchorState === "up" ? "Drop anchor at current position" : "Raise anchor"}
-          title={anchorState === "up" ? "Drop anchor at current position" : "Raise anchor"}
-        >
-          <span class={`anchor-action-icon-wrap ${anchorState === "up" ? "" : "striked"}`}>
-            <span class="material-symbols-rounded anchor-action-icon" aria-hidden="true">anchor</span>
-            {#if anchorState === "up"}
-              <span class="material-symbols-rounded anchor-action-down-indicator" aria-hidden="true">south</span>
-            {/if}
-          </span>
-        </button>
+        <div class="anchor-action-row">
+          {#if canShowVizMenu()}
+            <button
+              type="button"
+              class="viz-menu-fab"
+              onclick={toggleVizMenu}
+              aria-label="Open view actions"
+              aria-expanded={vizMenuOpen}
+              aria-haspopup="menu"
+              title="View actions"
+            >
+              <span class="material-symbols-rounded" aria-hidden="true">more_vert</span>
+            </button>
+          {/if}
+          <button
+            type="button"
+            class={`anchor-action-button ${anchorState === "up" ? "up" : "down"}`}
+            onclick={handleAnchorActionClick}
+            disabled={anchorActionInFlight || anchorMoveMode || anchorMoveInFlight}
+            aria-label={anchorState === "up" ? "Drop anchor at current position" : "Raise anchor"}
+            title={anchorState === "up" ? "Drop anchor at current position" : "Raise anchor"}
+          >
+            <span class={`anchor-action-icon-wrap ${anchorState === "up" ? "" : "striked"}`}>
+              <span class="material-symbols-rounded anchor-action-icon" aria-hidden="true">anchor</span>
+              {#if anchorState === "up"}
+                <span class="material-symbols-rounded anchor-action-down-indicator" aria-hidden="true">south</span>
+              {/if}
+            </span>
+          </button>
+        </div>
+        {#if canShowVizMenu() && vizMenuOpen}
+          <div class="viz-menu-panel viz-menu-floating-panel" role="menu" aria-label="View actions">
+            <button
+              type="button"
+              class="viz-menu-item"
+              role="menuitem"
+              disabled={anchorState === "up" || !anchorPosition || anchorMoveMode || anchorActionInFlight || anchorMoveInFlight}
+              onclick={startAnchorMoveFromMenu}
+            >
+              Move anchor
+            </button>
+            <button
+              type="button"
+              class="viz-menu-item"
+              role="menuitem"
+              disabled={anchorState === "down" || !lastDroppedAnchorPosition || anchorMoveMode || anchorActionInFlight || anchorMoveInFlight}
+              onclick={() => void restoreLastAnchorPositionFromMenu()}
+            >
+              Restore last anchor position
+            </button>
+            <button
+              type="button"
+              class="viz-menu-item"
+              role="menuitem"
+              disabled={!trackBeforeLastAnchorMove}
+              onclick={resetTrackBeforeLastAnchorMoveFromMenu}
+            >
+              Reset track before last anchor move
+            </button>
+            <button
+              type="button"
+              class="viz-menu-item"
+              role="menuitem"
+              disabled={trackPoints.length === 0}
+              onclick={resetTrackFromMenu}
+            >
+              Reset track
+            </button>
+          </div>
+        {/if}
       </div>
     {/if}
     <Tabbar icons class="am-tabbar fixed bottom-0 left-0 right-0 z-40" aria-label="Anqori AnchorWatch sections">
