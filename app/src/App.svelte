@@ -3,7 +3,6 @@
   import type { Map as MapTilerMap } from "@maptiler/sdk";
   import type { ConfigSectionId, TrackPoint, ViewId, WifiScanNetwork, WifiSecurity } from "./core/types";
   import {
-    CLOUD_POLL_MS,
     CONFIG_SECTIONS,
     MAPTILER_API_KEY,
     MAPTILER_DEFAULT_CENTER,
@@ -18,12 +17,11 @@
     VIEW_TABS,
   } from "./core/constants";
   import { formatWifiSecurity } from "./services/data-utils";
-  import { deriveBleStatusText } from "./services/ble-state";
+  import { deriveBleStatusText } from "./connections/ble/ble-state";
   import {
     buildInternetSettingsStatusText,
     deriveAppConnectivityState,
     deriveLinkLedState,
-    hasActiveCloudRelayConnection,
     linkLedTitle,
   } from "./services/connectivity-derive";
   import { readFirmwareVersionFromState, readOnboardingWifiStatus } from "./services/state-derive";
@@ -44,22 +42,23 @@
     ensureMapTilerView as ensureMapTilerViewControlled,
     updateMapTrackAndViewport,
   } from "./services/maptiler-controller";
-  import { isBleSupported } from "./services/ble-connection";
+  import { isBleSupported } from "./connections/ble/ble-connection";
   import {
     applyAnchorConfig,
     applyProfilesConfig,
+    probe,
     applyTriggerConfig,
     applyWifiConfigFromInternetPage,
     fetchTrackSnapshot,
-    probeRelay,
     refreshStateSnapshot,
     saveRelayUrl,
     scanWifiNetworks,
+    selectBluetoothConnection,
+    selectRelayConnection,
     searchForDeviceViaBluetooth,
     startDeviceRuntime,
     stopDeviceRuntime,
     useFakeMode,
-    verifyCloudAuth,
   } from "./actions/device-actions";
   import { appState, initAppStateEnvironment, logLine, readCloudCredentials } from "./state/app-state.svelte";
   import {
@@ -73,6 +72,7 @@
   import SettingsHomePage from "./features/config/SettingsHomePage.svelte";
   import DeviceBluetoothPage from "./features/config/DeviceBluetoothPage.svelte";
   import InternetWlanPage from "./features/config/InternetWlanPage.svelte";
+  import ConnectionPage from "./features/config/ConnectionPage.svelte";
   import InfoVersionPage from "./features/config/InfoVersionPage.svelte";
   import AnchorConfigPage from "./features/config/AnchorConfigPage.svelte";
   import TriggersConfigPage from "./features/config/TriggersConfigPage.svelte";
@@ -96,6 +96,7 @@
   let statePillText = $state("BOOT");
   let statePillClass = $state<"ok" | "warn" | "alarm">("ok");
   let stateSourceText = $state("Source: --");
+  let connectionSelectionStatusText = $state("Not connected");
   let trackStatusText = $state("No track yet");
   let currentLatText = $state("--");
   let currentLonText = $state("--");
@@ -147,14 +148,27 @@
   });
 
   $effect(() => {
-    const relayConnected = hasActiveCloudRelayConnection({
-      latestStateSource: appState.latestStateSource,
-      latestStateUpdatedAtMs: appState.latestStateUpdatedAtMs,
-      cloudPollMs: CLOUD_POLL_MS,
-    });
-    connection.appState = deriveAppConnectivityState(connection.hasConfiguredDevice, ble.connected, relayConnected);
-    connection.linkLedState = deriveLinkLedState(connection.hasConfiguredDevice, ble.connected, relayConnected);
+    connection.appState = deriveAppConnectivityState(connection.hasConfiguredDevice, connection.activeConnectionConnected);
+    connection.linkLedState = deriveLinkLedState(
+      connection.hasConfiguredDevice,
+      connection.activeConnectionConnected,
+      connection.activeConnection,
+    );
     connection.linkLedTitle = linkLedTitle(connection.linkLedState);
+
+    if (!connection.activeConnectionConnected) {
+      connectionSelectionStatusText = "Not connected";
+      return;
+    }
+    if (connection.activeConnection === "fake") {
+      connectionSelectionStatusText = "Connected to Fake data";
+      return;
+    }
+    if (connection.activeConnection === "bluetooth") {
+      connectionSelectionStatusText = "Connected via BT";
+      return;
+    }
+    connectionSelectionStatusText = "Connected via Relay";
   });
 
   $effect(() => {
@@ -170,10 +184,13 @@
     });
     navigation.configSectionsWithStatus = CONFIG_SECTIONS.map((section) => ({
       ...section,
+      disabled: !connection.hasConfiguredDevice && section.id !== "device",
       status: section.id === "device"
         ? navigation.settingsDeviceStatusText
         : section.id === "internet"
           ? network.settingsInternetStatusText
+          : section.id === "connection"
+            ? connectionSelectionStatusText
           : undefined,
     }));
   });
@@ -303,6 +320,10 @@
   }
 
   function openConfigView(nextConfigView: ConfigSectionId): void {
+    if (!connection.hasConfiguredDevice && nextConfigView !== "device") {
+      logLine(`settings section locked until setup complete: ${nextConfigView}`);
+      return;
+    }
     applyOpenConfigSection(navigation, nextConfigView);
     if (nextConfigView === "internet") {
       prefillWifiSettingsFromCurrentState();
@@ -469,8 +490,20 @@
       onClearSelectedNetwork={clearWifiSelectionForManualEntry}
       onRefreshStatus={() => void runAction("refresh status snapshot", refreshStateSnapshot)}
       onSaveRelayUrl={() => void runAction("save relay url", saveRelayUrl)}
-      onProbeRelay={() => void runAction("relay ping", probeRelay)}
-      onVerifyCloud={() => void runAction("verify cloud", verifyCloudAuth)}
+      onProbe={() => void runAction("probe connection", probe)}
+      onBack={() => goToSettingsView()}
+    />
+  {/if}
+
+  {#if navigation.activeView === "config" && navigation.activeConfigView === "connection"}
+    <ConnectionPage
+      isConfigured={connection.hasConfiguredDevice}
+      connectionStatusText={connectionSelectionStatusText}
+      mode={connection.mode}
+      activeConnection={connection.activeConnection}
+      onSelectBluetooth={() => void runAction("switch connection to bluetooth", selectBluetoothConnection)}
+      onSelectRelay={() => void runAction("switch connection to relay", selectRelayConnection)}
+      onSelectFake={() => void runAction("switch connection to fake", useFakeMode)}
       onBack={() => goToSettingsView()}
     />
   {/if}

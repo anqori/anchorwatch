@@ -6,12 +6,13 @@ import { parseWifiScanNetworks } from "../services/data-utils";
 import { normalizeRelayBaseUrl } from "../services/local-storage";
 import {
   getRelayBaseUrl,
+  markConnectedViaBleOnce,
   nextConfigVersion,
   setConfigVersion,
   setRelayBaseUrl,
 } from "../services/persistence-domain";
 import type { ConfigPatchCommand } from "../services/protocol-messages";
-import { defaultConnectionForMode, getBluetoothConnection, getFakeConnection, getRelayCloudConnection } from "../connections/connection-factory";
+import { defaultConnectionForMode, getBluetoothConnection, getFakeConnection } from "../connections/connection-factory";
 import { deviceLinker } from "../linker/device-linker";
 import {
   appState,
@@ -20,9 +21,11 @@ import {
   applyWifiScanNetworks,
   logLine,
   markBleMessageSeen,
-  readCloudCredentialFields,
+  resetLiveDataState,
   refreshIdentityUi,
   replaceTrackPoints,
+  setBoatId,
+  setBoatSecret,
 } from "../state/app-state.svelte";
 
 let wifiScanTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -58,6 +61,12 @@ function ensureActiveBluetoothConnection(): void {
   }
 }
 
+function ensureConfiguredDeviceForConnectionSelection(): void {
+  if (!appState.connection.hasConfiguredDevice) {
+    throw new Error("Complete device setup first.");
+  }
+}
+
 export async function startDeviceRuntime(): Promise<void> {
   const active = defaultConnectionForMode(appState.connection.mode);
   await deviceLinker.setConnection(active, false);
@@ -74,6 +83,7 @@ export async function selectDeviceModeForSetup(): Promise<void> {
     applyMode("device");
     logLine("device connection.mode selected for setup");
   }
+  resetLiveDataState();
   await deviceLinker.setConnection(defaultConnectionForMode("device"));
 }
 
@@ -91,12 +101,39 @@ export async function searchForDeviceViaBluetooth(): Promise<void> {
 }
 
 export async function useFakeMode(): Promise<void> {
-  applyMode("fake");
+  setBoatId("boat_demo_001");
+  setBoatSecret("demo_secret_001");
+  markConnectedViaBleOnce();
+  applyMode("fake", false);
+  resetLiveDataState();
   await deviceLinker.setConnection(getFakeConnection());
   clearWifiScanTimeout();
   appState.network.wifiScanInFlight = false;
   appState.network.wifiScanStatusText = "Scan for available WLAN networks.";
-  logLine("fake connection.mode selected; skipped BLE/cloud setup");
+  logLine("fake connection.mode selected; demo credentials applied; switched to fake device connection");
+}
+
+export async function selectRelayConnection(): Promise<void> {
+  ensureConfiguredDeviceForConnectionSelection();
+  if (appState.connection.mode !== "device") {
+    applyMode("device");
+  }
+  resetLiveDataState();
+  await deviceLinker.setConnection(defaultConnectionForMode("device"));
+  logLine("active connection switched to cloud-relay");
+}
+
+export async function selectBluetoothConnection(): Promise<void> {
+  ensureConfiguredDeviceForConnectionSelection();
+  if (!appState.connection.bleSupported) {
+    throw new Error("Bluetooth is not supported in this browser/app environment.");
+  }
+  if (appState.connection.mode !== "device") {
+    applyMode("device");
+  }
+  resetLiveDataState();
+  await deviceLinker.setConnection(getBluetoothConnection());
+  logLine("active connection switched to bluetooth");
 }
 
 export async function saveRelayUrl(): Promise<void> {
@@ -110,55 +147,19 @@ export async function saveRelayUrl(): Promise<void> {
   }
 }
 
-export async function probeRelay(): Promise<void> {
+export async function probe(): Promise<void> {
   const base = getRelayBaseUrl();
-  if (!base) {
-    appState.connection.relayResult = "Set relay base URL first.";
-    return;
-  }
-
   try {
-    const probe = await getRelayCloudConnection().probeRelay(base);
-    appState.connection.relayResult = probe.resultText;
-    if (probe.buildVersion) {
-      appState.versions.cloud = probe.buildVersion;
+    const connection = deviceLinker.getConnection();
+    const probeResult = await connection.probe(base);
+    appState.connection.relayResult = probeResult.resultText;
+    if (probeResult.buildVersion) {
+      appState.versions.cloud = probeResult.buildVersion;
     }
+    logLine(`probe via ${connection.kind}: ${probeResult.resultText}`);
   } catch (error) {
-    appState.connection.relayResult = `Relay probe failed: ${String(error)}`;
+    appState.connection.relayResult = `Probe failed: ${String(error)}`;
   }
-}
-
-export async function verifyCloudAuth(): Promise<void> {
-  const { base, boatId, boatSecret } = readCloudCredentialFields();
-
-  if (!base) {
-    throw new Error("Relay base URL missing");
-  }
-  if (!boatId) {
-    throw new Error("Boat ID missing");
-  }
-  if (!boatSecret) {
-    throw new Error("Boat secret missing");
-  }
-
-  try {
-    const buildVersion = await getRelayCloudConnection().fetchBuildVersion(base);
-    if (buildVersion) {
-      appState.versions.cloud = buildVersion;
-    }
-  } catch {
-    // Ignore build version lookup errors in verify flow.
-  }
-
-  const authVerify = await getRelayCloudConnection().verifyStateAuth();
-  if (authVerify.ok) {
-    appState.connection.cloudStatusText = `ok (${authVerify.status})`;
-    logLine(`cloud auth verify ok (${authVerify.status})`);
-    return;
-  }
-
-  appState.connection.cloudStatusText = `failed (${authVerify.status})`;
-  throw new Error(`cloud verify failed ${authVerify.status}: ${authVerify.errorText}`);
 }
 
 export async function scanWifiNetworks(): Promise<void> {

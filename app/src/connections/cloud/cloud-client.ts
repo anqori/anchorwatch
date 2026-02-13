@@ -1,5 +1,5 @@
-import type { JsonRecord } from "../core/types";
-import { buildConfigPatchPayload } from "./protocol-messages";
+import type { JsonRecord } from "../../core/types";
+import { buildConfigPatchPayload } from "../../services/protocol-messages";
 
 export interface CloudCredentials {
   base: string;

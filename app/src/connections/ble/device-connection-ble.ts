@@ -6,20 +6,20 @@ import {
   BLE_SERVICE_UUID,
   BLE_SNAPSHOT_UUID,
   PROTOCOL_VERSION,
-} from "../core/constants";
-import type { Envelope, InboundSource, JsonRecord, PendingAck, TrackPoint } from "../core/types";
-import { connectBleWithCharacteristics, disconnectBleDevice } from "../services/ble-connection";
+} from "../../core/constants";
+import type { Envelope, InboundSource, JsonRecord, PendingAck, TrackPoint } from "../../core/types";
+import { connectBleWithCharacteristics, disconnectBleDevice } from "./ble-connection";
 import {
   clearPendingAcks,
   consumeChunkedBleFrame,
   makeAckPromise,
   resolvePendingAckFromPayload,
-} from "../services/ble-session";
-import { makeMsgId, writeChunked } from "../services/ble-transport";
-import { dataViewToBytes, isObject, safeParseJson } from "../services/data-utils";
-import { buildConfigPatchPayload, buildProtocolEnvelope, type ConfigPatchCommand } from "../services/protocol-messages";
-import { ensurePhoneId, getBoatId } from "../services/persistence-domain";
-import type { DeviceConnection, DeviceConnectionStatus } from "./device-connection";
+} from "./ble-session";
+import { makeMsgId, writeChunked } from "./ble-transport";
+import { dataViewToBytes, isObject, safeParseJson } from "../../services/data-utils";
+import { buildConfigPatchPayload, buildProtocolEnvelope, type ConfigPatchCommand } from "../../services/protocol-messages";
+import { ensurePhoneId, getBoatId } from "../../services/persistence-domain";
+import type { DeviceConnection, DeviceConnectionProbeResult, DeviceConnectionStatus } from "../device-connection";
 
 interface BleTransportState {
   device: BluetoothDevice | null;
@@ -186,6 +186,21 @@ export class DeviceConnectionBle implements DeviceConnection {
 
   async requestTrackSnapshot(_limit: number): Promise<TrackPoint[] | null> {
     return null;
+  }
+
+  async probe(): Promise<DeviceConnectionProbeResult> {
+    if (this.state.connected) {
+      return {
+        ok: true,
+        resultText: "BLE connected",
+        buildVersion: null,
+      };
+    }
+    return {
+      ok: false,
+      resultText: "BLE disconnected",
+      buildVersion: null,
+    };
   }
 
   private currentStatus(): DeviceConnectionStatus {

@@ -1,15 +1,8 @@
 <script lang="ts">
   import { BlockTitle, List, ListItem, Navbar } from "konsta/svelte";
-  import type { ConfigSectionId } from "../../core/types";
+  import type { ConfigSectionId, ConfigSectionStatusItem } from "../../core/types";
 
-  interface ConfigSection {
-    id: ConfigSectionId;
-    label: string;
-    icon: string;
-    status?: string;
-  }
-
-  export let configSections: ConfigSection[] = [];
+  export let configSections: ConfigSectionStatusItem[] = [];
   export let onOpenConfig: (id: ConfigSectionId) => void = () => {};
 </script>
 
@@ -22,7 +15,13 @@
       menuListItem
       title={configSection.label}
       subtitle={configSection.status ?? ""}
-      onClick={() => onOpenConfig(configSection.id)}
+      class={configSection.disabled ? "settings-disabled-row" : ""}
+      onClick={() => {
+        if (!configSection.disabled) {
+          onOpenConfig(configSection.id);
+        }
+      }}
+      aria-disabled={configSection.disabled ? "true" : "false"}
     >
       {#snippet media()}
         <span class="material-symbols-rounded am-tab-material-icon" aria-hidden="true">{configSection.icon}</span>
@@ -30,3 +29,11 @@
     </ListItem>
   {/each}
 </List>
+
+<style>
+  :global(.settings-disabled-row) {
+    opacity: 0.45;
+    pointer-events: none;
+    filter: saturate(0.55);
+  }
+</style>

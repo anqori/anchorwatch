@@ -200,6 +200,7 @@ function defaultTrackState(): TrackUiState {
 
 interface ExtendedConnectionState extends ConnectionState {
   activeConnection: "fake" | "bluetooth" | "cloud-relay";
+  activeConnectionConnected: boolean;
 }
 
 function defaultConnectionState(): ExtendedConnectionState {
@@ -212,11 +213,11 @@ function defaultConnectionState(): ExtendedConnectionState {
     bleStatusText: "disconnected",
     boatIdText: "--",
     secretStatusText: "not stored",
-    cloudStatusText: "not checked",
     relayResult: "No request yet.",
     connectedDeviceName: "",
     hasConfiguredDevice: false,
     activeConnection: "fake" as "fake" | "bluetooth" | "cloud-relay",
+    activeConnectionConnected: false,
   };
 }
 
@@ -304,6 +305,11 @@ export function applyMode(mode: "fake" | "device", persist = true): void {
 
 export function setActiveConnection(kind: "fake" | "bluetooth" | "cloud-relay"): void {
   appState.connection.activeConnection = kind;
+  appState.connection.activeConnectionConnected = false;
+}
+
+export function setActiveConnectionConnected(connected: boolean): void {
+  appState.connection.activeConnectionConnected = connected;
 }
 
 export function setBleConnectionState(connected: boolean, deviceName = ""): void {
@@ -360,6 +366,32 @@ export function applyStatePatch(rawPatch: unknown, source: InboundSource): void 
   appState.latestState = deepMerge(appState.latestState, patch);
   appState.latestStateSource = source;
   appState.latestStateUpdatedAtMs = Date.now();
+}
+
+export function resetLiveDataState(): void {
+  appState.latestState = {};
+  appState.latestStateSource = "--";
+  appState.latestStateUpdatedAtMs = 0;
+
+  appState.summary.gpsAgeText = "--";
+  appState.summary.dataAgeText = "--";
+  appState.summary.depthText = "--";
+  appState.summary.windText = "--";
+  appState.summary.statePillText = "BOOT";
+  appState.summary.statePillClass = "ok";
+  appState.summary.stateSourceText = "Source: --";
+
+  appState.track.points = [];
+  appState.track.statusText = "No track yet";
+  appState.track.currentLatText = "--";
+  appState.track.currentLonText = "--";
+  appState.track.currentSogText = "--";
+  appState.track.currentCogText = "--";
+  appState.track.currentHeadingText = "--";
+  appState.track.radarTargetX = 110;
+  appState.track.radarTargetY = 110;
+  appState.track.radarDistanceText = "--";
+  appState.track.radarBearingText = "--";
 }
 
 function applyTrackDerived(points: TrackPoint[]): void {

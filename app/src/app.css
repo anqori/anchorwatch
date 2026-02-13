@@ -138,6 +138,11 @@ textarea {
   box-shadow: 0 0 8px rgba(231, 182, 30, 0.7);
 }
 
+.app-state-led-dot.fake {
+  background: #2da2ff;
+  box-shadow: 0 0 8px rgba(45, 162, 255, 0.72);
+}
+
 .app-state-led-dot.unconnected {
   background: #e44646;
   box-shadow: 0 0 8px rgba(228, 70, 70, 0.68);

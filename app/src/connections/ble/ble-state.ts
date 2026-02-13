@@ -1,4 +1,4 @@
-import type { JsonRecord } from "../core/types";
+import type { JsonRecord } from "../../core/types";
 
 export function deriveBleStatusText(connected: boolean, authState: JsonRecord | null): string {
   if (!connected) {

@@ -1,7 +1,7 @@
 import type { Envelope, JsonRecord, Mode, TrackPoint } from "../core/types";
-import type { CloudCredentials } from "./cloud-client";
-import { postCloudConfigPatch } from "./cloud-client";
-import { fetchCloudSnapshot, fetchCloudTrackSnapshot } from "./cloud-runtime";
+import type { CloudCredentials } from "../connections/cloud/cloud-client";
+import { postCloudConfigPatch } from "../connections/cloud/cloud-client";
+import { fetchCloudSnapshot, fetchCloudTrackSnapshot } from "../connections/cloud/cloud-runtime";
 import { isObject } from "./data-utils";
 import { buildConfigPatchPayload, type ConfigPatchCommand } from "./protocol-messages";
 
@@ -45,35 +45,35 @@ function buildBluetoothMessenger(context: ActivePostSetupMessengerContext): Post
 }
 
 function readCloudCredentialsOrNull(context: ActivePostSetupMessengerContext): CloudCredentials | null {
-return context.readCloudCredentials();
+  return context.readCloudCredentials();
 }
 
 function requireCloudCredentials(context: ActivePostSetupMessengerContext): CloudCredentials {
-const credentials = context.readCloudCredentials();
-if (!credentials) {
-throw new Error("Cloud relay credentials missing (relay URL + boatId + boatSecret)");
-}
-return credentials;
+  const credentials = context.readCloudCredentials();
+  if (!credentials) {
+    throw new Error("Cloud relay credentials missing (relay URL + boatId + boatSecret)");
+  }
+  return credentials;
 }
 
 function buildCloudRelayMessenger(context: ActivePostSetupMessengerContext): PostSetupMessenger {
-return {
-transport: "cloud-relay",
-async sendConfigPatch(command: ConfigPatchCommand): Promise<void> {
-  const credentials = requireCloudCredentials(context);
-  const response = await postCloudConfigPatch(credentials, {
-    protocolVersion: context.protocolVersion,
-    deviceId: context.getDeviceId(),
-    version: command.version,
-    patch: command.patch,
-  });
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`cloud config.patch failed ${response.status}: ${text}`);
-  }
-},
-async requestStateSnapshot(): Promise<unknown | null> {
-  const credentials = readCloudCredentialsOrNull(context);
+  return {
+    transport: "cloud-relay",
+    async sendConfigPatch(command: ConfigPatchCommand): Promise<void> {
+      const credentials = requireCloudCredentials(context);
+      const response = await postCloudConfigPatch(credentials, {
+        protocolVersion: context.protocolVersion,
+        deviceId: context.getDeviceId(),
+        version: command.version,
+        patch: command.patch,
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(`cloud config.patch failed ${response.status}: ${text}`);
+      }
+    },
+    async requestStateSnapshot(): Promise<unknown | null> {
+      const credentials = readCloudCredentialsOrNull(context);
       if (!credentials) {
         return null;
       }

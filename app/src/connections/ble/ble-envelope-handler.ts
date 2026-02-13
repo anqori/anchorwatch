@@ -1,5 +1,5 @@
-import type { Envelope, InboundSource, JsonRecord, TrackPoint } from "../core/types";
-import { isObject, parseTrackSnapshot } from "./data-utils";
+import type { Envelope, InboundSource, JsonRecord, TrackPoint } from "../../core/types";
+import { isObject, parseTrackSnapshot } from "../../services/data-utils";
 
 export interface BleEnvelopeCallbacks {
   setBoatId: (boatId: string) => void;

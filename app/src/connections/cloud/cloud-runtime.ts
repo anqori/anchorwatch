@@ -1,7 +1,7 @@
 import type { CloudCredentials } from "./cloud-client";
 import { fetchCloudHealth, fetchCloudState, fetchCloudTracks } from "./cloud-client";
-import type { JsonRecord, TrackPoint } from "../core/types";
-import { isObject, parseTrackSnapshot } from "./data-utils";
+import type { JsonRecord, TrackPoint } from "../../core/types";
+import { isObject, parseTrackSnapshot } from "../../services/data-utils";
 
 export function extractCloudBuildVersion(raw: unknown): string | null {
   if (!isObject(raw)) {
@@ -21,6 +21,7 @@ export async function fetchCloudBuildVersion(base: string): Promise<string | nul
 }
 
 export interface ProbeCloudRelayResult {
+  ok: boolean;
   resultText: string;
   buildVersion: string | null;
 }
@@ -35,31 +36,9 @@ export async function probeCloudRelay(base: string): Promise<ProbeCloudRelayResu
     buildVersion = null;
   }
   return {
+    ok: response.ok,
     resultText: `${response.status} ${text}`,
     buildVersion,
-  };
-}
-
-export interface CloudAuthVerifyResult {
-  status: number;
-  ok: boolean;
-  errorText: string;
-}
-
-export async function verifyCloudStateAuth(credentials: CloudCredentials): Promise<CloudAuthVerifyResult> {
-  const response = await fetchCloudState(credentials);
-  if (response.status === 200 || response.status === 404) {
-    return {
-      status: response.status,
-      ok: true,
-      errorText: "",
-    };
-  }
-  const text = await response.text();
-  return {
-    status: response.status,
-    ok: false,
-    errorText: text,
   };
 }
 

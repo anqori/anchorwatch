@@ -1,11 +1,9 @@
 import { BLE_LIVE_MAX_AGE_MS, CLOUD_HEALTH_POLL_MS, CLOUD_POLL_MS } from "../core/constants";
-import type { Envelope, InboundSource, JsonRecord } from "../core/types";
-import { parseWifiScanNetworks } from "../services/data-utils";
+import type { Envelope, InboundSource, JsonRecord, PillClass } from "../core/types";
+import { isObject, parseWifiScanNetworks } from "../services/data-utils";
 import { handleDeviceEnvelope } from "../services/device-envelope-handler";
-import { deriveFakeSummaryTick } from "../services/simulation-derive";
 import {
   appState,
-  applyFakeTelemetryTick,
   applyStateSnapshot,
   applyStatePatch,
   applyWifiScanNetworks,
@@ -14,6 +12,7 @@ import {
   refreshIdentityUi,
   replaceTrackPoints,
   setActiveConnection,
+  setActiveConnectionConnected,
   setBleAuthState,
   setBleConnectionState,
   setCloudHealthPollTimestamp,
@@ -26,7 +25,7 @@ import {
   renderTelemetryFromLatestState,
 } from "../state/app-state.svelte";
 import type { DeviceConnection, DeviceConnectionStatus } from "../connections/device-connection";
-import { defaultConnectionForMode, getRelayCloudConnection } from "../connections/connection-factory";
+import { defaultConnectionForMode } from "../connections/connection-factory";
 import { markConnectedViaBleOnce } from "../services/persistence-domain";
 
 export class DeviceLinker {
@@ -132,6 +131,8 @@ export class DeviceLinker {
   }
 
   private async handleConnectionStatus(status: DeviceConnectionStatus): Promise<void> {
+    setActiveConnectionConnected(status.connected);
+
     if (this.activeConnection.kind === "bluetooth") {
       setBleConnectionState(status.connected, status.deviceName || "");
       setBleAuthState(status.authState ?? null);
@@ -192,23 +193,38 @@ export class DeviceLinker {
     }
 
     this.lastTickMs = nowMs;
-    if (appState.connection.mode === "fake") {
-      this.tickFakeSummary(nowMs);
-      return;
-    }
-
     await this.tickDeviceSummary(nowMs);
   }
 
-  private tickFakeSummary(nowMs: number): void {
-    const tick = deriveFakeSummaryTick(nowMs, appState.runtime.bootMs);
-    applyFakeTelemetryTick(tick.gpsAgeS, tick.dataAgeS, tick.depthM, tick.windKn, tick.trackPoint);
-    setSummarySource("fake-simulator");
-    setSummaryState(tick.stateText, tick.stateClass);
+  private readFakeSummaryPill(): { text: string; klass: PillClass } {
+    const simulation = isObject(appState.latestState.simulation) ? appState.latestState.simulation : {};
+    const stateText = typeof simulation.stateText === "string" && simulation.stateText.trim()
+      ? simulation.stateText
+      : "FAKE: MONITORING";
+    const rawClass = typeof simulation.stateClass === "string" ? simulation.stateClass : "";
+    const klass: PillClass = rawClass === "alarm" || rawClass === "warn" ? rawClass : "ok";
+    return { text: stateText, klass };
   }
 
   private async tickDeviceSummary(nowMs: number): Promise<void> {
     const nowReal = Date.now();
+    if (appState.connection.mode === "fake") {
+      await this.pollActiveState(nowReal);
+      if (Object.keys(appState.latestState).length > 0) {
+        renderTelemetryFromLatestState();
+        const fakePill = this.readFakeSummaryPill();
+        setSummarySource(appState.latestStateSource || "fake/snapshot");
+        setSummaryState(fakePill.text, fakePill.klass);
+        return;
+      }
+
+      const ageS = Math.floor((nowMs - appState.runtime.bootMs) / 1000);
+      setTelemetry(ageS, ageS, 0, 0);
+      setSummarySource("fake");
+      setSummaryState("FAKE: WAITING DATA", "warn");
+      return;
+    }
+
     const bleFresh = appState.ble.connected && (nowReal - appState.runtime.lastBleMessageAtMs) <= BLE_LIVE_MAX_AGE_MS;
 
     if (bleFresh && Object.keys(appState.latestState).length > 0) {
@@ -234,14 +250,11 @@ export class DeviceLinker {
   }
 
   private async pollActiveState(nowMs: number): Promise<void> {
-    if (nowMs - appState.runtime.lastCloudPollMs < CLOUD_POLL_MS) {
+    const minPollMs = this.activeConnection.kind === "fake" ? 1000 : CLOUD_POLL_MS;
+    if (nowMs - appState.runtime.lastCloudPollMs < minPollMs) {
       return;
     }
     setCloudPollTimestamp(nowMs);
-
-    if (this.activeConnection.kind === "fake") {
-      return;
-    }
 
     try {
       if (this.activeConnection.kind === "cloud-relay") {
@@ -256,8 +269,10 @@ export class DeviceLinker {
       if (this.activeConnection.kind === "bluetooth") {
         applyStateSnapshot(snapshot, "ble/snapshot");
         markBleMessageSeen(Date.now());
-      } else {
+      } else if (this.activeConnection.kind === "cloud-relay") {
         applyStateSnapshot(snapshot, "cloud/status.snapshot");
+      } else {
+        applyStateSnapshot(snapshot, "fake/snapshot");
       }
     } catch (error) {
       logLine(`${this.activeConnection.kind} poll failed: ${String(error)}`);
@@ -269,7 +284,6 @@ export class DeviceLinker {
       return;
     }
 
-    const credentials = getRelayCloudConnection();
     const base = appState.network.relayBaseUrlInput.trim();
     if (!base) {
       return;
@@ -277,9 +291,9 @@ export class DeviceLinker {
 
     setCloudHealthPollTimestamp(nowTs);
     try {
-      const buildVersion = await credentials.fetchBuildVersion(base);
-      if (buildVersion) {
-        appState.versions.cloud = buildVersion;
+      const probeResult = await this.activeConnection.probe(base);
+      if (probeResult.buildVersion) {
+        appState.versions.cloud = probeResult.buildVersion;
       }
     } catch {
       // Ignore background cloud version errors.

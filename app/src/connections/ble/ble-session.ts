@@ -1,5 +1,5 @@
-import type { ChunkAssembly, JsonRecord, PendingAck } from "../core/types";
-import { extractAckError } from "./data-utils";
+import type { ChunkAssembly, JsonRecord, PendingAck } from "../../core/types";
+import { extractAckError } from "../../services/data-utils";
 
 export interface ChunkFrameResult {
   kind: "invalid" | "incomplete" | "complete";

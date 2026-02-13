@@ -1,10 +1,10 @@
 export type Mode = "fake" | "device";
 export type AppConnectivityState = "UNCONFIGURED" | "CONFIGURED_BUT_UNCONNECTED" | "CONNECTED";
-export type LinkLedState = "bt" | "relay" | "unconnected" | "unconfigured";
-export type InboundSource = "ble/eventRx" | "ble/snapshot" | "cloud/status.snapshot";
+export type LinkLedState = "bt" | "relay" | "fake" | "unconnected" | "unconfigured";
+export type InboundSource = "ble/eventRx" | "ble/snapshot" | "cloud/status.snapshot" | "fake/snapshot";
 export type PillClass = "ok" | "warn" | "alarm";
 export type ViewId = "summary" | "satellite" | "map" | "radar" | "config";
-export type ConfigSectionId = "device" | "internet" | "information" | "anchor" | "triggers" | "profiles";
+export type ConfigSectionId = "device" | "internet" | "connection" | "information" | "anchor" | "triggers" | "profiles";
 export type ConfigViewId = "settings" | ConfigSectionId;
 export type AnchorMode = "current" | "offset" | "auto" | "manual";
 export type ZoneType = "circle" | "polygon";
@@ -19,6 +19,7 @@ export interface ConfigSectionStatusItem {
   label: string;
   icon: string;
   status?: string;
+  disabled?: boolean;
 }
 
 export interface ConnectionState {
@@ -30,7 +31,6 @@ export interface ConnectionState {
   bleStatusText: string;
   boatIdText: string;
   secretStatusText: string;
-  cloudStatusText: string;
   relayResult: string;
   connectedDeviceName: string;
   hasConfiguredDevice: boolean;

@@ -4,7 +4,6 @@ import {
   BOAT_SECRET_KEY,
   DEFAULT_RELAY_BASE_URL,
   MODE_DEVICE,
-  MODE_FAKE,
   MODE_KEY,
   PHONE_ID_KEY,
   RELAY_BASE_URL_KEY,
@@ -14,8 +13,9 @@ import type { Mode } from "../core/types";
 import { loadStoredString, saveStoredString } from "./local-storage";
 
 export function loadMode(): Mode {
-  const saved = loadStoredString(MODE_KEY, MODE_FAKE);
-  return saved === MODE_DEVICE ? MODE_DEVICE : MODE_FAKE;
+  const saved = loadStoredString(MODE_KEY, MODE_DEVICE);
+  // Demo/fake mode is session-only; startup defaults to device mode.
+  return saved === MODE_DEVICE ? MODE_DEVICE : MODE_DEVICE;
 }
 
 export function setMode(mode: Mode): void {

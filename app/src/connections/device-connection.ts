@@ -9,6 +9,12 @@ export interface DeviceConnectionStatus {
   authState?: JsonRecord | null;
 }
 
+export interface DeviceConnectionProbeResult {
+  ok: boolean;
+  resultText: string;
+  buildVersion: string | null;
+}
+
 export interface DeviceConnection {
   readonly kind: DeviceConnectionKind;
   connect(): Promise<void>;
@@ -20,4 +26,5 @@ export interface DeviceConnection {
   sendConfigPatch(command: ConfigPatchCommand): Promise<void>;
   requestStateSnapshot(): Promise<JsonRecord | null>;
   requestTrackSnapshot(limit: number): Promise<TrackPoint[] | null>;
+  probe(base?: string): Promise<DeviceConnectionProbeResult>;
 }

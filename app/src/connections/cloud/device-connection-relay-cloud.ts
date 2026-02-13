@@ -1,16 +1,12 @@
-import type { Envelope, InboundSource, JsonRecord, TrackPoint } from "../core/types";
-import type { ConfigPatchCommand } from "../services/protocol-messages";
-import { postCloudConfigPatch } from "../services/cloud-client";
+import type { Envelope, InboundSource, JsonRecord, TrackPoint } from "../../core/types";
+import type { ConfigPatchCommand } from "../../services/protocol-messages";
+import { postCloudConfigPatch } from "./cloud-client";
 import {
-  fetchCloudBuildVersion,
   fetchCloudSnapshot,
   fetchCloudTrackSnapshot,
   probeCloudRelay,
-  type CloudAuthVerifyResult,
-  type ProbeCloudRelayResult,
-  verifyCloudStateAuth,
-} from "../services/cloud-runtime";
-import type { DeviceConnection, DeviceConnectionStatus } from "./device-connection";
+} from "./cloud-runtime";
+import type { DeviceConnection, DeviceConnectionProbeResult, DeviceConnectionStatus } from "../device-connection";
 
 export interface RelayCloudCredentials {
   base: string;
@@ -32,8 +28,17 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
   ) {}
 
   async connect(): Promise<void> {
-    this.connected = this.readCredentials() !== null;
-    this.emitStatus();
+    const credentials = this.readCredentials();
+    if (!credentials) {
+      this.setConnected(false);
+      return;
+    }
+    try {
+      const probeResult = await probeCloudRelay(credentials.base);
+      this.setConnected(probeResult.ok);
+    } catch {
+      this.setConnected(false);
+    }
   }
 
   async disconnect(): Promise<void> {
@@ -65,16 +70,23 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
 
   async sendConfigPatch(command: ConfigPatchCommand): Promise<void> {
     const credentials = this.requireCredentials();
-    const response = await postCloudConfigPatch(credentials, {
-      protocolVersion: this.protocolVersion,
-      deviceId: this.getDeviceId(),
-      version: command.version,
-      patch: command.patch,
-    });
+    try {
+      const response = await postCloudConfigPatch(credentials, {
+        protocolVersion: this.protocolVersion,
+        deviceId: this.getDeviceId(),
+        version: command.version,
+        patch: command.patch,
+      });
 
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`cloud config.patch failed ${response.status}: ${text}`);
+      if (!response.ok) {
+        const text = await response.text();
+        this.setConnected(false);
+        throw new Error(`cloud config.patch failed ${response.status}: ${text}`);
+      }
+      this.setConnected(true);
+    } catch (error) {
+      this.setConnected(false);
+      throw error;
     }
   }
 
@@ -86,13 +98,17 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
       return null;
     }
 
-    const result = await fetchCloudSnapshot(credentials);
-    this.connected = true;
-    this.emitStatus();
-    if (result.status === 404) {
-      return null;
+    try {
+      const result = await fetchCloudSnapshot(credentials);
+      this.setConnected(true);
+      if (result.status === 404) {
+        return null;
+      }
+      return (result.snapshot ?? null) as Record<string, unknown> | null;
+    } catch (error) {
+      this.setConnected(false);
+      throw error;
     }
-    return (result.snapshot ?? null) as Record<string, unknown> | null;
   }
 
   async requestTrackSnapshot(limit: number): Promise<TrackPoint[] | null> {
@@ -103,26 +119,37 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
       return null;
     }
 
-    const result = await fetchCloudTrackSnapshot(credentials, limit);
-    this.connected = true;
-    this.emitStatus();
-    if (result.status === 404) {
-      return null;
+    try {
+      const result = await fetchCloudTrackSnapshot(credentials, limit);
+      this.setConnected(true);
+      if (result.status === 404) {
+        return null;
+      }
+      return result.points;
+    } catch (error) {
+      this.setConnected(false);
+      throw error;
     }
-    return result.points;
   }
 
-  async probeRelay(base: string): Promise<ProbeCloudRelayResult> {
-    return probeCloudRelay(base);
-  }
-
-  async verifyStateAuth(): Promise<CloudAuthVerifyResult> {
-    const credentials = this.requireCredentials();
-    return verifyCloudStateAuth(credentials);
-  }
-
-  async fetchBuildVersion(base: string): Promise<string | null> {
-    return fetchCloudBuildVersion(base);
+  async probe(base?: string): Promise<DeviceConnectionProbeResult> {
+    const resolvedBase = (base ?? this.readCredentials()?.base ?? "").trim();
+    if (!resolvedBase) {
+      this.setConnected(false);
+      return {
+        ok: false,
+        resultText: "Set relay base URL first.",
+        buildVersion: null,
+      };
+    }
+    try {
+      const result = await probeCloudRelay(resolvedBase);
+      this.setConnected(result.ok);
+      return result;
+    } catch (error) {
+      this.setConnected(false);
+      throw error;
+    }
   }
 
   private currentStatus(): DeviceConnectionStatus {
@@ -138,6 +165,11 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
     for (const subscriber of this.statusSubscribers) {
       subscriber(status);
     }
+  }
+
+  private setConnected(connected: boolean): void {
+    this.connected = connected;
+    this.emitStatus();
   }
 
   private requireCredentials(): RelayCloudCredentials {

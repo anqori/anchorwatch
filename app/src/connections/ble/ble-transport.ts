@@ -1,5 +1,5 @@
-import { BLE_CHUNK_MAX_PAYLOAD } from "../core/constants";
-import { fnv1a32 } from "./data-utils";
+import { BLE_CHUNK_MAX_PAYLOAD } from "../../core/constants";
+import { fnv1a32 } from "../../services/data-utils";
 
 export function makeMsgId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {

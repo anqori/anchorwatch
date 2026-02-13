@@ -34,24 +34,31 @@ export function hasActiveCloudRelayConnection(input: RelayConnectionInput): bool
   return (nowTs - input.latestStateUpdatedAtMs) <= maxAgeMs;
 }
 
-export function deriveAppConnectivityState(configured: boolean, connectedViaBle: boolean, connectedViaRelay: boolean): AppConnectivityState {
+export function deriveAppConnectivityState(configured: boolean, activeConnected: boolean): AppConnectivityState {
   if (!configured) {
     return "UNCONFIGURED";
   }
-  return connectedViaBle || connectedViaRelay ? "CONNECTED" : "CONFIGURED_BUT_UNCONNECTED";
+  return activeConnected ? "CONNECTED" : "CONFIGURED_BUT_UNCONNECTED";
 }
 
-export function deriveLinkLedState(configured: boolean, connectedViaBle: boolean, connectedViaRelay: boolean): LinkLedState {
+export function deriveLinkLedState(
+  configured: boolean,
+  activeConnected: boolean,
+  activeConnection: "fake" | "bluetooth" | "cloud-relay",
+): LinkLedState {
   if (!configured) {
     return "unconfigured";
   }
-  if (connectedViaBle) {
+  if (!activeConnected) {
+    return "unconnected";
+  }
+  if (activeConnection === "fake") {
+    return "fake";
+  }
+  if (activeConnection === "bluetooth") {
     return "bt";
   }
-  if (connectedViaRelay) {
-    return "relay";
-  }
-  return "unconnected";
+  return "relay";
 }
 
 export function linkLedTitle(state: LinkLedState): string {
@@ -60,6 +67,9 @@ export function linkLedTitle(state: LinkLedState): string {
   }
   if (state === "relay") {
     return "Connected via relay. Open configuration.";
+  }
+  if (state === "fake") {
+    return "Demo mode active. Open configuration.";
   }
   if (state === "unconnected") {
     return "Configured but currently unconnected. Open configuration.";

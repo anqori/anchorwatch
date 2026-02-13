@@ -27,7 +27,6 @@
   export let onboardingWifiStateText = "Waiting for Wi-Fi status...";
   export let onboardingWifiSsid = "--";
   export let onboardingWifiRssiText = "--";
-  export let cloudStatusText = "not checked";
 
   export let relayBaseUrlInput = "";
   export let relayResult = "No request yet.";
@@ -41,8 +40,7 @@
   export let onClearSelectedNetwork: () => void = () => {};
   export let onRefreshStatus: () => void = () => {};
   export let onSaveRelayUrl: () => void = () => {};
-  export let onProbeRelay: () => void = () => {};
-  export let onVerifyCloud: () => void = () => {};
+  export let onProbe: () => void = () => {};
 </script>
 
 <Navbar title="Internet & WLAN">
@@ -109,7 +107,6 @@
     <ListItem title="SSID" after={onboardingWifiSsid} />
     <ListItem title="Connected" after={onboardingWifiConnected ? "yes" : "no"} />
     <ListItem title="RSSI" after={onboardingWifiRssiText} />
-    <ListItem title="Cloud verify" after={cloudStatusText} />
   </List>
   {#if onboardingWifiErrorText}
     <div class="hint onboarding-error">Potential error: {onboardingWifiErrorText}</div>
@@ -129,8 +126,7 @@
   </List>
   <div class="actions">
     <KonstaButton clear onClick={onSaveRelayUrl}>Save Relay URL</KonstaButton>
-    <KonstaButton clear onClick={onProbeRelay}>Ping Relay</KonstaButton>
-    <KonstaButton onClick={onVerifyCloud}>Verify Cloud</KonstaButton>
+    <KonstaButton clear onClick={onProbe}>Probe Connection</KonstaButton>
   </div>
   <div class="hint">{relayResult}</div>
 </div>
