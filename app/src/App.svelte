@@ -35,12 +35,9 @@ import {
     BLE_LIVE_MAX_AGE_MS,
     BLE_SERVICE_UUID,
     BLE_SNAPSHOT_UUID,
-    BOAT_ID_KEY,
-    BOAT_SECRET_KEY,
     CLOUD_HEALTH_POLL_MS,
     CLOUD_POLL_MS,
     CONFIG_SECTIONS,
-    DEFAULT_RELAY_BASE_URL,
     MAPTILER_API_KEY,
     MAPTILER_DEFAULT_CENTER,
     MAPTILER_DEFAULT_ZOOM,
@@ -50,16 +47,12 @@ import {
     MAPTILER_STYLE_SATELLITE,
     MODE_DEVICE,
     MODE_FAKE,
-    MODE_KEY,
-    PHONE_ID_KEY,
     PROTOCOL_VERSION,
     PWA_BUILD_VERSION,
-    RELAY_BASE_URL_KEY,
     TABBAR_LINK_COLORS,
     TRACK_MAX_POINTS,
     TRACK_SNAPSHOT_LIMIT,
     VIEW_TABS,
-    WIFI_CFG_VERSION_KEY,
     WIFI_SCAN_TIMEOUT_MS,
   } from "./core/constants";
   import {
@@ -70,16 +63,12 @@ import {
     formatWifiSecurity,
     isObject,
     normalizePatch,
-    parseIntegerInput,
-    parseNumberInput,
-    parsePolygonPoints,
     parseTrackSnapshot,
     parseWifiScanNetworks,
     safeParseJson,
-    toFiniteNumber,
   } from "./services/data-utils";
   import { makeMsgId, writeCharacteristic, writeChunked } from "./services/ble-transport";
-  import { loadStoredString, maskSecret, normalizeRelayBaseUrl, saveStoredString } from "./services/local-storage";
+  import { maskSecret, normalizeRelayBaseUrl } from "./services/local-storage";
   import {
     buildMapTilerPanBounds,
     buildTrackGeoJson,
@@ -88,6 +77,31 @@ import {
     maptilerIds,
     resolveMapTilerStyleUrl,
   } from "./services/maptiler-helpers";
+  import {
+    deriveTelemetry,
+    readFirmwareVersionFromState as readFirmwareVersionFromStateDerived,
+    readOnboardingWifiStatus as readOnboardingWifiStatusDerived,
+  } from "./services/state-derive";
+  import {
+    ensurePhoneId as ensurePhoneIdStored,
+    getBoatId as getBoatIdStored,
+    getBoatSecret as getBoatSecretStored,
+    getRelayBaseUrl as getRelayBaseUrlStored,
+    hasPersistedSetup as hasPersistedSetupStored,
+    loadMode as loadModeStored,
+    nextConfigVersion as nextConfigVersionStored,
+    setMode as setModeStored,
+    setBoatId as setBoatIdStored,
+    setBoatSecret as setBoatSecretStored,
+    setConfigVersion as setConfigVersionStored,
+    setRelayBaseUrl as setRelayBaseUrlStored,
+  } from "./services/persistence-domain";
+  import {
+    buildAnchorConfigPatch,
+    buildProfilesConfigPatch,
+    buildTriggerConfigPatch,
+    manualAnchorLogMessage,
+  } from "./services/config-patch-builders";
   import {
     App as KonstaApp,
     Button as KonstaButton,
@@ -297,21 +311,11 @@ import {
   }
 
   function readOnboardingWifiStatus(): { connected: boolean; ssid: string; rssi: number | null; error: string } {
-    const system = isObject(latestState.system) ? latestState.system : {};
-    const wifi = isObject(system.wifi) ? system.wifi : {};
-    const connected = wifi.connected === true;
-    const ssid = typeof wifi.ssid === "string" ? wifi.ssid.trim() : "";
-    const rssi = toFiniteNumber(wifi.rssi);
-    const rawError = typeof wifi.lastError === "string" ? wifi.lastError.trim() : "";
-    const error = connected || rawError.toLowerCase() === "connecting" ? "" : rawError;
-    return { connected, ssid, rssi, error };
+    return readOnboardingWifiStatusDerived(latestState);
   }
 
   function readFirmwareVersionFromState(): string {
-    const system = isObject(latestState.system) ? latestState.system : {};
-    const firmware = isObject(system.firmware) ? system.firmware : {};
-    const version = typeof firmware.version === "string" ? firmware.version.trim() : "";
-    return version || "--";
+    return readFirmwareVersionFromStateDerived(latestState);
   }
 
   function prefillWifiSettingsFromCurrentState(): void {
@@ -328,15 +332,11 @@ import {
   }
 
   function nextConfigVersion(): number {
-    const current = Number(loadStoredString(WIFI_CFG_VERSION_KEY, "0"));
-    if (!Number.isInteger(current) || current < 0) {
-      return 1;
-    }
-    return current + 1;
+    return nextConfigVersionStored();
   }
 
   function setConfigVersion(version: number): void {
-    saveStoredString(WIFI_CFG_VERSION_KEY, String(version));
+    setConfigVersionStored(version);
   }
 
   function getMapTilerInstance(kind: "map" | "satellite"): MapTilerMap | null {
@@ -603,46 +603,33 @@ import {
   }
 
   function loadMode(): Mode {
-    const saved = loadStoredString(MODE_KEY, MODE_FAKE);
-    return saved === MODE_DEVICE ? MODE_DEVICE : MODE_FAKE;
+    return loadModeStored();
   }
 
   function getRelayBaseUrl(): string {
-    return loadStoredString(RELAY_BASE_URL_KEY, DEFAULT_RELAY_BASE_URL).trim();
+    return getRelayBaseUrlStored();
   }
 
   function getBoatId(): string {
-    return loadStoredString(BOAT_ID_KEY);
+    return getBoatIdStored();
   }
 
   function setBoatId(value: string): void {
-    if (!value) {
-      return;
-    }
-    saveStoredString(BOAT_ID_KEY, value);
+    setBoatIdStored(value);
     boatIdText = value;
   }
 
   function getBoatSecret(): string {
-    return loadStoredString(BOAT_SECRET_KEY);
+    return getBoatSecretStored();
   }
 
   function setBoatSecret(secret: string): void {
-    if (!secret) {
-      return;
-    }
-    saveStoredString(BOAT_SECRET_KEY, secret);
+    setBoatSecretStored(secret);
     refreshIdentityUi();
   }
 
   function ensurePhoneId(): string {
-    let phoneId = loadStoredString(PHONE_ID_KEY);
-    if (!phoneId) {
-      const rand = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-      phoneId = `phone_${rand}`;
-      saveStoredString(PHONE_ID_KEY, phoneId);
-    }
-    return phoneId;
+    return ensurePhoneIdStored();
   }
 
   function refreshIdentityUi(): void {
@@ -667,17 +654,12 @@ import {
   function applyMode(nextMode: Mode, persist = true): void {
     mode = nextMode;
     if (persist) {
-      saveStoredString(MODE_KEY, nextMode);
+      setModeStored(nextMode);
     }
   }
 
   function hasPersistedSetup(): boolean {
-    const hasBoatId = getBoatId().trim().length > 0;
-    const hasBoatSecret = getBoatSecret().trim().length > 0;
-    const hasRelayBaseUrl = getRelayBaseUrl().length > 0;
-    const configVersion = Number(loadStoredString(WIFI_CFG_VERSION_KEY, "0"));
-    const hasSavedConfigVersion = Number.isInteger(configVersion) && configVersion > 0;
-    return hasBoatId || hasBoatSecret || hasRelayBaseUrl || hasSavedConfigVersion;
+    return hasPersistedSetupStored();
   }
 
   function setTelemetry(gpsAgeS: number, dataAgeS: number, depthM: number, windKn: number): void {
@@ -707,36 +689,11 @@ import {
   }
 
   function renderTelemetryFromState(): void {
-    const telemetry = isObject(latestState.telemetry) ? latestState.telemetry : {};
-    const gps = isObject(telemetry.gps) ? telemetry.gps : {};
-    const depth = isObject(telemetry.depth) ? telemetry.depth : {};
-    const wind = isObject(telemetry.wind) ? telemetry.wind : {};
-    const motion = isObject(telemetry.motion) ? telemetry.motion : {};
-
-    const gpsAgeS = Number(gps.ageMs ?? 0) / 1000;
-    const dataAgeS = Number(depth.ageMs ?? wind.ageMs ?? gps.ageMs ?? 0) / 1000;
-    const depthM = Number(depth.meters ?? 0);
-    const windKn = Number(wind.knots ?? 0);
-
-    setTelemetry(gpsAgeS, dataAgeS, depthM, windKn);
-
-    const lat = toFiniteNumber(gps.lat);
-    const lon = toFiniteNumber(gps.lon);
-    if (lat === null || lon === null) {
-      return;
+    const telemetry = deriveTelemetry(latestState, Date.now());
+    setTelemetry(telemetry.gpsAgeS, telemetry.dataAgeS, telemetry.depthM, telemetry.windKn);
+    if (telemetry.trackPoint) {
+      appendTrackPoint(telemetry.trackPoint);
     }
-
-    const sogKn = toFiniteNumber(gps.sogKn ?? motion.sogKn) ?? 0;
-    const cogDeg = toFiniteNumber(gps.cogDeg ?? motion.cogDeg) ?? 0;
-    const headingDeg = toFiniteNumber(gps.headingDeg ?? motion.headingDeg ?? cogDeg) ?? cogDeg;
-    appendTrackPoint({
-      ts: Date.now(),
-      lat,
-      lon,
-      sogKn,
-      cogDeg: (cogDeg + 360) % 360,
-      headingDeg: (headingDeg + 360) % 360,
-    });
   }
 
   function tickFakeSummary(nowMs: number): void {
@@ -1287,71 +1244,73 @@ import {
   }
 
   async function applyAnchorConfig(): Promise<void> {
-    const patch: JsonRecord = {
-      "anchor.defaultSetMode": anchorMode,
-      "anchor.offset.distanceM": parseNumberInput(anchorOffsetDistanceM, 8, 0, 2000),
-      "anchor.offset.angleDeg": parseNumberInput(anchorOffsetAngleDeg, 210, 0, 359.99),
-      "anchor.autoMode.enabled": autoModeEnabled,
-      "anchor.autoMode.minForwardSogKn": parseNumberInput(autoModeMinForwardSogKn, 0.8, 0, 20),
-      "anchor.autoMode.stallMaxSogKn": parseNumberInput(autoModeStallMaxSogKn, 0.3, 0, 20),
-      "anchor.autoMode.reverseMinSogKn": parseNumberInput(autoModeReverseMinSogKn, 0.4, 0, 20),
-      "anchor.autoMode.confirmSeconds": parseIntegerInput(autoModeConfirmSeconds, 20, 1, 300),
-      "zone.type": zoneType,
-    };
-
-    if (zoneType === "circle") {
-      patch["zone.circle.radiusM"] = parseNumberInput(zoneRadiusM, 45, 1, 3000);
-    } else {
-      const points = parsePolygonPoints(polygonPointsInput);
-      if (points.length < 3) {
-        throw new Error("Polygon mode requires at least 3 points (lat,lon per line)");
-      }
-      patch["zone.polygon.points"] = points;
-    }
+    const patch = buildAnchorConfigPatch({
+      anchorMode,
+      anchorOffsetDistanceM,
+      anchorOffsetAngleDeg,
+      autoModeEnabled,
+      autoModeMinForwardSogKn,
+      autoModeStallMaxSogKn,
+      autoModeReverseMinSogKn,
+      autoModeConfirmSeconds,
+      zoneType,
+      zoneRadiusM,
+      polygonPointsInput,
+      manualAnchorLat,
+      manualAnchorLon,
+    });
 
     await sendConfigPatch(patch, "anchor+zone");
-
-    if (anchorMode === "manual") {
-      const manualLat = toFiniteNumber(manualAnchorLat);
-      const manualLon = toFiniteNumber(manualAnchorLon);
-      if (manualLat !== null && manualLon !== null) {
-        logLine(`manual anchor draft captured at lat=${manualLat.toFixed(5)}, lon=${manualLon.toFixed(5)} (runtime command id pending)`);
-      } else {
-        logLine("manual mode selected; runtime drag/drop command not yet wired in protocol scaffold");
-      }
+    const manualLog = manualAnchorLogMessage({
+      anchorMode,
+      anchorOffsetDistanceM,
+      anchorOffsetAngleDeg,
+      autoModeEnabled,
+      autoModeMinForwardSogKn,
+      autoModeStallMaxSogKn,
+      autoModeReverseMinSogKn,
+      autoModeConfirmSeconds,
+      zoneType,
+      zoneRadiusM,
+      polygonPointsInput,
+      manualAnchorLat,
+      manualAnchorLon,
+    });
+    if (manualLog) {
+      logLine(manualLog);
     }
   }
 
   async function applyTriggerConfig(): Promise<void> {
-    const patch: JsonRecord = {
-      "triggers.wind_above.enabled": triggerWindAboveEnabled,
-      "triggers.wind_above.thresholdKn": parseNumberInput(triggerWindAboveThresholdKn, 30, 0, 150),
-      "triggers.wind_above.holdMs": parseIntegerInput(triggerWindAboveHoldMs, 15000, 0, 600000),
-      "triggers.wind_above.severity": triggerWindAboveSeverity,
-      "triggers.outside_area.enabled": triggerOutsideAreaEnabled,
-      "triggers.outside_area.holdMs": parseIntegerInput(triggerOutsideAreaHoldMs, 10000, 0, 600000),
-      "triggers.outside_area.severity": triggerOutsideAreaSeverity,
-      "triggers.gps_age.enabled": triggerGpsAgeEnabled,
-      "triggers.gps_age.maxAgeMs": parseIntegerInput(triggerGpsAgeMaxMs, 5000, 0, 600000),
-      "triggers.gps_age.holdMs": parseIntegerInput(triggerGpsAgeHoldMs, 5000, 0, 600000),
-      "triggers.gps_age.severity": triggerGpsAgeSeverity,
-    };
+    const patch = buildTriggerConfigPatch({
+      triggerWindAboveEnabled,
+      triggerWindAboveThresholdKn,
+      triggerWindAboveHoldMs,
+      triggerWindAboveSeverity,
+      triggerOutsideAreaEnabled,
+      triggerOutsideAreaHoldMs,
+      triggerOutsideAreaSeverity,
+      triggerGpsAgeEnabled,
+      triggerGpsAgeMaxMs,
+      triggerGpsAgeHoldMs,
+      triggerGpsAgeSeverity,
+    });
     await sendConfigPatch(patch, "triggers");
   }
 
   async function applyProfilesConfig(): Promise<void> {
-    const patch: JsonRecord = {
-      "profiles.mode": profilesMode,
-      "profiles.day.colorScheme": profileDayColorScheme,
-      "profiles.day.brightnessPct": parseIntegerInput(profileDayBrightnessPct, 100, 1, 100),
-      "profiles.day.outputProfile": profileDayOutputProfile.trim() || "normal",
-      "profiles.night.colorScheme": profileNightColorScheme,
-      "profiles.night.brightnessPct": parseIntegerInput(profileNightBrightnessPct, 20, 1, 100),
-      "profiles.night.outputProfile": profileNightOutputProfile.trim() || "night",
-      "profiles.autoSwitch.source": profileAutoSwitchSource,
-      "profiles.autoSwitch.dayStartLocal": profileDayStartLocal,
-      "profiles.autoSwitch.nightStartLocal": profileNightStartLocal,
-    };
+    const patch = buildProfilesConfigPatch({
+      profilesMode,
+      profileDayColorScheme,
+      profileDayBrightnessPct,
+      profileDayOutputProfile,
+      profileNightColorScheme,
+      profileNightBrightnessPct,
+      profileNightOutputProfile,
+      profileAutoSwitchSource,
+      profileDayStartLocal,
+      profileNightStartLocal,
+    });
     await sendConfigPatch(patch, "profiles");
   }
 
@@ -1776,7 +1735,7 @@ import {
 
   function saveRelayUrl(): void {
     const normalized = normalizeRelayBaseUrl(relayBaseUrlInput);
-    saveStoredString(RELAY_BASE_URL_KEY, normalized);
+    setRelayBaseUrlStored(normalized);
     relayBaseUrlInput = normalized;
     logLine(`relay base URL saved: ${normalized || "(empty)"}`);
   }
