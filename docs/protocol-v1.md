@@ -38,9 +38,9 @@ Out of scope:
 
 ## 3. Topology
 
-## 3.1 Path A (HTTPS + Web Push)
+## 3.1 Path A (Cloud Relay Pipe)
 
-`Device (ESP32) -> HTTPS -> Cloudflare Worker (latest-state + events) -> app (HTTPS sync + Web Push)`
+`Device (ESP32) <-> WebSocket <-> Cloudflare Durable Object relay <-> WebSocket <-> app`
 
 ## 3.2 Path B (local direct)
 
@@ -139,7 +139,7 @@ Payload:
 Use this same message over both transports:
 
 1. BLE path: device sends `status.patch` continuously (no long batching).
-2. Cloud path: device buffers status updates and sends aggregated `status.patch` every 30 seconds.
+2. Cloud relay path: messages are forwarded live as received (no relay-side batching/buffering).
 3. `statePatch` accepts dot-path keys (recommended) and nested objects; receivers normalize to canonical nested state before merge.
 
 ## 6.2 `status.snapshot` (device/cloud -> app)
@@ -190,7 +190,7 @@ Payload:
 Notes:
 
 1. Used on BLE path (app -> device via `controlTx`).
-2. Cloud path uses `GET /v1/tracks?boatId=...&sinceTs=...&limit=...` with equivalent parameters.
+2. Cloud relay path uses the same `track.snapshot.request` envelope over WebSocket.
 
 ## 6.2.2 `track.snapshot` (device/cloud -> app)
 
@@ -629,297 +629,72 @@ Notes:
    - `anchor.state = "up"`
    - `anchor.position = null` (or omitted)
 
-## 7. Path A: Device -> HTTPS -> Cloudflare -> App (HTTPS + Web Push)
+## 7. Path A: Device <-> Cloudflare Relay <-> App (WebSocket Pipe)
 
-## 7.1 Endpoints
+## 7.1 Endpoint
 
 | Endpoint | Method | Direction | Purpose |
 | --- | --- | --- | --- |
-| `/health` | `GET` | any -> cloud | Health probe. |
-| `/v1/config` | `POST` | app/device -> cloud | Merge config patch into latest boat config. |
-| `/v1/config?boatId=...` | `GET` | app/device <- cloud | Fetch latest config as `config.snapshot`. |
-| `/v1/state` | `POST` | device -> cloud | Merge status patch into latest boat state. |
-| `/v1/state?boatId=...` | `GET` | app <- cloud | Fetch latest state as `status.snapshot` (no history replay). |
-| `/v1/tracks?boatId=...` | `GET` | app <- cloud | Fetch derived historical track as `track.snapshot`. |
-| `/v1/events` | `POST` | device/app -> cloud | Ingest discrete events and runtime commands (for example alarm lifecycle, `anchor.down`, `anchor.rise`). |
-
-Note: in scaffold code, `/v1/config`, `/v1/state`, `/v1/tracks`, and `/v1/events` are available.
-
-## 7.2 Headers
-
-Required for authenticated calls:
-
-1. `Authorization: Bearer <boatSecret>`
-2. `Content-Type: application/json`
-3. `X-AnchorWatch-Client: device|app`
-
-Optional:
-
-1. `Idempotency-Key: <msgId>`
-
-Note:
-
-1. `GET /health` is intentionally unauthenticated.
-
-## 7.3 Ingest response contract (`POST /v1/state`)
-
-Success:
-
-```json
-{
-  "ok": true,
-  "accepted": true,
-  "boatId": "boat_demo_001",
-  "updatedAt": 1770897600456,
-  "mode": "latest-state"
-}
-```
-
-Failure:
-
-```json
-{
-  "ok": false,
-  "error": {
-    "code": "INVALID_PAYLOAD",
-    "detail": "boatId and object statePatch/patch required (nested object or dot-path map); if msgType is provided it must be status.patch",
-    "retryable": false
-  }
-}
-```
-
-## 7.4 Snapshot response contract (`GET /v1/state?boatId=...`)
-
-Success:
-
-```json
-{
-  "ok": true,
-  "ver": "am.v1",
-  "msgType": "status.snapshot",
-  "boatId": "boat_demo_001",
-  "deviceId": "dev_demo_001",
-  "ts": 1770897600456,
-  "payload": {
-    "snapshot": {
-      "telemetry": {
-        "gps": { "lat": 54.3201, "lon": 10.1402, "ageMs": 900, "valid": true }
-      }
-    },
-    "updatedAt": 1770897600456
-  }
-}
-```
-
-Failure:
-
-```json
-{
-  "ok": false,
-  "error": {
-    "code": "NOT_FOUND",
-    "detail": "no state for boatId"
-  }
-}
-```
-
-## 7.4.1 Config ingest response contract (`POST /v1/config`)
-
-Success:
-
-```json
-{
-  "ok": true,
-  "accepted": true,
-  "boatId": "boat_demo_001",
-  "version": 18,
-  "updatedAt": 1770897600456,
-  "mode": "latest-config"
-}
-```
-
-Failure:
-
-```json
-{
-  "ok": false,
-  "error": {
-    "code": "INVALID_PAYLOAD",
-    "detail": "boatId, integer version>=0, and object patch/configPatch required (nested object or dot-path map); if msgType is provided it must be config.patch"
-  }
-}
-```
-
-Version conflict:
-
-```json
-{
-  "ok": false,
-  "error": {
-    "code": "VERSION_CONFLICT",
-    "detail": "version must be greater than current (17)"
-  }
-}
-```
-
-## 7.4.2 Config snapshot response contract (`GET /v1/config?boatId=...`)
-
-Success:
-
-```json
-{
-  "ok": true,
-  "ver": "am.v1",
-  "msgType": "config.snapshot",
-  "boatId": "boat_demo_001",
-  "deviceId": "phone_pm_001",
-  "ts": 1770897600456,
-  "payload": {
-    "version": 18,
-    "config": {
-      "anchor": {
-        "autoMode": {
-          "minForwardSogKn": 0.8,
-          "stallMaxSogKn": 0.3,
-          "reverseMinSogKn": 0.4,
-          "confirmSeconds": 20
-        }
-      },
-      "alerts": {
-        "anchor_distance": { "max_distance_m": 35.0 },
-        "boating_area": {
-          "polygon": [
-            { "lat": 54.3194, "lon": 10.1388 },
-            { "lat": 54.3212, "lon": 10.1388 },
-            { "lat": 54.3212, "lon": 10.1418 },
-            { "lat": 54.3194, "lon": 10.1418 }
-          ]
-        }
-      }
-    },
-    "updatedAt": 1770897600456
-  }
-}
-```
-
-Failure:
-
-```json
-{
-  "ok": false,
-  "error": {
-    "code": "NOT_FOUND",
-    "detail": "no config for boatId"
-  }
-}
-```
-
-## 7.5 Latest-state semantics (status updates)
-
-1. Status updates are merged field-by-field (last write wins per field path).
-2. Cloud does not maintain full status history as a message queue.
-3. Device sends only `status.patch` messages for GPS/depth/wind/motion state.
-4. Device buffers state changes and sends one aggregated `status.patch` every 30 seconds.
-5. App reads current status via `GET /v1/state?boatId=...` as `status.snapshot`.
-6. Device may send full snapshot or partial patch in `statePatch`.
-7. Arrays in patch replace the target array (not element-wise merge).
-8. For network/5xx, device retries with exponential backoff:
-   - 1s, 2s, 4s, 8s, 16s, 30s max
-
-## 7.5.1 Config merge semantics (`config.patch`)
-
-1. `config.patch.patch` uses the same merge engine semantics as `status.patch.statePatch`.
-2. Both status and config patch inputs are normalized using the same parser (dot-path and nested-object compatible).
-3. Objects are deep-merged by field; arrays replace whole target arrays.
-4. `version` must be integer `>= 0` and strictly increase per boat.
-5. `config.*` messages must use `/v1/config` (not `/v1/events`).
-
-## 7.6 Event behavior and push
-
-1. For `alarm.event` with severity `alarm|critical`, cloud emits web push.
-2. Push payload should be concise (alarm summary + IDs).
-3. Discrete events use `/v1/events`; status uses `/v1/state`.
-4. App fetches current status via `GET /v1/state?boatId=...` when opened/resumed.
-5. Cloud state sync to app uses `status.snapshot` and `status.patch` schema only.
-
-## 7.7 Onboarding end-to-end flow
-
-Onboarding flow (BLE required):
-
-1. User installs PWA from Cloudflare Pages URL and opens onboarding.
-2. User puts device into physical pair mode and completes BLE stack pairing/bonding in OS/browser flow.
-3. PWA connects to BLE service UUID `9f2d0000-87aa-4f4a-a0ea-4d5d4f415354`.
-4. PWA writes auth action `pair.confirm` on `auth` characteristic to open privileged session.
-5. PWA sends `onboarding.request_secret`; device returns `onboarding.boat_secret`; app stores `boatSecret` securely.
-6. PWA sends `onboarding.wifi.scan`; device returns `onboarding.wifi.scan_result`; user selects WLAN and enters passphrase.
-7. App sends normal `config.patch` with `network.wifi.*` fields (dot-path or nested); device reports progress/state via `status.patch` (`statePatch.system.wifi.*`) and `command.ack`.
-8. App calls cloud APIs with `Authorization: Bearer <boatSecret>` and verifies access (200/404 on `GET /v1/state?boatId=...` means auth OK).
-9. Device reports cloud connectivity via `status.patch` (`statePatch.system.cloud.*`).
-10. App initializes map track via `track.snapshot` and starts normal operation (`status.patch`/`status.snapshot`, alarms, config).
-
-## 7.8 Onboarding message coverage
-
-1. Covered:
-   - `config.patch` with `network.wifi.*` fields (dot-path or nested)
-   - `onboarding.request_secret`
-   - `onboarding.boat_secret`
-   - `onboarding.wifi.scan`
-   - `onboarding.wifi.scan_result`
-   - `status.patch` onboarding progress fields (`statePatch.system.wifi.*`, `statePatch.system.cloud.*`)
-   - runtime anchor commands (`anchor.down`, `anchor.rise`)
-2. Constraint:
-   - no fallback onboarding path for non-BLE-capable clients in v1
-
-## 7.9 Track response contract (`GET /v1/tracks?boatId=...`)
+| `/v1/pipe` | `GET` + `Upgrade: websocket` | app/device <-> cloud | Join per-boat relay room and exchange protocol envelopes. |
 
 Query params:
 
-1. `boatId` required
-2. `sinceTs` optional (epoch ms)
-3. `limit` optional (bounded by server)
+1. `boatId` required.
+2. `deviceId` recommended (`phone_*` / `dev_*`).
+3. `role` optional (`app` default, `device`).
+4. `boatSecret` required when worker `BOAT_SECRET` is configured.
 
-Success:
+## 7.2 Relay semantics
+
+1. One Durable Object room per `boatId`.
+2. Relay forwards each non-`relay.*` message to every other socket in that room.
+3. Relay does not mutate forwarded messages.
+4. Relay does not buffer, persist, replay, or derive state/track/config.
+5. Sender does not receive echo of its own forwarded message.
+
+## 7.3 Relay-local control messages
+
+### 7.3.1 `relay.probe` (app/device -> relay)
+
+Payload:
+
+```json
+{}
+```
+
+### 7.3.2 `relay.probe.result` (relay -> requester only)
+
+Payload example:
 
 ```json
 {
   "ok": true,
-  "ver": "am.v1",
-  "msgType": "track.snapshot",
-  "boatId": "boat_demo_001",
-  "deviceId": "cloud",
-  "ts": 1770897900000,
-  "payload": {
-    "points": [
-      { "ts": 1770897600000, "lat": 54.3201, "lon": 10.1402, "cogDeg": 192.3, "headingDeg": 188.0, "sogKn": 0.42 }
-    ],
-    "totalPoints": 120,
-    "returnedPoints": 1,
-    "builtFrom": "status.patch.statePatch.telemetry.gps"
-  }
+  "resultText": "Relay active (3 sockets)",
+  "buildVersion": "run-unknown",
+  "connectedSockets": 3,
+  "connectedApps": 2,
+  "connectedDevices": 1,
+  "inReplyToMsgId": "01K2S3Q8PX9M0J4S6J2V4C7A9B"
 }
 ```
 
-Failure:
+Notes:
 
-```json
-{
-  "ok": false,
-  "error": {
-    "code": "INVALID_PAYLOAD",
-    "detail": "boatId query param required"
-  }
-}
-```
+1. `relay.probe` is answered by relay itself and is never routed to device/app peers.
+2. `buildVersion` replaces the previous `/health` build check.
 
-## 7.10 Cloud track build semantics
+## 7.4 Runtime sync rules over relay
 
-1. On each accepted `status.patch` containing `statePatch.telemetry.gps.lat/lon`, cloud appends one track point.
-2. Cloud stores a bounded per-boat ring buffer (KV-backed durable storage in deployed worker; in-memory fallback only for local test/dev without KV binding).
-3. App startup/resume flow:
-   - fetch `track.snapshot` from `/v1/tracks`
-   - fetch latest `status.snapshot` from `/v1/state`
-   - extend track locally using subsequent `status.patch` GPS updates
-4. Consecutive unchanged positions may be de-duplicated by cloud.
+1. App/device must actively request snapshots after connect/reconnect (`status.snapshot.request`, `track.snapshot.request`).
+2. Because relay has no buffering, disconnect gaps are not replayed.
+3. `command.ack` still comes from device and is forwarded through relay unchanged.
+4. Message envelope format remains identical to BLE path.
+
+## 7.5 Auth model
+
+1. Shared `boatSecret` per boat (query param `boatSecret` or Bearer header for non-browser clients).
+2. Optional worker `BOAT_ID` enforces single-boat scope.
+3. If `BOAT_SECRET` is not configured, relay can run open in dev mode.
 
 ## 8. Path B: Device -> BLE -> App
 
@@ -974,7 +749,7 @@ Rules:
 ## 8.5 BLE status cadence
 
 1. Device streams `status.patch` continuously over BLE while connected.
-2. BLE path does not use the 30-second cloud batching window.
+2. BLE path uses the same live stream semantics as the relay WebSocket path.
 3. Each patch may be full or partial, following the same `statePatch` schema as cloud.
 4. Snapshot reads over BLE must use `status.snapshot` schema.
 
@@ -989,7 +764,7 @@ Rules:
 ## 9.1 Cloud path
 
 1. TLS 1.2+ required.
-2. Single shared `boatSecret` is required for device/app read and write operations (`Authorization: Bearer <boatSecret>`).
+2. Single shared `boatSecret` is required for device/app relay connections (`boatSecret` query param or `Authorization: Bearer <boatSecret>`).
 3. `boatId` is not an auth factor; it is an identifier only.
 4. CORS restricted to approved app origins in production.
 
@@ -1022,14 +797,15 @@ Rules:
 
 Already implemented:
 
-1. Worker `/health`, `/v1/config` (latest-config merge/read), `/v1/state` (latest-state merge/read), `/v1/tracks` (derived track read), and `/v1/events` scaffold.
-2. App fake mode and placeholder device polling mode.
-3. Firmware BLE GATT scaffold (`controlTx`, `eventRx`, `snapshot`, `auth`) with chunked BLE framing and 2s reassembly timeout.
-4. Firmware onboarding/control scaffold: physical pair-mode gate, auth session confirm, `onboarding.request_secret` -> `onboarding.boat_secret`, `config.patch` Wi-Fi apply, and `command.ack`.
+1. Worker `/v1/pipe` Durable Object relay (per-boat WebSocket forwarding, no buffering).
+2. Relay-local `relay.probe` -> `relay.probe.result` handling (not routed to device).
+3. App fake mode and relay WebSocket pipeline connection model.
+4. Firmware BLE GATT scaffold (`controlTx`, `eventRx`, `snapshot`, `auth`) with chunked BLE framing and 2s reassembly timeout.
+5. Firmware onboarding/control scaffold: physical pair-mode gate, auth session confirm, `onboarding.request_secret` -> `onboarding.boat_secret`, `config.patch` Wi-Fi apply, and `command.ack`.
 
 Not yet implemented:
 
 1. Shared `boatSecret` lifecycle (rotation/recovery/revoke flow).
-2. Firmware status batching policy (30-second cloud flush, continuous BLE stream).
+2. Firmware native relay WebSocket client transport (WLAN path) to join `/v1/pipe`.
 3. Full envelope, message-type, and config-schema validation hardening.
 4. Push fan-out pipeline.

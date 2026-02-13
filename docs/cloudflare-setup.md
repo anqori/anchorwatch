@@ -50,7 +50,6 @@ Worker:
 3. Install Arduino CLI + ESP32 core for firmware commands.
 4. Create a Cloudflare API token with:
    - `Cloudflare Workers Scripts:Edit`
-   - `Workers KV Storage:Edit`
    - `Cloudflare Pages:Edit`
    - `Zone:Workers Routes:Edit`
    - `Zone:Zone:Read`
@@ -97,12 +96,6 @@ Pages setup is automatic on deploy:
 - If Cloudflare reports `CNAME record not set`, create DNS CNAME records:
   - `dev-aw.anqori.com` -> `anqori-anchorwatch-pwa-dev.pages.dev`
   - `aw.anqori.com` -> `anqori-anchorwatch-pwa.pages.dev`
-
-Create Worker KV namespaces and inject IDs into `cloud/worker/wrangler.toml`:
-
-```bash
-just worker-kv-create
-```
 
 Set Worker secrets:
 

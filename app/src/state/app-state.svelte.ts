@@ -46,8 +46,6 @@ export interface BleUiState {
 export interface RuntimeState {
   bootMs: number;
   lastBleMessageAtMs: number;
-  lastCloudPollMs: number;
-  lastCloudHealthPollMs: number;
 }
 
 export interface SummaryState {
@@ -239,8 +237,6 @@ export const appState = $state({
   runtime: {
     bootMs: performance.now(),
     lastBleMessageAtMs: 0,
-    lastCloudPollMs: 0,
-    lastCloudHealthPollMs: 0,
   } as RuntimeState,
   latestState: {} as JsonRecord,
   latestStateSource: "--" as InboundSource | "--",
@@ -337,14 +333,6 @@ export function setBleAuthState(authState: JsonRecord | null): void {
 
 export function markBleMessageSeen(nowTs = Date.now()): void {
   appState.runtime.lastBleMessageAtMs = nowTs;
-}
-
-export function setCloudPollTimestamp(nowTs = Date.now()): void {
-  appState.runtime.lastCloudPollMs = nowTs;
-}
-
-export function setCloudHealthPollTimestamp(nowTs = Date.now()): void {
-  appState.runtime.lastCloudHealthPollMs = nowTs;
 }
 
 export function setSummaryState(text: string, klass: PillClass): void {

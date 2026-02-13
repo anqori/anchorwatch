@@ -46,6 +46,18 @@ interface BleTransportState {
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
 
+interface PendingSnapshotRequest {
+  resolve: (snapshot: JsonRecord | null) => void;
+  reject: (error: Error) => void;
+  timeout: ReturnType<typeof setTimeout>;
+}
+
+interface PendingTrackRequest {
+  resolve: (points: TrackPoint[] | null) => void;
+  reject: (error: Error) => void;
+  timeout: ReturnType<typeof setTimeout>;
+}
+
 export class DeviceConnectionBle implements DeviceConnection {
   readonly kind = "bluetooth" as const;
 
@@ -67,6 +79,10 @@ export class DeviceConnectionBle implements DeviceConnection {
   private eventSubscribers = new Set<(event: DeviceEvent) => void>();
 
   private statusSubscribers = new Set<(status: DeviceConnectionStatus) => void>();
+
+  private pendingSnapshots: PendingSnapshotRequest[] = [];
+
+  private pendingTracks: PendingTrackRequest[] = [];
 
   async connect(): Promise<void> {
     if (this.state.connected) {
@@ -217,30 +233,39 @@ export class DeviceConnectionBle implements DeviceConnection {
   }
 
   async requestStateSnapshot(): Promise<JsonRecord | null> {
-    if (!this.state.connected || !this.state.snapshot) {
-      throw new Error("BLE snapshot characteristic unavailable");
+    if (!this.state.connected) {
+      throw new Error("BLE not connected");
     }
 
-    const value = await this.state.snapshot.readValue();
-    const raw = decoder.decode(dataViewToBytes(value));
-    const envelope = safeParseJson(raw) as Envelope | null;
-    if (!envelope || !isObject(envelope)) {
-      throw new Error("invalid snapshot JSON");
-    }
+    const snapshotPromise = new Promise<JsonRecord | null>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingSnapshots = this.pendingSnapshots.filter((entry) => entry !== pending);
+        resolve(null);
+      }, 3500);
+      const pending: PendingSnapshotRequest = { resolve, reject, timeout };
+      this.pendingSnapshots.push(pending);
+    });
 
-    const event = this.toDeviceEvent(envelope, "ble/snapshot");
-    if (event) {
-      this.emitEvent(event);
-    }
-
-    if (!event || event.type !== "state.snapshot" || !isObject(event.snapshot)) {
-      return null;
-    }
-    return event.snapshot;
+    await this.sendBleCommand("status.snapshot.request", {}, false);
+    return snapshotPromise;
   }
 
-  async requestTrackSnapshot(_limit: number): Promise<TrackPoint[] | null> {
-    return null;
+  async requestTrackSnapshot(limit: number): Promise<TrackPoint[] | null> {
+    if (!this.state.connected) {
+      throw new Error("BLE not connected");
+    }
+
+    const trackPromise = new Promise<TrackPoint[] | null>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingTracks = this.pendingTracks.filter((entry) => entry !== pending);
+        resolve(null);
+      }, 4500);
+      const pending: PendingTrackRequest = { resolve, reject, timeout };
+      this.pendingTracks.push(pending);
+    });
+
+    await this.sendBleCommand("track.snapshot.request", { limit: Math.max(1, Math.floor(limit)) }, false);
+    return trackPromise;
   }
 
   async probe(): Promise<DeviceConnectionProbeResult> {
@@ -309,6 +334,23 @@ export class DeviceConnectionBle implements DeviceConnection {
     if (!event) {
       return;
     }
+
+    if (event.type === "state.snapshot" && isObject(event.snapshot)) {
+      const pending = this.pendingSnapshots.shift();
+      if (pending) {
+        clearTimeout(pending.timeout);
+        pending.resolve(event.snapshot);
+      }
+    }
+
+    if (event.type === "track.snapshot") {
+      const pending = this.pendingTracks.shift();
+      if (pending) {
+        clearTimeout(pending.timeout);
+        pending.resolve(event.points);
+      }
+    }
+
     this.emitEvent(event);
   }
 
@@ -436,6 +478,16 @@ export class DeviceConnectionBle implements DeviceConnection {
     this.state.chunkAssemblies.clear();
 
     clearPendingAcks(this.state.pendingAcks, "BLE disconnected");
+    for (const pending of this.pendingSnapshots) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error("BLE disconnected"));
+    }
+    this.pendingSnapshots = [];
+    for (const pending of this.pendingTracks) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error("BLE disconnected"));
+    }
+    this.pendingTracks = [];
     this.emitStatus();
   }
 }

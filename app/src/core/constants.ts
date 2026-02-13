@@ -22,8 +22,6 @@ export const BLE_CHUNK_MAX_PAYLOAD = 120;
 export const BLE_CHUNK_TIMEOUT_MS = 2000;
 export const WIFI_SCAN_TIMEOUT_MS = 10000;
 export const BLE_LIVE_MAX_AGE_MS = 8000;
-export const CLOUD_POLL_MS = 5000;
-export const CLOUD_HEALTH_POLL_MS = 60000;
 export const TRACK_MAX_POINTS = 320;
 export const TRACK_SNAPSHOT_LIMIT = 240;
 

@@ -10,6 +10,10 @@
   export let anchorDistanceText = "--";
   export let anchorBearingText = "--";
   export let activeAlerts: AlertRuntimeEntry[] = [];
+
+  function alertRowClass(alert: AlertRuntimeEntry): string {
+    return alert.severity === "ALARM" ? "summary-alert-row alarm" : "summary-alert-row warning";
+  }
 </script>
 
 <div class="space-y-3">
@@ -33,8 +37,24 @@
       <ListItem title="No active alerts." />
     {:else}
       {#each activeAlerts as alert}
-        <ListItem title={alert.label} subtitle={`${alert.state} · ${alert.severity}`} />
+        <ListItem
+          class={alertRowClass(alert)}
+          title={alert.label}
+          subtitle={`${alert.state} · ${alert.severity}`}
+        />
       {/each}
     {/if}
   </List>
 </div>
+
+<style>
+  :global(.summary-alert-row.alarm .item-title),
+  :global(.summary-alert-row.alarm .item-subtitle) {
+    color: #dc2626;
+  }
+
+  :global(.summary-alert-row.warning .item-title),
+  :global(.summary-alert-row.warning .item-subtitle) {
+    color: #ca8a04;
+  }
+</style>

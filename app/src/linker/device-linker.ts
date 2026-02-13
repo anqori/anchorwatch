@@ -1,4 +1,4 @@
-import { BLE_LIVE_MAX_AGE_MS, CLOUD_HEALTH_POLL_MS, CLOUD_POLL_MS } from "../core/constants";
+import { TRACK_SNAPSHOT_LIMIT } from "../core/constants";
 import type { PillClass } from "../core/types";
 import { isObject } from "../services/data-utils";
 import {
@@ -13,8 +13,6 @@ import {
   setActiveConnectionConnected,
   setBleAuthState,
   setBleConnectionState,
-  setCloudHealthPollTimestamp,
-  setCloudPollTimestamp,
   setSummarySource,
   setSummaryState,
   setTelemetry,
@@ -123,6 +121,7 @@ export class DeviceLinker {
       });
 
       await next.connect();
+      void this.primeConnection(next);
     } finally {
       this.switchingConnection = false;
     }
@@ -157,6 +156,7 @@ export class DeviceLinker {
 
     if (event.type === "state.patch") {
       applyStatePatch(event.patch, event.source);
+      renderTelemetryFromLatestState();
       if (event.source === "ble/eventRx" || event.source === "ble/snapshot") {
         markBleMessageSeen(Date.now());
       }
@@ -165,6 +165,7 @@ export class DeviceLinker {
 
     if (event.type === "state.snapshot") {
       applyStateSnapshot(event.snapshot, event.source);
+      renderTelemetryFromLatestState();
       if (event.source === "ble/eventRx" || event.source === "ble/snapshot") {
         markBleMessageSeen(Date.now());
       }
@@ -217,6 +218,24 @@ export class DeviceLinker {
     }
   }
 
+  private async primeConnection(connection: DeviceConnection): Promise<void> {
+    if (!connection.isConnected()) {
+      return;
+    }
+
+    try {
+      await connection.requestStateSnapshot();
+    } catch (error) {
+      logLine(`${connection.kind} initial status.snapshot failed: ${String(error)}`);
+    }
+
+    try {
+      await connection.requestTrackSnapshot(TRACK_SNAPSHOT_LIMIT);
+    } catch (error) {
+      logLine(`${connection.kind} initial track.snapshot failed: ${String(error)}`);
+    }
+  }
+
   private async tick(): Promise<void> {
     const nowMs = performance.now();
     if (!this.running || nowMs - this.lastTickMs < 1000) {
@@ -238,97 +257,28 @@ export class DeviceLinker {
   }
 
   private async tickDeviceSummary(nowMs: number): Promise<void> {
-    const nowReal = Date.now();
-    if (appState.connection.mode === "fake") {
-      await this.pollActiveState(nowReal);
-      if (Object.keys(appState.latestState).length > 0) {
-        renderTelemetryFromLatestState();
+    if (Object.keys(appState.latestState).length > 0) {
+      renderTelemetryFromLatestState();
+      if (appState.connection.mode === "fake") {
         const fakePill = this.readFakeSummaryPill();
         setSummarySource(appState.latestStateSource || "fake/snapshot");
         setSummaryState(fakePill.text, fakePill.klass);
         return;
       }
-
-      const ageS = Math.floor((nowMs - appState.runtime.bootMs) / 1000);
-      setTelemetry(ageS, ageS, 0, 0);
-      setSummarySource("fake");
-      setSummaryState("FAKE: WAITING DATA", "warn");
-      return;
-    }
-
-    const bleFresh = appState.ble.connected && (nowReal - appState.runtime.lastBleMessageAtMs) <= BLE_LIVE_MAX_AGE_MS;
-
-    if (bleFresh && Object.keys(appState.latestState).length > 0) {
-      renderTelemetryFromLatestState();
-      setSummarySource(appState.latestStateSource || "ble/live");
-      setSummaryState("DEVICE: BLE LIVE", "ok");
-      return;
-    }
-
-    await this.pollActiveState(nowReal);
-
-    if (Object.keys(appState.latestState).length > 0) {
-      renderTelemetryFromLatestState();
-      setSummarySource(appState.latestStateSource || "cloud");
-      setSummaryState(appState.ble.connected ? "DEVICE: CLOUD FALLBACK" : "DEVICE: CLOUD", appState.ble.connected ? "warn" : "ok");
+      setSummarySource(appState.latestStateSource || "device/live");
+      setSummaryState(this.activeConnection.isConnected() ? "DEVICE: LIVE" : "DEVICE: STALE DATA", this.activeConnection.isConnected() ? "ok" : "warn");
       return;
     }
 
     const ageS = Math.floor((nowMs - appState.runtime.bootMs) / 1000);
     setTelemetry(ageS, ageS, 0, 0);
+    if (appState.connection.mode === "fake") {
+      setSummarySource("fake");
+      setSummaryState("FAKE: WAITING DATA", "warn");
+      return;
+    }
     setSummarySource("none");
-    setSummaryState(appState.ble.connected ? "DEVICE: WAITING DATA" : "DEVICE: NO LINK", "warn");
-  }
-
-  private async pollActiveState(nowMs: number): Promise<void> {
-    const minPollMs = this.activeConnection.kind === "fake" ? 1000 : CLOUD_POLL_MS;
-    if (nowMs - appState.runtime.lastCloudPollMs < minPollMs) {
-      return;
-    }
-    setCloudPollTimestamp(nowMs);
-
-    try {
-      if (this.activeConnection.kind === "cloud-relay") {
-        await this.refreshCloudVersion(nowMs);
-      }
-
-      const snapshot = await this.activeConnection.requestStateSnapshot();
-      if (snapshot === null) {
-        return;
-      }
-
-      if (this.activeConnection.kind === "bluetooth") {
-        applyStateSnapshot(snapshot, "ble/snapshot");
-        markBleMessageSeen(Date.now());
-      } else if (this.activeConnection.kind === "cloud-relay") {
-        applyStateSnapshot(snapshot, "cloud/status.snapshot");
-      } else {
-        applyStateSnapshot(snapshot, "fake/snapshot");
-      }
-    } catch (error) {
-      logLine(`${this.activeConnection.kind} poll failed: ${String(error)}`);
-    }
-  }
-
-  private async refreshCloudVersion(nowTs: number): Promise<void> {
-    if (nowTs - appState.runtime.lastCloudHealthPollMs < CLOUD_HEALTH_POLL_MS) {
-      return;
-    }
-
-    const base = appState.network.relayBaseUrlInput.trim();
-    if (!base) {
-      return;
-    }
-
-    setCloudHealthPollTimestamp(nowTs);
-    try {
-      const probeResult = await this.activeConnection.probe(base);
-      if (probeResult.buildVersion) {
-        appState.versions.cloud = probeResult.buildVersion;
-      }
-    } catch {
-      // Ignore background cloud version errors.
-    }
+    setSummaryState(this.activeConnection.isConnected() ? "DEVICE: WAITING DATA" : "DEVICE: NO LINK", "warn");
   }
 }
 

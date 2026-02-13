@@ -17,10 +17,8 @@ import { deviceLinker } from "../linker/device-linker";
 import {
   appState,
   applyMode,
-  applyStateSnapshot,
   applyWifiScanNetworks,
   logLine,
-  markBleMessageSeen,
   resetLiveDataState,
   refreshIdentityUi,
   replaceTrackPoints,
@@ -236,18 +234,7 @@ export async function refreshStateSnapshot(): Promise<void> {
   if (snapshot === null) {
     return;
   }
-
-  if (connection.kind === "bluetooth") {
-    applyStateSnapshot(snapshot, "ble/snapshot");
-    markBleMessageSeen(Date.now());
-    logLine("status.snapshot read");
-    return;
-  }
-
-  if (connection.kind === "cloud-relay") {
-    applyStateSnapshot(snapshot, "cloud/status.snapshot");
-    logLine("cloud status.snapshot read");
-  }
+  logLine(`status.snapshot read via ${connection.kind}`);
 }
 
 export async function applyWifiConfigFromInternetPage(): Promise<void> {

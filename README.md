@@ -161,7 +161,7 @@ npx --yes wrangler secret put BOAT_SECRET
 Optional boat scope lock:
 
 ```bash
-npx --yes wrangler secret put BOAT_ID
+# Set BOAT_ID in cloud/worker/wrangler.toml [vars] (non-secret)
 ```
 
 ### 8) Deploy
@@ -180,10 +180,10 @@ just cloudflare-dev
 
 ### 9) Quick verification
 
-Check Worker health:
+Check relay endpoint is reachable (without WebSocket upgrade it should return `426 UPGRADE_REQUIRED`):
 
 ```bash
-curl -i https://<your-worker-domain>/health
+curl -i "https://<your-worker-domain>/v1/pipe?boatId=boat_demo_001"
 ```
 
 Open your Pages URL and confirm the app loads.
