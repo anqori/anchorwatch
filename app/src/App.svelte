@@ -6,8 +6,6 @@
     BlockTitle,
     Button as KonstaButton,
     Icon,
-    Segmented,
-    SegmentedButton,
     List,
     ListInput,
     ListItem,
@@ -20,7 +18,8 @@
   type InboundSource = "ble/eventRx" | "ble/snapshot" | "cloud/status.snapshot";
   type PillClass = "ok" | "warn" | "alarm";
   type ViewId = "summary" | "satellite" | "map" | "radar" | "config";
-  type ConfigViewId = "onboarding" | "anchor" | "triggers" | "profiles";
+  type ConfigSectionId = "onboarding" | "anchor" | "triggers" | "profiles";
+  type ConfigViewId = "settings" | ConfigSectionId;
   type OnboardingStep = 1 | 2 | 3;
   type AnchorMode = "current" | "offset" | "auto" | "manual";
   type ZoneType = "circle" | "polygon";
@@ -124,7 +123,7 @@
     { id: "config", label: "Config", icon: "settings" },
   ];
 
-  const CONFIG_TABS: Array<{ id: ConfigViewId; label: string }> = [
+  const CONFIG_SECTIONS: Array<{ id: ConfigSectionId; label: string }> = [
     { id: "onboarding", label: "Connection" },
     { id: "anchor", label: "Anchor" },
     { id: "triggers", label: "Triggers" },
@@ -207,7 +206,9 @@
   let onboardingWifiErrorText = "";
   let onboardingWifiStateText = "Waiting for Wi-Fi status...";
   let activeView: ViewId = "summary";
-  let activeConfigView: ConfigViewId = "onboarding";
+  let activeConfigView: ConfigViewId = "settings";
+  let navigationDepth = 0;
+  let suppressedPopEvents = 0;
   let trackStatusText = "No track yet";
   let trackPoints: TrackPoint[] = [];
   let mapPath = "";
@@ -1589,24 +1590,119 @@
     logLine(`track snapshot loaded (${points.length} points)`);
   }
 
-  function setView(nextView: ViewId): void {
-    const previousView = activeView;
-    activeView = nextView;
-    if (nextView === "config" && previousView !== "config") {
-      activeConfigView = "onboarding";
-      onboardingStep = 1;
+  function navLevelFor(view: ViewId, configView: ConfigViewId): number {
+    if (view === "summary") {
+      return 0;
     }
+    if (view === "config" && configView !== "settings") {
+      return 2;
+    }
+    return 1;
+  }
+
+  function currentNavLevel(): number {
+    return navLevelFor(activeView, activeConfigView);
+  }
+
+  function pushNavStep(): void {
+    try {
+      window.history.pushState({ anchorwatch: "nav-step" }, "", window.location.href);
+      navigationDepth += 1;
+    } catch {
+      // Ignore history API failures in constrained contexts.
+    }
+  }
+
+  function popNavSteps(steps: number): void {
+    const count = Math.min(Math.max(steps, 0), navigationDepth);
+    if (count <= 0) {
+      return;
+    }
+    try {
+      suppressedPopEvents += count;
+      navigationDepth -= count;
+      if (count === 1) {
+        window.history.back();
+      } else {
+        window.history.go(-count);
+      }
+    } catch {
+      suppressedPopEvents = Math.max(0, suppressedPopEvents - count);
+      navigationDepth += count;
+    }
+  }
+
+  function syncToNavLevel(targetLevel: number): void {
+    const currentLevel = currentNavLevel();
+    if (targetLevel > currentLevel) {
+      for (let i = 0; i < targetLevel - currentLevel; i += 1) {
+        pushNavStep();
+      }
+      return;
+    }
+    if (targetLevel < currentLevel) {
+      popNavSteps(currentLevel - targetLevel);
+    }
+  }
+
+  function setView(nextView: ViewId): void {
+    const targetLevel = nextView === "summary" ? 0 : 1;
+    syncToNavLevel(targetLevel);
+
+    if (nextView === "config") {
+      activeConfigView = "settings";
+      onboardingStep = 1;
+    } else if (activeConfigView !== "settings") {
+      activeConfigView = "settings";
+    }
+
+    activeView = nextView;
+
     if ((nextView === "satellite" || nextView === "map" || nextView === "radar") && mode === MODE_DEVICE && trackPoints.length < 3) {
       void runAction("track snapshot", fetchTrackSnapshot);
     }
   }
 
-  function setConfigView(nextConfigView: ConfigViewId): void {
+  function openConfigView(nextConfigView: ConfigSectionId): void {
+    syncToNavLevel(2);
     if (nextConfigView === "onboarding") {
       onboardingStep = 1;
     }
-    activeConfigView = nextConfigView;
     activeView = "config";
+    activeConfigView = nextConfigView;
+  }
+
+  function goToSettingsView(syncHistory = true): void {
+    if (activeView !== "config" || activeConfigView === "settings") {
+      return;
+    }
+    if (syncHistory) {
+      syncToNavLevel(1);
+    }
+    activeView = "config";
+    activeConfigView = "settings";
+  }
+
+  function handlePopState(): void {
+    if (suppressedPopEvents > 0) {
+      suppressedPopEvents -= 1;
+      return;
+    }
+
+    if (navigationDepth > 0) {
+      navigationDepth -= 1;
+    }
+
+    const level = currentNavLevel();
+    if (level === 2) {
+      goToSettingsView(false);
+      return;
+    }
+    if (level === 1) {
+      activeView = "summary";
+      activeConfigView = "settings";
+      onboardingStep = 1;
+    }
   }
 
   function initNotificationStatus(): void {
@@ -1870,6 +1966,15 @@
   }
 
   onMount(() => {
+    try {
+      window.history.replaceState({ anchorwatch: "root" }, "", window.location.href);
+      navigationDepth = 0;
+      suppressedPopEvents = 0;
+    } catch {
+      navigationDepth = 0;
+      suppressedPopEvents = 0;
+    }
+    window.addEventListener("popstate", handlePopState);
     initInstallStatus();
     initBleSupportLabel();
     initNotificationStatus();
@@ -1891,6 +1996,7 @@
   });
 
   onDestroy(() => {
+    window.removeEventListener("popstate", handlePopState);
     clearWifiScanTimeout();
     if (tickInterval) {
       clearInterval(tickInterval);
@@ -1931,21 +2037,28 @@
     </Block>
   {/if}
 
-  {#if activeView === "config"}
-    <div class="config-toolbar" role="tablist" aria-label="Config pages">
-      <Segmented strong rounded class="config-segmented" aria-label="Config tabs">
-      {#each CONFIG_TABS as configTab}
-        <SegmentedButton
-          active={activeConfigView === configTab.id}
-          onClick={() => setConfigView(configTab.id)}
-        >
-          {configTab.label}
-        </SegmentedButton>
-      {/each}
-      </Segmented>
-    </div>
+  {#if activeView === "config" && activeConfigView === "settings"}
+    <Block strong class="space-y-3">
+      <BlockTitle>Settings</BlockTitle>
+      <List strong inset aria-label="Settings pages">
+        {#each CONFIG_SECTIONS as configSection}
+          <ListItem
+            menuListItem
+            title={configSection.label}
+            onClick={() => openConfigView(configSection.id)}
+          />
+        {/each}
+      </List>
+    </Block>
+  {/if}
 
-    {#if activeConfigView === "onboarding"}
+  {#if activeView === "config" && activeConfigView !== "settings"}
+    <div class="config-subpage-header">
+      <KonstaButton clear onClick={() => goToSettingsView()}>&larr; Settings</KonstaButton>
+    </div>
+  {/if}
+
+  {#if activeView === "config" && activeConfigView === "onboarding"}
       <Block strong class="space-y-3">
         <BlockTitle>Onboarding Wizard</BlockTitle>
         <div class="wizard-progress">
@@ -2109,7 +2222,6 @@
         <div class="hint" style="margin-top:0.8rem">Onboarding log</div>
         <pre>{onboardingLogText}</pre>
       </Block>
-    {/if}
   {/if}
 
   {#if activeView === "satellite"}
@@ -2428,12 +2540,8 @@
     gap: 0;
   }
 
-  .config-toolbar {
-    margin-bottom: 0.1rem;
-  }
-
-  .config-segmented {
-    width: 100%;
+  .config-subpage-header {
+    margin: 0.1rem 0 0;
   }
 
   .row {

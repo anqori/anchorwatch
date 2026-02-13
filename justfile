@@ -122,7 +122,7 @@ cloudflare-dev:
   npm run check
   VITE_BUILD_VERSION="$version" VITE_RELAY_BASE_URL="$dev_cloud_url" npm run build
   cd ..
-  npx --yes wrangler pages deploy app/dist --project-name "$pages_project"
+  npx --yes wrangler pages deploy app/dist --project-name "$pages_project" --branch "$pages_branch" --commit-dirty=true
   cd cloud/worker
   npx --yes wrangler deploy --env dev --var "BUILD_VERSION:$version"
 
@@ -153,7 +153,7 @@ cloudflare-release:
   npm run check
   VITE_BUILD_VERSION="$version" VITE_RELAY_BASE_URL="$release_cloud_url" npm run build
   cd ..
-  npx --yes wrangler pages deploy app/dist --project-name "$pages_project"
+  npx --yes wrangler pages deploy app/dist --project-name "$pages_project" --branch "$pages_branch" --commit-dirty=true
   cd cloud/worker
   npx --yes wrangler deploy --var "BUILD_VERSION:$version"
 
