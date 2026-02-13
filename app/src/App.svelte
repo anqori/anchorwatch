@@ -8,18 +8,21 @@
   } from "@maptiler/sdk";
   import {
     App as KonstaApp,
-    Block,
-    BlockTitle,
     Button as KonstaButton,
     Icon,
-    List,
-    ListInput,
-    ListItem,
-    Navbar,
     Page as KonstaPage,
     Tabbar,
     TabbarLink,
   } from "konsta/svelte";
+  import SummaryPage from "./features/summary/SummaryPage.svelte";
+  import SettingsHomePage from "./features/config/SettingsHomePage.svelte";
+  import OnboardingPage from "./features/config/OnboardingPage.svelte";
+  import AnchorConfigPage from "./features/config/AnchorConfigPage.svelte";
+  import TriggersConfigPage from "./features/config/TriggersConfigPage.svelte";
+  import ProfilesConfigPage from "./features/config/ProfilesConfigPage.svelte";
+  import SatellitePage from "./features/map/SatellitePage.svelte";
+  import MapPage from "./features/map/MapPage.svelte";
+  import RadarPage from "./features/radar/RadarPage.svelte";
 
   type Mode = "fake" | "device";
   type InboundSource = "ble/eventRx" | "ble/snapshot" | "cloud/status.snapshot";
@@ -2285,48 +2288,30 @@
   <KonstaPage class="am-page">
     <main class="am-main" class:full-screen-view={isFullScreenVizView}>
   {#if activeView === "summary"}
-    <Block strong class="space-y-3">
-      <BlockTitle>Summary</BlockTitle>
-      <div class="row">
-        <div class="kv">GPS age: <strong>{gpsAgeText}</strong></div>
-        <div class="kv">Data age: <strong>{dataAgeText}</strong></div>
-        <div class="kv">Depth: <strong>{depthText}</strong></div>
-        <div class="kv">Wind: <strong>{windText}</strong></div>
-      </div>
-      <div style="margin-top:0.6rem">
-        <span class={`pill ${statePillClass}`}>{statePillText}</span>
-      </div>
-      <div class="hint mono" style="margin-top:0.4rem">{stateSourceText}</div>
-      <div class="row" style="margin-top:0.7rem">
-        <div class="kv">Lat: <strong class="mono">{currentLatText}</strong></div>
-        <div class="kv">Lon: <strong class="mono">{currentLonText}</strong></div>
-        <div class="kv">SOG: <strong>{currentSogText}</strong></div>
-        <div class="kv">Heading: <strong>{currentHeadingText}</strong></div>
-      </div>
-      <div class="row" style="margin-top:0.55rem">
-        <div class="kv">PWA ver: <strong class="mono">{pwaVersionText}</strong></div>
-        <div class="kv">FW ver: <strong class="mono">{firmwareVersionText}</strong></div>
-        <div class="kv">Cloud ver: <strong class="mono">{cloudVersionText}</strong></div>
-      </div>
-      <div class="hint mono" style="margin-top:0.5rem">Track: {trackStatusText}</div>
-    </Block>
+    <SummaryPage
+      gpsAgeText={gpsAgeText}
+      dataAgeText={dataAgeText}
+      depthText={depthText}
+      windText={windText}
+      statePillClass={statePillClass}
+      statePillText={statePillText}
+      stateSourceText={stateSourceText}
+      currentLatText={currentLatText}
+      currentLonText={currentLonText}
+      currentSogText={currentSogText}
+      currentHeadingText={currentHeadingText}
+      pwaVersionText={pwaVersionText}
+      firmwareVersionText={firmwareVersionText}
+      cloudVersionText={cloudVersionText}
+      trackStatusText={trackStatusText}
+    />
   {/if}
 
   {#if activeView === "config" && activeConfigView === "settings"}
-    <Navbar title="Settings" large transparent centerTitle />
-    <List strong inset aria-label="Settings pages">
-        {#each CONFIG_SECTIONS as configSection}
-          <ListItem
-            link
-            title={configSection.label}
-            onClick={() => openConfigView(configSection.id)}
-          >
-            {#snippet media()}
-              <span class="material-symbols-rounded am-tab-material-icon" aria-hidden="true">{configSection.icon}</span>
-            {/snippet}
-          </ListItem>
-        {/each}
-      </List>
+    <SettingsHomePage
+      configSections={CONFIG_SECTIONS}
+      onOpenConfig={(id) => openConfigView(id as ConfigSectionId)}
+    />
   {/if}
 
   {#if activeView === "config" && activeConfigView !== "settings"}
@@ -2336,393 +2321,143 @@
   {/if}
 
   {#if activeView === "config" && activeConfigView === "onboarding"}
-      <Block strong class="space-y-3">
-        <BlockTitle>Onboarding Wizard</BlockTitle>
-        <div class="wizard-progress">
-          <div class={`wizard-step ${onboardingStep === 1 ? "active" : onboardingStep > 1 ? "done" : ""}`}>1. Bluetooth</div>
-          <div class={`wizard-step ${onboardingStep === 2 ? "active" : onboardingStep > 2 ? "done" : ""}`}>2. WLAN Settings</div>
-          <div class={`wizard-step ${onboardingStep === 3 ? "active" : ""}`}>3. Connection Status</div>
-        </div>
-        <div class="hint" style="margin-top:0.7rem">{onboardingStepLabel}: {onboardingStepTitle}</div>
-
-        {#if onboardingStep === 1}
-          <div class="hint" style="margin-top:0.8rem">{installStatus}</div>
-          <div class="hint" style="margin-top:0.35rem">BLE support: <strong>{bleSupportedText}</strong></div>
-          <div class="hint" style="margin-top:0.35rem">Mode: <strong>{mode === MODE_FAKE ? "Fake mode" : "Device mode"}</strong></div>
-          <div class="row" style="margin-top:0.8rem">
-            <div class="kv">BLE: <strong>{bleStatusText}</strong></div>
-            <div class="kv">Boat ID: <strong class="mono">{boatIdText}</strong></div>
-            <div class="kv">Boat secret: <strong>{secretStatusText}</strong></div>
-            <div class="kv">Cloud verify: <strong>{cloudStatusText}</strong></div>
-          </div>
-          <div class="row" style="margin-top:0.55rem">
-            <div class="kv">PWA ver: <strong class="mono">{pwaVersionText}</strong></div>
-            <div class="kv">FW ver: <strong class="mono">{firmwareVersionText}</strong></div>
-            <div class="kv">Cloud ver: <strong class="mono">{cloudVersionText}</strong></div>
-          </div>
-          <div class="hint" style="margin-top:0.8rem">
-            Connect to the device via BLE, then continue to WLAN settings.
-          </div>
-          <div class="actions" style="margin-top:0.8rem">
-            <KonstaButton clear onClick={selectDeviceModeForOnboarding} disabled={mode === MODE_DEVICE}>Switch to Device Mode</KonstaButton>
-            <KonstaButton clear onClick={() => runAction("use fake mode", skipOnboardingWithFakeMode)}>Use Fake Mode (Skip Setup)</KonstaButton>
-          </div>
-          <div class="actions" style="margin-top:0.55rem">
-            {#if !ble.connected}
-              <KonstaButton onClick={() => runAction("ble connect", connectBleForOnboarding)}>Connect via Bluetooth</KonstaButton>
-            {/if}
-            {#if ble.connected}
-              <KonstaButton outline onClick={() => runAction("ble disconnect", disconnectBle)}>Disconnect</KonstaButton>
-              <KonstaButton onClick={() => runAction("continue to wlan settings", async () => continueToWifiStep())}>Continue</KonstaButton>
-            {/if}
-          </div>
-        {/if}
-
-        {#if onboardingStep === 2}
-          <div class="hint" style="margin-top:0.8rem">
-            Scan nearby WLAN networks, select one, then enter the password.
-          </div>
-          <div class="actions" style="margin-top:0.7rem">
-            <KonstaButton onClick={() => runAction("scan wlan networks", scanWifiNetworks)} disabled={!ble.connected || wifiScanInFlight}>
-              {wifiScanInFlight ? "Scanning..." : "Scan WLAN Networks"}
-            </KonstaButton>
-            <KonstaButton
-              clear
-              onClick={() => {
-                selectedWifiSsid = "";
-                wifiSsid = "";
-                wifiScanErrorText = "";
-              }}
-            >
-              Use Hidden / Manual SSID
-            </KonstaButton>
-          </div>
-          <div class="hint mono" style="margin-top:0.45rem">{wifiScanStatusText}</div>
-          {#if wifiScanErrorText}
-            <div class="hint onboarding-error" style="margin-top:0.4rem">{wifiScanErrorText}</div>
-          {/if}
-
-          {#if availableWifiNetworks.length > 0}
-            <List strong inset class="wifi-network-list" aria-label="Available WLAN networks">
-              {#each availableWifiNetworks as network}
-                <ListItem
-                  menuListItem
-                  menuListItemActive={selectedWifiSsid === network.ssid}
-                  title={network.ssid}
-                  after={`${formatWifiSecurity(network.security)} · ${network.rssi === null ? "-- dBm" : `${network.rssi} dBm`}`}
-                  onClick={() => selectWifiNetwork(network)}
-                />
-              {/each}
-            </List>
-          {:else}
-            <div class="subcard" style="margin-top:0.7rem">
-              <div class="hint">No scanned networks listed yet.</div>
-            </div>
-          {/if}
-
-          <div class="subcard" style="margin-top:0.7rem">
-            <div class="hint">Selected WLAN</div>
-            <List strong inset style="margin-top:0.6rem">
-              <ListInput label="SSID" type="text" bind:value={wifiSsid} placeholder="SSID" />
-              <ListInput label="Security" type="select" bind:value={wifiSecurity} dropdown>
-                <option value="wpa2">wpa2</option>
-                <option value="wpa3">wpa3</option>
-                <option value="open">open</option>
-              </ListInput>
-              <ListInput
-                label="Passphrase"
-                type="password"
-                bind:value={wifiPass}
-                placeholder={wifiSecurity === "open" ? "No password required (open)" : "Passphrase"}
-                disabled={wifiSecurity === "open"}
-              />
-              <ListInput label="Country" type="text" bind:value={wifiCountry} maxlength={2} placeholder="DE" />
-            </List>
-            {#if selectedWifiNetwork}
-              <div class="hint mono" style="margin-top:0.55rem">
-                Selected: {selectedWifiNetwork.ssid} · {formatWifiSecurity(selectedWifiNetwork.security)} · {selectedWifiNetwork.rssi === null ? "-- dBm" : `${selectedWifiNetwork.rssi} dBm`}
-              </div>
-            {/if}
-          </div>
-          <div class="actions">
-            <KonstaButton clear onClick={() => { onboardingStep = 1; }}>Back</KonstaButton>
-            <KonstaButton onClick={() => runAction("apply wlan settings", applyWifiAndContinue)} disabled={!wifiSsid.trim()}>
-              Apply WLAN Settings
-            </KonstaButton>
-          </div>
-        {/if}
-
-        {#if onboardingStep === 3}
-          <div class="subcard" style="margin-top:0.8rem">
-            <div class="hint">WLAN apply request sent. Status below auto-updates from `system.wifi.*` telemetry.</div>
-            <div style="margin-top:0.6rem">
-              <span class={`pill ${onboardingWifiConnected ? "ok" : onboardingWifiErrorText ? "alarm" : "warn"}`}>{onboardingWifiStateText}</span>
-            </div>
-            <div class="row" style="margin-top:0.7rem">
-              <div class="kv">SSID: <strong>{onboardingWifiSsid}</strong></div>
-              <div class="kv">Connected: <strong>{onboardingWifiConnected ? "yes" : "no"}</strong></div>
-              <div class="kv">RSSI: <strong>{onboardingWifiRssiText}</strong></div>
-              <div class="kv">Cloud verify: <strong>{cloudStatusText}</strong></div>
-            </div>
-            <div class="row" style="margin-top:0.55rem">
-              <div class="kv">PWA ver: <strong class="mono">{pwaVersionText}</strong></div>
-              <div class="kv">FW ver: <strong class="mono">{firmwareVersionText}</strong></div>
-              <div class="kv">Cloud ver: <strong class="mono">{cloudVersionText}</strong></div>
-            </div>
-            {#if onboardingWifiErrorText}
-              <div class="hint onboarding-error" style="margin-top:0.7rem">Potential error: {onboardingWifiErrorText}</div>
-            {/if}
-            <div class="actions" style="margin-top:0.8rem">
-              <KonstaButton clear onClick={backToWifiSettingsStep}>Back to WLAN Settings</KonstaButton>
-              <KonstaButton onClick={goToSummaryFromOnboarding}>Go to Summary</KonstaButton>
-              <KonstaButton onClick={() => runAction("refresh status snapshot", readSnapshotFromBle)} disabled={!ble.connected}>Refresh Status</KonstaButton>
-            </div>
-
-            <div class="hint" style="margin-top:0.9rem">Optional: relay URL for cloud checks</div>
-            <List strong inset style="margin-top:0.6rem">
-              <ListInput
-                label="Relay URL"
-                type="url"
-                bind:value={relayBaseUrlInput}
-                placeholder="https://aw-cloud.anqori.com"
-              />
-            </List>
-            <div class="actions">
-              <KonstaButton clear onClick={saveRelayUrl}>Save Relay URL</KonstaButton>
-              <KonstaButton clear onClick={() => runAction("relay ping", probeRelay)}>Ping Relay</KonstaButton>
-              <KonstaButton onClick={() => runAction("verify cloud", verifyCloudAuth)}>Verify Cloud</KonstaButton>
-            </div>
-            <div class="hint" style="margin-top:0.4rem">{relayResult}</div>
-          </div>
-        {/if}
-
-        <div class="hint" style="margin-top:0.8rem">Onboarding log</div>
-        <pre>{onboardingLogText}</pre>
-      </Block>
+    <OnboardingPage
+      onboardingStep={onboardingStep}
+      onboardingStepLabel={onboardingStepLabel}
+      onboardingStepTitle={onboardingStepTitle}
+      installStatus={installStatus}
+      bleSupportedText={bleSupportedText}
+      modeIsFake={mode === MODE_FAKE}
+      bleStatusText={bleStatusText}
+      boatIdText={boatIdText}
+      secretStatusText={secretStatusText}
+      cloudStatusText={cloudStatusText}
+      pwaVersionText={pwaVersionText}
+      firmwareVersionText={firmwareVersionText}
+      cloudVersionText={cloudVersionText}
+      bleConnected={ble.connected}
+      wifiScanInFlight={wifiScanInFlight}
+      wifiScanStatusText={wifiScanStatusText}
+      bind:wifiScanErrorText
+      availableWifiNetworks={availableWifiNetworks}
+      bind:selectedWifiSsid
+      bind:wifiSsid
+      bind:wifiSecurity
+      bind:wifiPass
+      bind:wifiCountry
+      selectedWifiNetwork={selectedWifiNetwork}
+      onboardingWifiConnected={onboardingWifiConnected}
+      onboardingWifiErrorText={onboardingWifiErrorText}
+      onboardingWifiStateText={onboardingWifiStateText}
+      onboardingWifiSsid={onboardingWifiSsid}
+      onboardingWifiRssiText={onboardingWifiRssiText}
+      bind:relayBaseUrlInput
+      relayResult={relayResult}
+      onboardingLogText={onboardingLogText}
+      formatWifiSecurity={(security) => formatWifiSecurity(security as WifiSecurity)}
+      onSelectDeviceMode={selectDeviceModeForOnboarding}
+      onUseFakeMode={() => void runAction("use fake mode", skipOnboardingWithFakeMode)}
+      onConnectBle={() => void runAction("ble connect", connectBleForOnboarding)}
+      onDisconnectBle={() => void runAction("ble disconnect", disconnectBle)}
+      onContinueToWifiStep={() => void runAction("continue to wlan settings", async () => continueToWifiStep())}
+      onScanWifiNetworks={() => void runAction("scan wlan networks", scanWifiNetworks)}
+      onSelectWifiNetwork={selectWifiNetwork}
+      onApplyWifiAndContinue={() => void runAction("apply wlan settings", applyWifiAndContinue)}
+      onBackToBleStep={() => { onboardingStep = 1; }}
+      onBackToWifiSettingsStep={backToWifiSettingsStep}
+      onGoToSummary={goToSummaryFromOnboarding}
+      onRefreshStatus={() => void runAction("refresh status snapshot", readSnapshotFromBle)}
+      onSaveRelayUrl={saveRelayUrl}
+      onProbeRelay={() => void runAction("relay ping", probeRelay)}
+      onVerifyCloud={() => void runAction("verify cloud", verifyCloudAuth)}
+    />
   {/if}
 
   {#if activeView === "satellite"}
-    <section class="viz-screen satellite-screen">
-      {#if MAPTILER_API_KEY}
-        <div class="maptiler-host" bind:this={maptilerSatelliteContainer} aria-label="Satellite map view"></div>
-      {:else}
-        <div class="maptiler-missing">{maptilerStatusText}</div>
-      {/if}
-      <div class="viz-overlay mono">Track: {trackStatusText}</div>
-    </section>
+    <SatellitePage
+      hasMapTilerKey={Boolean(MAPTILER_API_KEY)}
+      maptilerStatusText={maptilerStatusText}
+      trackStatusText={trackStatusText}
+      bind:container={maptilerSatelliteContainer}
+    />
   {/if}
 
   {#if activeView === "map"}
-    <section class="viz-screen map-screen">
-      {#if MAPTILER_API_KEY}
-        <div class="maptiler-host" bind:this={maptilerMapContainer} aria-label="Map view"></div>
-      {:else}
-        <div class="maptiler-missing">{maptilerStatusText}</div>
-      {/if}
-      <div class="viz-overlay mono">Lat {currentLatText} · Lon {currentLonText} · SOG {currentSogText} · COG {currentCogText}</div>
-    </section>
+    <MapPage
+      hasMapTilerKey={Boolean(MAPTILER_API_KEY)}
+      maptilerStatusText={maptilerStatusText}
+      currentLatText={currentLatText}
+      currentLonText={currentLonText}
+      currentSogText={currentSogText}
+      currentCogText={currentCogText}
+      bind:container={maptilerMapContainer}
+    />
   {/if}
 
   {#if activeView === "radar"}
-    <section class="viz-screen radar-screen">
-      <svg class="radar-fill" viewBox="0 0 220 220" role="img" aria-label="Radar plot">
-        <circle cx="110" cy="110" r="104" class="radar-ring outer" />
-        <circle cx="110" cy="110" r="78" class="radar-ring" />
-        <circle cx="110" cy="110" r="52" class="radar-ring" />
-        <circle cx="110" cy="110" r="26" class="radar-ring" />
-        <line x1="110" y1="6" x2="110" y2="214" class="radar-axis" />
-        <line x1="6" y1="110" x2="214" y2="110" class="radar-axis" />
-        <line x1="110" y1="110" x2={radarTargetX} y2={radarTargetY} class="radar-vector" />
-        <circle cx="110" cy="110" r="4" class="radar-center" />
-        <circle cx={radarTargetX} cy={radarTargetY} r="6" class="radar-target" />
-      </svg>
-      <div class="viz-overlay">Distance {radarDistanceText} · Bearing {radarBearingText} · Heading {currentHeadingText}</div>
-    </section>
+    <RadarPage
+      radarTargetX={radarTargetX}
+      radarTargetY={radarTargetY}
+      radarDistanceText={radarDistanceText}
+      radarBearingText={radarBearingText}
+      currentHeadingText={currentHeadingText}
+    />
   {/if}
 
   {#if activeView === "config" && activeConfigView === "anchor"}
-    <Block strong class="space-y-3">
-      <BlockTitle>Anchor Set Flow</BlockTitle>
-      <div class="hint">Saves anchor + zone preferences to `config.patch` keys from protocol v1.</div>
-      <div class="row">
-        <div>
-          <div class="hint field-label">Default set mode</div>
-          <select bind:value={anchorMode}>
-            <option value="current">current</option>
-            <option value="offset">offset</option>
-            <option value="auto">auto</option>
-            <option value="manual">manual</option>
-          </select>
-        </div>
-        <div>
-          <div class="hint field-label">Zone type</div>
-          <select bind:value={zoneType}>
-            <option value="circle">circle</option>
-            <option value="polygon">polygon</option>
-          </select>
-        </div>
-        <div><div class="hint field-label">Offset distance (m)</div><input type="number" bind:value={anchorOffsetDistanceM}></div>
-        <div><div class="hint field-label">Offset angle (deg)</div><input type="number" bind:value={anchorOffsetAngleDeg}></div>
-      </div>
-
-      <div class="hint" style="margin-top:0.7rem">Auto mode tuning</div>
-      <div class="row">
-        <label class="check">
-          <input type="checkbox" bind:checked={autoModeEnabled}>
-          Auto mode enabled
-        </label>
-        <div><div class="hint field-label">Min forward SOG (kn)</div><input type="number" bind:value={autoModeMinForwardSogKn}></div>
-        <div><div class="hint field-label">Stall max SOG (kn)</div><input type="number" bind:value={autoModeStallMaxSogKn}></div>
-        <div><div class="hint field-label">Reverse min SOG (kn)</div><input type="number" bind:value={autoModeReverseMinSogKn}></div>
-        <div><div class="hint field-label">Confirm seconds</div><input type="number" bind:value={autoModeConfirmSeconds}></div>
-      </div>
-
-      {#if zoneType === "circle"}
-        <div class="row" style="margin-top:0.7rem">
-          <div><div class="hint field-label">Circle radius (m)</div><input type="number" bind:value={zoneRadiusM}></div>
-        </div>
-      {:else}
-        <div class="hint" style="margin-top:0.7rem">Polygon points (`lat,lon` per line)</div>
-        <textarea rows="5" bind:value={polygonPointsInput}></textarea>
-      {/if}
-
-      {#if anchorMode === "manual"}
-        <div class="hint" style="margin-top:0.7rem">Manual drag/drop draft (runtime command id still pending in protocol docs)</div>
-        <div class="row">
-          <div><div class="hint field-label">Manual lat</div><input type="number" bind:value={manualAnchorLat}></div>
-          <div><div class="hint field-label">Manual lon</div><input type="number" bind:value={manualAnchorLon}></div>
-        </div>
-      {/if}
-
-      <div class="actions">
-        <KonstaButton onClick={() => runAction("apply anchor config", applyAnchorConfig)}>Apply Anchor + Zone Config</KonstaButton>
-      </div>
-    </Block>
+    <AnchorConfigPage
+      bind:anchorMode
+      bind:anchorOffsetDistanceM
+      bind:anchorOffsetAngleDeg
+      bind:autoModeEnabled
+      bind:autoModeMinForwardSogKn
+      bind:autoModeStallMaxSogKn
+      bind:autoModeReverseMinSogKn
+      bind:autoModeConfirmSeconds
+      bind:zoneType
+      bind:zoneRadiusM
+      bind:polygonPointsInput
+      bind:manualAnchorLat
+      bind:manualAnchorLon
+      onApply={() => void runAction("apply anchor config", applyAnchorConfig)}
+    />
   {/if}
 
   {#if activeView === "config" && activeConfigView === "triggers"}
-    <Block strong class="space-y-3">
-      <BlockTitle>Trigger Config</BlockTitle>
-      <div class="hint">Phase 7 scaffold for key trigger thresholds and severities.</div>
-
-      <div class="subcard">
-        <div class="row">
-          <label class="check"><input type="checkbox" bind:checked={triggerWindAboveEnabled}> wind_above enabled</label>
-          <div><div class="hint field-label">thresholdKn</div><input type="number" bind:value={triggerWindAboveThresholdKn}></div>
-          <div><div class="hint field-label">holdMs</div><input type="number" bind:value={triggerWindAboveHoldMs}></div>
-          <div>
-            <div class="hint field-label">severity</div>
-            <select bind:value={triggerWindAboveSeverity}>
-              <option value="warning">warning</option>
-              <option value="alarm">alarm</option>
-            </select>
-          </div>
-        </div>
-      </div>
-
-      <div class="subcard">
-        <div class="row">
-          <label class="check"><input type="checkbox" bind:checked={triggerOutsideAreaEnabled}> outside_area enabled</label>
-          <div><div class="hint field-label">holdMs</div><input type="number" bind:value={triggerOutsideAreaHoldMs}></div>
-          <div>
-            <div class="hint field-label">severity</div>
-            <select bind:value={triggerOutsideAreaSeverity}>
-              <option value="warning">warning</option>
-              <option value="alarm">alarm</option>
-            </select>
-          </div>
-        </div>
-      </div>
-
-      <div class="subcard">
-        <div class="row">
-          <label class="check"><input type="checkbox" bind:checked={triggerGpsAgeEnabled}> gps_age enabled</label>
-          <div><div class="hint field-label">maxAgeMs</div><input type="number" bind:value={triggerGpsAgeMaxMs}></div>
-          <div><div class="hint field-label">holdMs</div><input type="number" bind:value={triggerGpsAgeHoldMs}></div>
-          <div>
-            <div class="hint field-label">severity</div>
-            <select bind:value={triggerGpsAgeSeverity}>
-              <option value="warning">warning</option>
-              <option value="alarm">alarm</option>
-            </select>
-          </div>
-        </div>
-      </div>
-
-      <div class="actions">
-        <KonstaButton onClick={() => runAction("apply trigger config", applyTriggerConfig)}>Apply Trigger Config</KonstaButton>
-      </div>
-    </Block>
+    <TriggersConfigPage
+      bind:triggerWindAboveEnabled
+      bind:triggerWindAboveThresholdKn
+      bind:triggerWindAboveHoldMs
+      bind:triggerWindAboveSeverity
+      bind:triggerOutsideAreaEnabled
+      bind:triggerOutsideAreaHoldMs
+      bind:triggerOutsideAreaSeverity
+      bind:triggerGpsAgeEnabled
+      bind:triggerGpsAgeMaxMs
+      bind:triggerGpsAgeHoldMs
+      bind:triggerGpsAgeSeverity
+      onApply={() => void runAction("apply trigger config", applyTriggerConfig)}
+    />
   {/if}
 
   {#if activeView === "config" && activeConfigView === "profiles"}
-    <Block strong class="space-y-3">
-      <BlockTitle>Profiles + Notifications</BlockTitle>
-      <div class="hint">Day/night profile settings and local notification reliability checks.</div>
-      <div class="row">
-        <div>
-          <div class="hint field-label">Profile mode</div>
-          <select bind:value={profilesMode}>
-            <option value="auto">auto</option>
-            <option value="manual">manual</option>
-          </select>
-        </div>
-        <div>
-          <div class="hint field-label">Auto switch source</div>
-          <select bind:value={profileAutoSwitchSource}>
-            <option value="time">time</option>
-            <option value="sun">sun</option>
-          </select>
-        </div>
-        <div><div class="hint field-label">Day start</div><input type="time" bind:value={profileDayStartLocal}></div>
-        <div><div class="hint field-label">Night start</div><input type="time" bind:value={profileNightStartLocal}></div>
-      </div>
-
-      <div class="subcard">
-        <div class="hint">Day profile</div>
-        <div class="row">
-          <div>
-            <div class="hint field-label">Color scheme</div>
-            <select bind:value={profileDayColorScheme}>
-              <option value="full">full</option>
-              <option value="red">red</option>
-              <option value="blue">blue</option>
-            </select>
-          </div>
-          <div><div class="hint field-label">Brightness %</div><input type="number" bind:value={profileDayBrightnessPct}></div>
-          <div><div class="hint field-label">Output profile</div><input type="text" bind:value={profileDayOutputProfile}></div>
-        </div>
-      </div>
-
-      <div class="subcard">
-        <div class="hint">Night profile</div>
-        <div class="row">
-          <div>
-            <div class="hint field-label">Color scheme</div>
-            <select bind:value={profileNightColorScheme}>
-              <option value="full">full</option>
-              <option value="red">red</option>
-              <option value="blue">blue</option>
-            </select>
-          </div>
-          <div><div class="hint field-label">Brightness %</div><input type="number" bind:value={profileNightBrightnessPct}></div>
-          <div><div class="hint field-label">Output profile</div><input type="text" bind:value={profileNightOutputProfile}></div>
-        </div>
-      </div>
-
-      <div class="actions">
-        <KonstaButton onClick={() => runAction("apply profile config", applyProfilesConfig)}>Apply Profile Config</KonstaButton>
-      </div>
-
-      <div class="subcard" style="margin-top:0.8rem">
-        <div class="hint">Notification status: <strong>{notificationPermissionText}</strong></div>
-        <div class="hint" style="margin-top:0.3rem">{notificationStatusText}</div>
-        <div class="actions">
-          <KonstaButton onClick={() => runAction("request notification permission", requestNotificationPermission)}>Request Permission</KonstaButton>
-          <KonstaButton onClick={() => runAction("send test notification", sendTestNotification)}>Send Test Notification</KonstaButton>
-        </div>
-      </div>
-    </Block>
+    <ProfilesConfigPage
+      bind:profilesMode
+      bind:profileAutoSwitchSource
+      bind:profileDayStartLocal
+      bind:profileNightStartLocal
+      bind:profileDayColorScheme
+      bind:profileDayBrightnessPct
+      bind:profileDayOutputProfile
+      bind:profileNightColorScheme
+      bind:profileNightBrightnessPct
+      bind:profileNightOutputProfile
+      notificationPermissionText={notificationPermissionText}
+      notificationStatusText={notificationStatusText}
+      onApply={() => void runAction("apply profile config", applyProfilesConfig)}
+      onRequestPermission={() => void runAction("request notification permission", requestNotificationPermission)}
+      onSendTestNotification={() => void runAction("send test notification", sendTestNotification)}
+    />
   {/if}
 
     </main>
@@ -2745,315 +2480,3 @@
     </Tabbar>
   </KonstaPage>
 </KonstaApp>
-
-<style>
-  :global(body) {
-    margin: 0;
-    min-height: 100vh;
-  }
-
-  :global(*) {
-    box-sizing: border-box;
-  }
-
-  :global(:root) {
-    --am-tab-count: 5;
-    --am-tabbar-height: calc(5rem + env(safe-area-inset-bottom));
-  }
-
-  .am-main {
-    max-width: 980px;
-    margin: 0 auto;
-    padding: 1rem 0.9rem calc(var(--am-tabbar-height) + 0.75rem);
-    display: grid;
-    gap: 0.9rem;
-  }
-
-  .am-main.full-screen-view {
-    max-width: none;
-    padding: 0;
-    gap: 0;
-  }
-
-  .config-subpage-header {
-    margin: 0.1rem 0 0;
-  }
-
-  .row {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 0.5rem;
-  }
-
-  .kv {
-    font-size: 0.9rem;
-  }
-
-  .hint {
-    font-size: 0.88rem;
-    opacity: 0.76;
-  }
-
-  .mono {
-    font-family: "SFMono-Regular", Menlo, Consolas, monospace;
-    font-size: 0.82rem;
-    word-break: break-all;
-  }
-
-  .pill {
-    display: inline-block;
-    border-radius: 999px;
-    padding: 0.2rem 0.6rem;
-    font-weight: 600;
-    font-size: 0.8rem;
-    margin-right: 0.4rem;
-    margin-top: 0.4rem;
-  }
-
-  .ok {
-    background: rgba(29, 210, 182, 0.22);
-    color: #1dd2b6;
-  }
-
-  .warn {
-    background: rgba(244, 190, 55, 0.22);
-    color: #f4be37;
-  }
-
-  .alarm {
-    background: rgba(244, 91, 105, 0.22);
-    color: #f45b69;
-  }
-
-  :global(input),
-  :global(select),
-  :global(textarea) {
-    width: 100%;
-    font: inherit;
-  }
-
-  .actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-    margin-top: 0.5rem;
-  }
-
-  .am-tab-material-icon {
-    font-size: 1.42rem;
-    font-variation-settings: "FILL" 0, "wght" 500, "GRAD" 0, "opsz" 24;
-    line-height: 1;
-  }
-
-  :global(.am-tabbar > div:nth-child(2) > .k-link) {
-    min-width: 0;
-    flex: 0 0 calc(100% / var(--am-tab-count));
-    max-width: calc(100% / var(--am-tab-count));
-  }
-
-  :global(.am-tabbar .k-tabbar-link-active::after) {
-    content: "";
-    position: absolute;
-    left: 24%;
-    right: 24%;
-    bottom: 0.2rem;
-    height: 0.22rem;
-    border-radius: 999px;
-    background: linear-gradient(90deg, #6ad7ff, #4d84ff);
-    opacity: 0.95;
-  }
-
-  .wizard-progress {
-    margin-top: 0.6rem;
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 0.45rem;
-  }
-
-  .wizard-step {
-    padding: 0.45rem 0.5rem;
-    border-radius: 0.7rem;
-    border: 1px solid rgba(125, 125, 125, 0.28);
-    font-size: 0.8rem;
-    text-align: center;
-  }
-
-  .wizard-step.active {
-    font-weight: 600;
-    border-color: rgba(17, 127, 255, 0.45);
-  }
-
-  .wizard-step.done {
-    opacity: 0.85;
-  }
-
-  .wifi-network-list {
-    margin-top: 0.7rem;
-    max-height: 15rem;
-    overflow: auto;
-  }
-
-  .actions :global(.k-button) {
-    width: auto;
-    min-width: 8.5rem;
-  }
-
-  pre {
-    margin: 0;
-    white-space: pre-wrap;
-    background: rgba(0, 0, 0, 0.3);
-    border-radius: 10px;
-    padding: 0.7rem;
-    min-height: 7rem;
-    max-height: 14rem;
-    overflow: auto;
-    font-size: 0.78rem;
-    line-height: 1.35;
-  }
-
-  .subcard {
-    margin-top: 0.7rem;
-    border: 1px solid rgba(125, 125, 125, 0.24);
-    border-radius: 0.7rem;
-    padding: 0.7rem;
-  }
-
-  .onboarding-error {
-    color: #b42318;
-  }
-
-  .check {
-    display: flex;
-    align-items: center;
-    gap: 0.45rem;
-    font-size: 0.88rem;
-  }
-
-  .check input {
-    width: auto;
-    margin: 0;
-  }
-
-  .viz-screen {
-    position: relative;
-    width: 100vw;
-    margin-left: calc(50% - 50vw);
-    height: calc(100dvh - var(--am-tabbar-height));
-    min-height: calc(100dvh - var(--am-tabbar-height));
-    overflow: hidden;
-    border: 0;
-    border-radius: 0;
-    background: #08161b;
-  }
-
-  .viz-overlay {
-    position: absolute;
-    left: 0.7rem;
-    right: 0.7rem;
-    bottom: 0.8rem;
-    color: rgba(228, 244, 246, 0.92);
-    background: rgba(4, 18, 22, 0.56);
-    border-radius: 10px;
-    padding: 0.42rem 0.58rem;
-    font-size: 0.78rem;
-    line-height: 1.25;
-    letter-spacing: 0.01em;
-    backdrop-filter: blur(4px);
-  }
-
-  .maptiler-host {
-    width: 100%;
-    height: 100%;
-    display: block;
-    margin: 0;
-    max-width: none;
-    border: 0;
-    border-radius: 0;
-  }
-
-  .maptiler-missing {
-    width: 100%;
-    height: 100%;
-    display: grid;
-    place-items: center;
-    text-align: center;
-    padding: 1.4rem;
-    color: rgba(228, 244, 246, 0.95);
-    background: linear-gradient(135deg, #142734, #0d1721);
-    font-size: 0.92rem;
-  }
-
-  .radar-screen {
-    display: flex;
-    min-height: calc(100dvh - var(--am-tabbar-height));
-    align-items: center;
-    justify-content: center;
-    background: radial-gradient(circle at center, #062018, #03120d 75%);
-  }
-
-  .radar-fill {
-    width: min(100vw, calc(100dvh - var(--am-tabbar-height) - 3rem));
-    height: min(100vw, calc(100dvh - var(--am-tabbar-height) - 3rem));
-    max-width: 92vh;
-    max-height: 92vh;
-    border-radius: 0;
-    border: 0;
-    background: transparent;
-  }
-
-  .radar-ring {
-    fill: none;
-    stroke: rgba(89, 230, 175, 0.22);
-    stroke-width: 1.1;
-  }
-
-  .radar-ring.outer {
-    stroke: rgba(89, 230, 175, 0.42);
-  }
-
-  .radar-axis {
-    stroke: rgba(89, 230, 175, 0.25);
-    stroke-width: 1;
-  }
-
-  .radar-vector {
-    stroke: #8df8cf;
-    stroke-width: 1.8;
-  }
-
-  .radar-center {
-    fill: #8df8cf;
-  }
-
-  .radar-target {
-    fill: #f85b6f;
-    stroke: rgba(255, 255, 255, 0.75);
-    stroke-width: 1.1;
-  }
-
-  @media (max-width: 700px) {
-    .am-main {
-      padding-top: 0.9rem;
-      padding-bottom: calc(var(--am-tabbar-height) + 0.6rem);
-    }
-
-    .am-main.full-screen-view {
-      padding: 0;
-    }
-
-    .row {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-  }
-
-  @media (max-width: 540px) {
-    .radar-fill {
-      width: min(100vw, calc(100dvh - var(--am-tabbar-height) - 2.4rem));
-      height: min(100vw, calc(100dvh - var(--am-tabbar-height) - 2.4rem));
-    }
-
-    .row {
-      grid-template-columns: 1fr;
-    }
-  }
-</style>
