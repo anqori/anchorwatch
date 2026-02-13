@@ -170,18 +170,3 @@ export interface ChunkAssembly {
   parts: Array<string | null>;
   updatedAt: number;
 }
-
-export interface BleState {
-  device: BluetoothDevice | null;
-  server: BluetoothRemoteGATTServer | null;
-  service: BluetoothRemoteGATTService | null;
-  controlTx: BluetoothRemoteGATTCharacteristic | null;
-  eventRx: BluetoothRemoteGATTCharacteristic | null;
-  snapshot: BluetoothRemoteGATTCharacteristic | null;
-  auth: BluetoothRemoteGATTCharacteristic | null;
-  connected: boolean;
-  seq: number;
-  pendingAcks: Map<string, PendingAck>;
-  chunkAssemblies: Map<string, ChunkAssembly>;
-  authState: JsonRecord | null;
-}

@@ -19,7 +19,7 @@ export interface BleConnectionResult {
 }
 
 export async function connectBleWithCharacteristics(options: BleConnectOptions): Promise<BleConnectionResult> {
-  if (!navigator.bluetooth) {
+  if (!isBleSupported()) {
     throw new Error("Web Bluetooth unavailable");
   }
 
@@ -52,6 +52,10 @@ export async function connectBleWithCharacteristics(options: BleConnectOptions):
     snapshot,
     auth,
   };
+}
+
+export function isBleSupported(): boolean {
+  return Boolean(navigator.bluetooth);
 }
 
 export function disconnectBleDevice(device: BluetoothDevice | null): boolean {
