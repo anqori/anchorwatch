@@ -31,9 +31,17 @@ export async function writeChunked(
   jsonText: string,
   encoder: TextEncoder,
 ): Promise<void> {
+  const frames = buildChunkedFrames(msgId, jsonText, encoder);
+  for (const frame of frames) {
+    await writeCharacteristic(characteristic, frame);
+  }
+}
+
+export function buildChunkedFrames(msgId: string, jsonText: string, encoder: TextEncoder): Uint8Array[] {
   const bytes = encoder.encode(jsonText);
   const partCount = Math.max(1, Math.ceil(bytes.length / BLE_CHUNK_MAX_PAYLOAD));
   const msgId32 = fnv1a32(msgId);
+  const frames: Uint8Array[] = [];
 
   for (let partIndex = 0; partIndex < partCount; partIndex += 1) {
     const offset = partIndex * BLE_CHUNK_MAX_PAYLOAD;
@@ -46,6 +54,7 @@ export async function writeChunked(
     frame[4] = partIndex & 0xff;
     frame[5] = partCount & 0xff;
     frame.set(chunk, 6);
-    await writeCharacteristic(characteristic, frame);
+    frames.push(frame);
   }
+  return frames;
 }

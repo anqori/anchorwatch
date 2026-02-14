@@ -1,0 +1,6 @@
+{
+  "appId": "com.anchormaster.app",
+  "appName": "AnchorMaster",
+  "webDir": "dist",
+  "bundledWebRuntime": false
+}

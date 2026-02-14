@@ -96,6 +96,41 @@ pwa-run:
   if [[ -f package-lock.json ]]; then npm ci || npm install; else npm install; fi
   VITE_BUILD_VERSION="$version" VITE_RELAY_BASE_URL="${RUN_CLOUD_URL:-http://127.0.0.1:8787}" npm run dev -- --host
 
+# Build Android APK in Docker (no local Android SDK required).
+# Override image with ANDROID_BUILD_IMAGE=... and task with APK_TASK=assembleRelease.
+android-apk-docker:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  image="${ANDROID_BUILD_IMAGE:-mingc/android-build-box:latest}"
+  apk_task="${APK_TASK:-assembleDebug}"
+  app_dir="$(pwd)/app"
+  uid="$(id -u)"
+  gid="$(id -g)"
+  test -d "$app_dir/android" || (echo "Missing app/android (run from repo root)." && exit 1)
+  status=0
+  docker run --rm \
+    -v "$app_dir:/project" \
+    "$image" \
+    bash -lc "npm_config_production=false npm ci && npm run build && npx cap sync android && cd android && ./gradlew $apk_task" || status=$?
+  docker run --rm \
+    -v "$app_dir:/project" \
+    "$image" \
+    bash -lc "for p in /project/node_modules /project/android /project/dist; do if [ -e \"\$p\" ]; then chown -R $uid:$gid \"\$p\"; fi; done"
+  if [[ "$status" -ne 0 ]]; then exit "$status"; fi
+  case "$apk_task" in
+    assembleDebug)
+      echo "APK: app/android/app/build/outputs/apk/debug/app-debug.apk"
+      ;;
+    assembleRelease)
+      echo "APK: app/android/app/build/outputs/apk/release/app-release.apk"
+      echo "Release APK signing must be configured in app/android."
+      ;;
+    *)
+      echo "Gradle task '$apk_task' completed."
+      echo "Artifacts: app/android/app/build/outputs/"
+      ;;
+  esac
+
 # Build/check app and deploy PWA + Worker to dev domains.
 # Version format: dev-<commit>-<timestamp>.
 cloudflare-dev:

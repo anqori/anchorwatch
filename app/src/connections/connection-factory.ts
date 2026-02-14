@@ -1,17 +1,22 @@
+import { Capacitor } from "@capacitor/core";
 import { CONNECTION_RUNTIME_MODE_REMOTE, PROTOCOL_VERSION } from "../core/constants";
 import { ensurePhoneId } from "../services/persistence-domain";
 import { readCloudCredentials } from "../state/app-state.svelte";
 import type { ConnectionRuntimeMode, Mode } from "../core/types";
 import { DeviceConnectionBle } from "./ble/device-connection-ble";
+import { DeviceConnectionBleNative } from "./ble/device-connection-ble-native";
+import type { DeviceConnectionBleLike } from "./ble/device-connection-ble-like";
 import { DeviceConnectionFake } from "./device-connection-fake";
 import { DeviceConnectionRelayCloud } from "./cloud/device-connection-relay-cloud";
 import type { DeviceConnection } from "./device-connection";
 
-const bleConnection = new DeviceConnectionBle();
+const bleConnection: DeviceConnectionBleLike = Capacitor.isNativePlatform()
+  ? new DeviceConnectionBleNative()
+  : new DeviceConnectionBle();
 const relayCloudConnection = new DeviceConnectionRelayCloud(readCloudCredentials, ensurePhoneId, PROTOCOL_VERSION);
 const fakeConnection = new DeviceConnectionFake();
 
-export function getBluetoothConnection(): DeviceConnectionBle {
+export function getBluetoothConnection(): DeviceConnectionBleLike {
   return bleConnection;
 }
 

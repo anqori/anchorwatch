@@ -1,3 +1,5 @@
+import { Capacitor } from "@capacitor/core";
+
 export interface BleConnectOptions {
   serviceUuid: BluetoothServiceUUID;
   controlTxUuid: BluetoothCharacteristicUUID;
@@ -53,7 +55,7 @@ export async function connectBleWithCharacteristics(
   options: BleConnectOptions,
   knownDevice: BluetoothDevice | null = null,
 ): Promise<BleConnectionResult> {
-  if (!isBleSupported()) {
+  if (!isWebBleSupported()) {
     throw new Error("Web Bluetooth unavailable");
   }
 
@@ -69,7 +71,7 @@ export async function connectBleWithCharacteristics(
 }
 
 export async function listGrantedBleDevices(): Promise<BluetoothDevice[]> {
-  if (!isBleSupported() || typeof navigator.bluetooth.getDevices !== "function") {
+  if (!isWebBleSupported() || typeof navigator.bluetooth.getDevices !== "function") {
     return [];
   }
   try {
@@ -80,7 +82,11 @@ export async function listGrantedBleDevices(): Promise<BluetoothDevice[]> {
 }
 
 export function isBleSupported(): boolean {
-  return Boolean(navigator.bluetooth);
+  return Capacitor.isNativePlatform() || isWebBleSupported();
+}
+
+function isWebBleSupported(): boolean {
+  return typeof navigator !== "undefined" && Boolean(navigator.bluetooth);
 }
 
 export function disconnectBleDevice(device: BluetoothDevice | null): boolean {
