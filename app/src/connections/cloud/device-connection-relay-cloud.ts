@@ -2,6 +2,7 @@ import type { Envelope, InboundSource, JsonRecord, PendingAck, TrackPoint, WifiS
 import { isObject, parseTrackSnapshot, parseWifiScanNetworks, safeParseJson } from "../../services/data-utils";
 import { buildConfigPatchPayload, buildProtocolEnvelope, type ConfigPatchCommand } from "../../services/protocol-messages";
 import { readAlertRuntimeEntries } from "../../services/state-derive";
+import { appendDebugMessage } from "../../state/app-state.svelte";
 import { makeAckPromise, clearPendingAcks, resolvePendingAckFromPayload } from "../ble/ble-session";
 import { makeMsgId } from "../ble/ble-transport";
 import type {
@@ -307,7 +308,9 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
           requiresAck: false,
           payload: {},
         });
-        socket.send(JSON.stringify(envelope));
+        const raw = JSON.stringify(envelope);
+        this.debugTraffic("outgoing", "relay.probe", raw);
+        socket.send(raw);
       });
 
       socket.addEventListener("message", (event) => {
@@ -319,6 +322,7 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
           return;
         }
         const msgType = typeof parsed.msgType === "string" ? parsed.msgType : "";
+        this.debugTraffic("incoming", msgType || "unknown", event.data);
         if (msgType !== "relay.probe.result") {
           return;
         }
@@ -409,6 +413,7 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
       : null;
 
     try {
+      this.debugTraffic("outgoing", msgType, raw);
       ws.send(raw);
       if (!ackPromise) {
         return null;
@@ -511,6 +516,8 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
     if (!envelope || !isObject(envelope)) {
       return;
     }
+    const msgType = typeof envelope.msgType === "string" && envelope.msgType ? envelope.msgType : "unknown";
+    this.debugTraffic("incoming", msgType, event.data);
 
     if (envelope.msgType === "command.ack") {
       const payload = isObject(envelope.payload) ? envelope.payload : {};
@@ -613,6 +620,19 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
       throw new Error("Cloud relay credentials missing (relay URL + boatId + boatSecret)");
     }
     return credentials;
+  }
+
+  private debugTraffic(
+    direction: "incoming" | "outgoing",
+    msgType: string,
+    body: unknown,
+  ): void {
+    appendDebugMessage({
+      direction,
+      route: "relay",
+      msgType,
+      body,
+    });
   }
 }
 

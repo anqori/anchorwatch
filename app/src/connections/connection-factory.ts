@@ -1,7 +1,7 @@
-import { PROTOCOL_VERSION } from "../core/constants";
+import { CONNECTION_RUNTIME_MODE_REMOTE, PROTOCOL_VERSION } from "../core/constants";
 import { ensurePhoneId } from "../services/persistence-domain";
 import { readCloudCredentials } from "../state/app-state.svelte";
-import type { Mode } from "../core/types";
+import type { ConnectionRuntimeMode, Mode } from "../core/types";
 import { DeviceConnectionBle } from "./ble/device-connection-ble";
 import { DeviceConnectionFake } from "./device-connection-fake";
 import { DeviceConnectionRelayCloud } from "./cloud/device-connection-relay-cloud";
@@ -23,9 +23,15 @@ export function getFakeConnection(): DeviceConnectionFake {
   return fakeConnection;
 }
 
-export function defaultConnectionForMode(mode: Mode): DeviceConnection {
+export function defaultConnectionForMode(
+  mode: Mode,
+  runtimeMode: ConnectionRuntimeMode = CONNECTION_RUNTIME_MODE_REMOTE,
+): DeviceConnection {
   if (mode === "fake") {
     return fakeConnection;
+  }
+  if (runtimeMode === "onboard") {
+    return bleConnection;
   }
   return relayCloudConnection;
 }

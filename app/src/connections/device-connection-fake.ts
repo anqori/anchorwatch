@@ -9,6 +9,7 @@ import type {
   WifiScanNetwork,
 } from "../core/types";
 import type { ConfigPatchCommand } from "../services/protocol-messages";
+import { appendDebugMessage } from "../state/app-state.svelte";
 import { getBoatId } from "../services/persistence-domain";
 import { geoDeltaMeters } from "../services/geo-nav";
 import { isObject, toFiniteNumber } from "../services/data-utils";
@@ -271,6 +272,10 @@ export class DeviceConnectionFake implements DeviceConnection {
 
   async sendConfigPatch(command: ConfigPatchCommand): Promise<void> {
     const patch = command.patch;
+    this.debugTraffic("outgoing", "config.patch", {
+      version: command.version,
+      patch,
+    });
 
     this.alertsConfig.anchor_distance.isEnabled = lookupPatchValue(patch, "alerts.anchor_distance.is_enabled") === true
       ? true
@@ -349,9 +354,16 @@ export class DeviceConnectionFake implements DeviceConnection {
     this.alertsConfig.data_outdated.minAgeMs = Math.max(0, toFiniteNumber(lookupPatchValue(patch, "alerts.data_outdated.min_age")) ?? this.alertsConfig.data_outdated.minAgeMs);
 
     this.publishSnapshot();
+    this.debugTraffic("incoming", "command.ack", {
+      status: "ok",
+    });
   }
 
   async commandWifiScan(maxResults: number, includeHidden: boolean): Promise<WifiScanNetwork[]> {
+    this.debugTraffic("outgoing", "onboarding.wifi.scan", {
+      maxResults,
+      includeHidden,
+    });
     const networks: WifiScanNetwork[] = [
       { ssid: "Demo Marina", security: "wpa2", rssi: -52, channel: 1, hidden: false },
       { ssid: "Dockside Guest", security: "open", rssi: -64, channel: 6, hidden: false },
@@ -361,13 +373,21 @@ export class DeviceConnectionFake implements DeviceConnection {
     const resultNetworks = includeHidden
       ? [...networks, hiddenNetwork]
       : [...networks];
-    return resultNetworks.slice(0, Math.max(0, maxResults));
+    const result = resultNetworks.slice(0, Math.max(0, maxResults));
+    this.debugTraffic("incoming", "onboarding.wifi.scan_result", {
+      networks: result,
+    });
+    return result;
   }
 
   async commandAnchorRise(): Promise<DeviceCommandResult> {
+    this.debugTraffic("outgoing", "anchor.rise", {});
     this.anchorState = "up";
     this.points = [];
     this.publishSnapshot();
+    this.debugTraffic("incoming", "command.ack", {
+      status: "ok",
+    });
     return {
       accepted: true,
       status: "ok",
@@ -377,6 +397,7 @@ export class DeviceConnectionFake implements DeviceConnection {
   }
 
   async commandAnchorDown(lat: number, lon: number): Promise<DeviceCommandResult> {
+    this.debugTraffic("outgoing", "anchor.down", { lat, lon });
     const wasAnchorUp = this.anchorState === "up";
     this.anchorState = "down";
     this.anchorLat = Number.isFinite(lat) ? lat : null;
@@ -385,6 +406,9 @@ export class DeviceConnectionFake implements DeviceConnection {
       this.points = [];
     }
     this.publishSnapshot();
+    this.debugTraffic("incoming", "command.ack", {
+      status: "ok",
+    });
     return {
       accepted: true,
       status: "ok",
@@ -394,6 +418,7 @@ export class DeviceConnectionFake implements DeviceConnection {
   }
 
   async commandAlarmSilence(seconds: number): Promise<DeviceCommandResult> {
+    this.debugTraffic("outgoing", "alarm.silence.request", { seconds });
     const nowTs = Date.now();
     const silenceMs = Math.max(1000, Math.min(24 * 60 * 60 * 1000, Math.floor(seconds * 1000)));
     const silenceUntilTs = nowTs + silenceMs;
@@ -410,6 +435,9 @@ export class DeviceConnectionFake implements DeviceConnection {
     }
 
     this.publishSnapshot();
+    this.debugTraffic("incoming", "command.ack", {
+      status: "ok",
+    });
     return {
       accepted: true,
       status: "ok",
@@ -419,14 +447,21 @@ export class DeviceConnectionFake implements DeviceConnection {
   }
 
   async requestStateSnapshot(): Promise<JsonRecord | null> {
-    return this.buildSnapshot().snapshot;
+    this.debugTraffic("outgoing", "status.snapshot.request", {});
+    const snapshot = this.buildSnapshot().snapshot;
+    this.debugTraffic("incoming", "status.snapshot", { snapshot });
+    return snapshot;
   }
 
   async requestTrackSnapshot(limit: number): Promise<TrackPoint[] | null> {
+    this.debugTraffic("outgoing", "track.snapshot.request", { limit });
     if (limit <= 0) {
+      this.debugTraffic("incoming", "track.snapshot", { points: [] });
       return [];
     }
-    return this.points.slice(-limit);
+    const points = this.points.slice(-limit);
+    this.debugTraffic("incoming", "track.snapshot", { points });
+    return points;
   }
 
   async probe(): Promise<DeviceConnectionProbeResult> {
@@ -476,6 +511,13 @@ export class DeviceConnectionFake implements DeviceConnection {
       boatId,
       snapshot,
     };
+
+    this.debugTraffic("incoming", "alerts.state", {
+      alerts: tick.alerts,
+    });
+    this.debugTraffic("incoming", "status.snapshot", {
+      snapshot,
+    });
 
     for (const subscriber of this.eventSubscribers) {
       subscriber(alertsEvent);
@@ -744,5 +786,18 @@ export class DeviceConnectionFake implements DeviceConnection {
 
     this.simulatedHeadingDeg = headingDeg;
     return headingDeg;
+  }
+
+  private debugTraffic(
+    direction: "incoming" | "outgoing",
+    msgType: string,
+    body: unknown,
+  ): void {
+    appendDebugMessage({
+      direction,
+      route: "simulation",
+      msgType,
+      body,
+    });
   }
 }

@@ -1,8 +1,19 @@
 <script lang="ts">
   import { onDestroy, onMount } from "svelte";
   import type { Map as MapTilerMap } from "@maptiler/sdk";
-  import type { AlertRuntimeEntry, AnchorRuntimeState, ConfigSectionId, TrackPoint, ViewId, WifiScanNetwork, WifiSecurity } from "./core/types";
+  import type {
+    AlertRuntimeEntry,
+    AnchorRuntimeState,
+    ConfigSectionId,
+    ConnectionRuntimeMode,
+    TrackPoint,
+    ViewId,
+    WifiScanNetwork,
+    WifiSecurity,
+  } from "./core/types";
   import {
+    CONNECTION_RUNTIME_MODE_ONBOARD,
+    CONNECTION_RUNTIME_MODE_REMOTE,
     CONFIG_SECTIONS,
     MAPTILER_API_KEY,
     MAPTILER_DEFAULT_CENTER,
@@ -18,6 +29,7 @@
   } from "./core/constants";
   import { formatWifiSecurity } from "./services/data-utils";
   import { deriveBleStatusText } from "./connections/ble/ble-state";
+  import { getBluetoothConnection } from "./connections/connection-factory";
   import {
     buildInternetSettingsStatusText,
     deriveAppConnectivityState,
@@ -42,6 +54,7 @@
   } from "./services/maptiler-controller";
   import { isBleSupported } from "./connections/ble/ble-connection";
   import {
+    reconnectLastKnownBleDevice,
     applyAnchorConfig,
     applyAlertConfig,
     applyProfilesConfig,
@@ -55,11 +68,17 @@
     searchForDeviceViaBluetooth,
     startDeviceRuntime,
     stopDeviceRuntime,
+    switchToOnboardMode,
+    switchToRemoteMode,
     useFakeMode,
   } from "./actions/device-actions";
   import { geoDeltaMeters, type GeoPoint } from "./services/geo-nav";
   import { appState, initAppStateEnvironment, logLine, replaceTrackPoints } from "./state/app-state.svelte";
   import {
+    Actions,
+    ActionsButton,
+    ActionsGroup,
+    ActionsLabel,
     App as KonstaApp,
     Icon,
     Page as KonstaPage,
@@ -75,6 +94,7 @@
   import AnchorConfigPage from "./features/config/AnchorConfigPage.svelte";
   import AlertsConfigPage from "./features/config/AlertsConfigPage.svelte";
   import ProfilesConfigPage from "./features/config/ProfilesConfigPage.svelte";
+  import DebuggingPage from "./features/config/DebuggingPage.svelte";
   import SatellitePage from "./features/map/SatellitePage.svelte";
   import MapPage from "./features/map/MapPage.svelte";
   import RadarPage from "./features/radar/RadarPage.svelte";
@@ -119,6 +139,15 @@
   let lastDroppedAnchorPosition = $state<GeoPoint | null>(null);
   let trackBeforeLastAnchorMove = $state<TrackPoint[] | null>(null);
   let vizMenuOpen = $state(false);
+  let runtimeModeSheetOpen = $state(false);
+  let disconnectWarningSheetOpen = $state(false);
+  let disconnectWarningMode = $state<ConnectionRuntimeMode | null>(null);
+  let ignoredDisconnectWarningMode = $state<ConnectionRuntimeMode | null>(null);
+  let reconnectDeviceAvailable = $state(false);
+  let reconnectDeviceName = $state("");
+  let runtimeModeEnforceInFlight = false;
+  let warningBeepTimer: ReturnType<typeof setInterval> | null = null;
+  let warningAutoFallbackTimer: ReturnType<typeof setTimeout> | null = null;
 
   let maptilerMapContainer = $state<HTMLDivElement | null>(null);
   let maptilerSatelliteContainer = $state<HTMLDivElement | null>(null);
@@ -194,6 +223,42 @@
   });
 
   $effect(() => {
+    if (ble.connected) {
+      reconnectDeviceAvailable = true;
+      reconnectDeviceName = ble.deviceName.trim();
+      ignoredDisconnectWarningMode = null;
+      return;
+    }
+    if (connection.mode !== MODE_FAKE) {
+      void refreshReconnectCandidateState();
+    }
+  });
+
+  $effect(() => {
+    if (connection.mode !== MODE_DEVICE || !connection.hasConfiguredDevice) {
+      return;
+    }
+    void enforceRuntimeModeSelection();
+  });
+
+  $effect(() => {
+    const disconnectMode = currentDisconnectWarningMode();
+    if (!disconnectMode) {
+      disconnectWarningSheetOpen = false;
+      disconnectWarningMode = null;
+      ignoredDisconnectWarningMode = null;
+      stopWarningBeep();
+      clearWarningAutoFallbackTimer();
+      return;
+    }
+
+    if (ignoredDisconnectWarningMode === disconnectMode) {
+      return;
+    }
+    openDisconnectWarning(disconnectMode);
+  });
+
+  $effect(() => {
     if (!connection.activeConnectionConnected) {
       navigation.settingsDeviceStatusText = "No Device connected yet";
     } else if (connection.activeConnection === "fake") {
@@ -214,7 +279,7 @@
     navigation.configSectionsWithStatus = CONFIG_SECTIONS
       .map((section) => ({
       ...section,
-      disabled: (!connection.hasConfiguredDevice && section.id !== "device")
+      disabled: (!connection.hasConfiguredDevice && section.id !== "device" && section.id !== "debugging")
         || (section.id === "internet" && !connection.activeConnectionConnected),
       status: section.id === "device"
         ? navigation.settingsDeviceStatusText
@@ -222,6 +287,8 @@
           ? network.settingsInternetStatusText
           : section.id === "connection"
             ? connectionSelectionStatusText
+            : section.id === "debugging"
+              ? `${appState.debugMessages.length} messages`
           : undefined,
     }));
   });
@@ -525,6 +592,177 @@
     clearConfigAutoPatchTimer("profiles");
   }
 
+  function runtimeModeText(mode = connection.runtimeMode): string {
+    return mode === CONNECTION_RUNTIME_MODE_ONBOARD ? "Onboard (BLE only)" : "Remote (Relay only)";
+  }
+
+  async function refreshReconnectCandidateState(): Promise<void> {
+    const bleConnection = getBluetoothConnection();
+    const info = await bleConnection.refreshReconnectAvailability();
+    reconnectDeviceAvailable = info.available;
+    reconnectDeviceName = info.deviceName.trim();
+  }
+
+  async function enforceRuntimeModeSelection(): Promise<void> {
+    if (runtimeModeEnforceInFlight || connection.mode !== MODE_DEVICE || !connection.hasConfiguredDevice) {
+      return;
+    }
+    if (connection.runtimeMode === CONNECTION_RUNTIME_MODE_ONBOARD && connection.activeConnection === "bluetooth") {
+      return;
+    }
+    if (connection.runtimeMode === CONNECTION_RUNTIME_MODE_REMOTE && connection.activeConnection === "cloud-relay") {
+      return;
+    }
+
+    runtimeModeEnforceInFlight = true;
+    try {
+      if (connection.runtimeMode === CONNECTION_RUNTIME_MODE_ONBOARD) {
+        await switchToOnboardMode();
+      } else {
+        await switchToRemoteMode();
+      }
+    } finally {
+      runtimeModeEnforceInFlight = false;
+    }
+  }
+
+  function currentDisconnectWarningMode(): ConnectionRuntimeMode | null {
+    if (connection.mode !== MODE_DEVICE || !connection.hasConfiguredDevice) {
+      return null;
+    }
+    if (connection.runtimeMode === CONNECTION_RUNTIME_MODE_ONBOARD) {
+      return connection.activeConnection === "bluetooth" && !connection.activeConnectionConnected
+        ? CONNECTION_RUNTIME_MODE_ONBOARD
+        : null;
+    }
+    return connection.activeConnection === "cloud-relay" && !connection.activeConnectionConnected
+      ? CONNECTION_RUNTIME_MODE_REMOTE
+      : null;
+  }
+
+  async function playWarningBeepOnce(): Promise<void> {
+    const AudioContextCtor = window.AudioContext || (window as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextCtor) {
+      return;
+    }
+
+    const ctx = new AudioContextCtor();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "square";
+    osc.frequency.value = 880;
+    gain.gain.value = 0.07;
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    const now = ctx.currentTime;
+    osc.start(now);
+    osc.stop(now + 0.18);
+    setTimeout(() => {
+      void ctx.close();
+    }, 260);
+  }
+
+  function startWarningBeep(): void {
+    if (warningBeepTimer) {
+      return;
+    }
+    void playWarningBeepOnce();
+    warningBeepTimer = setInterval(() => {
+      void playWarningBeepOnce();
+    }, 3000);
+  }
+
+  function stopWarningBeep(): void {
+    if (!warningBeepTimer) {
+      return;
+    }
+    clearInterval(warningBeepTimer);
+    warningBeepTimer = null;
+  }
+
+  function clearWarningAutoFallbackTimer(): void {
+    if (!warningAutoFallbackTimer) {
+      return;
+    }
+    clearTimeout(warningAutoFallbackTimer);
+    warningAutoFallbackTimer = null;
+  }
+
+  function openDisconnectWarning(mode: ConnectionRuntimeMode): void {
+    disconnectWarningMode = mode;
+    disconnectWarningSheetOpen = true;
+    startWarningBeep();
+    clearWarningAutoFallbackTimer();
+
+    if (mode !== CONNECTION_RUNTIME_MODE_ONBOARD) {
+      return;
+    }
+
+    warningAutoFallbackTimer = setTimeout(() => {
+      warningAutoFallbackTimer = null;
+      if (currentDisconnectWarningMode() !== CONNECTION_RUNTIME_MODE_ONBOARD) {
+        return;
+      }
+      disconnectWarningSheetOpen = false;
+      disconnectWarningMode = null;
+      ignoredDisconnectWarningMode = null;
+      stopWarningBeep();
+      void runAction("auto fallback to remote mode", switchToRemoteMode);
+      logLine("onboard BLE disconnect persisted for 120s; switched to remote mode");
+    }, 120_000);
+  }
+
+  function ignoreDisconnectWarning(): void {
+    if (!disconnectWarningMode) {
+      return;
+    }
+    ignoredDisconnectWarningMode = disconnectWarningMode;
+    disconnectWarningSheetOpen = false;
+    disconnectWarningMode = null;
+    stopWarningBeep();
+    clearWarningAutoFallbackTimer();
+  }
+
+  async function handleDisconnectReconnectTap(): Promise<void> {
+    disconnectWarningSheetOpen = false;
+    disconnectWarningMode = null;
+    ignoredDisconnectWarningMode = null;
+    stopWarningBeep();
+    clearWarningAutoFallbackTimer();
+    await reconnectLastKnownBleDevice();
+  }
+
+  async function handleSwitchToRemoteFromWarning(): Promise<void> {
+    disconnectWarningSheetOpen = false;
+    disconnectWarningMode = null;
+    ignoredDisconnectWarningMode = null;
+    stopWarningBeep();
+    clearWarningAutoFallbackTimer();
+    await switchToRemoteMode();
+  }
+
+  async function handleSwitchToOnboardFromWarning(): Promise<void> {
+    disconnectWarningSheetOpen = false;
+    disconnectWarningMode = null;
+    ignoredDisconnectWarningMode = null;
+    stopWarningBeep();
+    clearWarningAutoFallbackTimer();
+    await switchToOnboardMode();
+  }
+
+  async function switchQuickRuntimeMode(nextMode: ConnectionRuntimeMode): Promise<void> {
+    runtimeModeSheetOpen = false;
+    ignoredDisconnectWarningMode = null;
+    if (nextMode === connection.runtimeMode) {
+      return;
+    }
+    if (nextMode === CONNECTION_RUNTIME_MODE_ONBOARD) {
+      await switchToOnboardMode();
+      return;
+    }
+    await switchToRemoteMode();
+  }
+
   function cloneTrackPoints(points: TrackPoint[]): TrackPoint[] {
     return points.map((point) => ({ ...point }));
   }
@@ -547,7 +785,7 @@
   }
 
   function openConfigView(nextConfigView: ConfigSectionId): void {
-    if (!connection.hasConfiguredDevice && nextConfigView !== "device") {
+    if (!connection.hasConfiguredDevice && nextConfigView !== "device" && nextConfigView !== "debugging") {
       logLine(`settings section locked until setup complete: ${nextConfigView}`);
       return;
     }
@@ -812,6 +1050,7 @@
 
     initNotificationStatus(notifications);
     initAppStateEnvironment(isBleSupported(), Boolean(MAPTILER_API_KEY));
+    void refreshReconnectCandidateState();
     void registerServiceWorker();
 
     if (connection.mode === MODE_FAKE || !connection.hasConfiguredDevice) {
@@ -827,6 +1066,8 @@
     window.removeEventListener("popstate", handlePopState);
     clearInternetRescanTimer();
     clearAllConfigAutoPatchTimers();
+    stopWarningBeep();
+    clearWarningAutoFallbackTimer();
     destroyMapTilerView("map");
     destroyMapTilerView("satellite");
     void stopDeviceRuntime();
@@ -860,12 +1101,16 @@
       isConfigured={connection.hasConfiguredDevice}
       appState={connection.appState}
       bleSupported={connection.bleSupported}
+      runtimeModeText={runtimeModeText()}
       bleStatusText={connection.bleStatusText}
       boatIdText={connection.boatIdText}
       secretStatusText={connection.secretStatusText}
       connectedDeviceName={connection.connectedDeviceName}
+      reconnectAvailable={reconnectDeviceAvailable}
+      reconnectDeviceName={reconnectDeviceName}
       onBack={() => goToSettingsView()}
       onSearchDevice={() => void runAction("search device via bluetooth", searchForDeviceViaBluetooth)}
+      onReconnect={() => void runAction("reconnect last known device", reconnectLastKnownBleDevice)}
       onUseDemoData={() => void runAction("use fake mode", useFakeModeAndReturnHome)}
     />
   {/if}
@@ -988,7 +1233,88 @@
     />
   {/if}
 
+  {#if navigation.activeView === "config" && navigation.activeConfigView === "debugging"}
+    <DebuggingPage
+      messages={appState.debugMessages}
+      onBack={() => goToSettingsView()}
+    />
+  {/if}
+
     </main>
+    {#if connection.mode === MODE_DEVICE && connection.hasConfiguredDevice}
+      <button
+        type="button"
+        class="runtime-mode-fab"
+        aria-label="Open connection mode"
+        onclick={() => {
+          runtimeModeSheetOpen = true;
+        }}
+      >
+        {connection.runtimeMode === CONNECTION_RUNTIME_MODE_ONBOARD ? "Onboard BLE" : "Remote Relay"}
+      </button>
+    {/if}
+
+    <Actions
+      opened={runtimeModeSheetOpen}
+      onBackdropClick={() => {
+        runtimeModeSheetOpen = false;
+      }}
+    >
+      <ActionsGroup>
+        <ActionsLabel>Connection mode</ActionsLabel>
+        <ActionsButton
+          bold={connection.runtimeMode === CONNECTION_RUNTIME_MODE_ONBOARD}
+          onClick={() => void runAction("switch to onboard mode", () => switchQuickRuntimeMode(CONNECTION_RUNTIME_MODE_ONBOARD))}
+        >
+          Onboard mode (BLE only)
+        </ActionsButton>
+        <ActionsButton
+          bold={connection.runtimeMode === CONNECTION_RUNTIME_MODE_REMOTE}
+          onClick={() => void runAction("switch to remote mode", () => switchQuickRuntimeMode(CONNECTION_RUNTIME_MODE_REMOTE))}
+        >
+          Remote mode (Relay only)
+        </ActionsButton>
+      </ActionsGroup>
+      <ActionsGroup>
+        <ActionsButton onClick={() => {
+          runtimeModeSheetOpen = false;
+        }}
+        >
+          Cancel
+        </ActionsButton>
+      </ActionsGroup>
+    </Actions>
+
+    <Actions
+      opened={disconnectWarningSheetOpen}
+      onBackdropClick={() => {
+        ignoreDisconnectWarning();
+      }}
+    >
+      <ActionsGroup>
+        {#if disconnectWarningMode === CONNECTION_RUNTIME_MODE_ONBOARD}
+          <ActionsLabel>Warning: BLE disconnected. Reconnect now or switch to Remote mode. Auto-fallback in 120s.</ActionsLabel>
+          <ActionsButton bold onClick={() => void runAction("reconnect BLE", handleDisconnectReconnectTap)}>
+            Reconnect BLE
+          </ActionsButton>
+          <ActionsButton onClick={() => void runAction("switch to remote mode", handleSwitchToRemoteFromWarning)}>
+            Switch to Remote mode
+          </ActionsButton>
+          <ActionsButton onClick={ignoreDisconnectWarning}>
+            Ignore
+          </ActionsButton>
+        {:else if disconnectWarningMode === CONNECTION_RUNTIME_MODE_REMOTE}
+          <ActionsLabel>Warning: Relay disconnected. Auto-retry is active.</ActionsLabel>
+          <ActionsButton onClick={() => void runAction("switch to onboard mode", handleSwitchToOnboardFromWarning)}>
+            Switch to Onboard mode (BLE)
+          </ActionsButton>
+          <ActionsButton onClick={ignoreDisconnectWarning}>
+            Ignore
+          </ActionsButton>
+        {/if}
+      </ActionsGroup>
+    </Actions>
+
     {#if navigation.activeView === "map" || navigation.activeView === "satellite" || navigation.activeView === "radar"}
       <div class="shared-viz-overlay mono" aria-live="polite">
         <div>DIST {anchorDistanceText === "--" ? "--" : anchorDistanceText.replace(" ", "")}</div>

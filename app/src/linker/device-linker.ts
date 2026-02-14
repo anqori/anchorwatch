@@ -138,10 +138,6 @@ export class DeviceLinker {
         markConnectedViaBleOnce();
         refreshIdentityUi();
       }
-
-      if (!status.connected && !this.switchingConnection && appState.connection.mode === "device") {
-        await this.setConnection(defaultConnectionForMode("device"), false);
-      }
       return;
     }
 
@@ -282,4 +278,4 @@ export class DeviceLinker {
   }
 }
 
-export const deviceLinker = new DeviceLinker(defaultConnectionForMode(appState.connection.mode));
+export const deviceLinker = new DeviceLinker(defaultConnectionForMode(appState.connection.mode, appState.connection.runtimeMode));

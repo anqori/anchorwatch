@@ -1,7 +1,12 @@
 import {
+  BLE_LAST_DEVICE_ID_KEY,
+  BLE_LAST_DEVICE_NAME_KEY,
   BLE_CONNECTED_ONCE_KEY,
   BOAT_ID_KEY,
   BOAT_SECRET_KEY,
+  CONNECTION_RUNTIME_MODE_KEY,
+  CONNECTION_RUNTIME_MODE_ONBOARD,
+  CONNECTION_RUNTIME_MODE_REMOTE,
   DEFAULT_RELAY_BASE_URL,
   MODE_DEVICE,
   MODE_KEY,
@@ -9,7 +14,7 @@ import {
   RELAY_BASE_URL_KEY,
   WIFI_CFG_VERSION_KEY,
 } from "../core/constants";
-import type { Mode } from "../core/types";
+import type { ConnectionRuntimeMode, Mode } from "../core/types";
 import { loadStoredString, saveStoredString } from "./local-storage";
 
 export function loadMode(): Mode {
@@ -89,4 +94,26 @@ export function hasConnectedViaBleOnce(): boolean {
 
 export function markConnectedViaBleOnce(): void {
   saveStoredString(BLE_CONNECTED_ONCE_KEY, "1");
+}
+
+export function loadConnectionRuntimeMode(): ConnectionRuntimeMode {
+  const raw = loadStoredString(CONNECTION_RUNTIME_MODE_KEY, CONNECTION_RUNTIME_MODE_REMOTE).trim();
+  return raw === CONNECTION_RUNTIME_MODE_ONBOARD ? CONNECTION_RUNTIME_MODE_ONBOARD : CONNECTION_RUNTIME_MODE_REMOTE;
+}
+
+export function setConnectionRuntimeMode(mode: ConnectionRuntimeMode): void {
+  saveStoredString(CONNECTION_RUNTIME_MODE_KEY, mode);
+}
+
+export function getLastBleDeviceId(): string {
+  return loadStoredString(BLE_LAST_DEVICE_ID_KEY).trim();
+}
+
+export function getLastBleDeviceName(): string {
+  return loadStoredString(BLE_LAST_DEVICE_NAME_KEY).trim();
+}
+
+export function setLastBleDevice(deviceId: string, deviceName: string): void {
+  saveStoredString(BLE_LAST_DEVICE_ID_KEY, deviceId.trim());
+  saveStoredString(BLE_LAST_DEVICE_NAME_KEY, deviceName.trim());
 }

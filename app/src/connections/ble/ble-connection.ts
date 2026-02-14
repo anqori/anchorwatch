@@ -18,15 +18,10 @@ export interface BleConnectionResult {
   auth: BluetoothRemoteGATTCharacteristic;
 }
 
-export async function connectBleWithCharacteristics(options: BleConnectOptions): Promise<BleConnectionResult> {
-  if (!isBleSupported()) {
-    throw new Error("Web Bluetooth unavailable");
-  }
-
-  const device = await navigator.bluetooth.requestDevice({
-    filters: [{ services: [options.serviceUuid] }],
-    optionalServices: [options.serviceUuid],
-  });
+async function connectDeviceWithCharacteristics(
+  device: BluetoothDevice,
+  options: BleConnectOptions,
+): Promise<BleConnectionResult> {
   device.addEventListener("gattserverdisconnected", options.onDisconnected);
 
   if (!device.gatt) {
@@ -52,6 +47,36 @@ export async function connectBleWithCharacteristics(options: BleConnectOptions):
     snapshot,
     auth,
   };
+}
+
+export async function connectBleWithCharacteristics(
+  options: BleConnectOptions,
+  knownDevice: BluetoothDevice | null = null,
+): Promise<BleConnectionResult> {
+  if (!isBleSupported()) {
+    throw new Error("Web Bluetooth unavailable");
+  }
+
+  if (knownDevice) {
+    return await connectDeviceWithCharacteristics(knownDevice, options);
+  }
+
+  const device = await navigator.bluetooth.requestDevice({
+    filters: [{ services: [options.serviceUuid] }],
+    optionalServices: [options.serviceUuid],
+  });
+  return await connectDeviceWithCharacteristics(device, options);
+}
+
+export async function listGrantedBleDevices(): Promise<BluetoothDevice[]> {
+  if (!isBleSupported() || typeof navigator.bluetooth.getDevices !== "function") {
+    return [];
+  }
+  try {
+    return await navigator.bluetooth.getDevices();
+  } catch {
+    return [];
+  }
 }
 
 export function isBleSupported(): boolean {

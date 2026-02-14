@@ -1,4 +1,8 @@
-import { TRACK_SNAPSHOT_LIMIT } from "../core/constants";
+import {
+  CONNECTION_RUNTIME_MODE_ONBOARD,
+  CONNECTION_RUNTIME_MODE_REMOTE,
+  TRACK_SNAPSHOT_LIMIT,
+} from "../core/constants";
 import type { JsonRecord, WifiSecurity } from "../core/types";
 import { mapAlertDraftToConfigInput, mapAnchorDraftToConfigInput, mapProfilesDraftToConfigInput } from "../services/config-draft-mappers";
 import { buildAlertConfigPatch, buildAnchorConfigPatch, buildProfilesConfigPatch } from "../services/config-patch-builders";
@@ -24,6 +28,7 @@ import {
   replaceTrackPoints,
   setBoatId,
   setBoatSecret,
+  setConnectionRuntimeMode,
 } from "../state/app-state.svelte";
 
 let wifiScanTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -59,7 +64,7 @@ function ensureConfiguredDeviceForConnectionSelection(): void {
 }
 
 export async function startDeviceRuntime(): Promise<void> {
-  const active = defaultConnectionForMode(appState.connection.mode);
+  const active = defaultConnectionForMode(appState.connection.mode, appState.connection.runtimeMode);
   await deviceLinker.setConnection(active, false);
   await deviceLinker.start();
 }
@@ -74,14 +79,15 @@ export async function selectDeviceModeForSetup(): Promise<void> {
     applyMode("device");
     logLine("device connection.mode selected for setup");
   }
-  resetLiveDataState();
-  await deviceLinker.setConnection(defaultConnectionForMode("device"));
+  setConnectionRuntimeMode(CONNECTION_RUNTIME_MODE_ONBOARD);
 }
 
 export async function searchForDeviceViaBluetooth(): Promise<void> {
   await selectDeviceModeForSetup();
+  resetLiveDataState();
 
   const bleConnection = getBluetoothConnection();
+  bleConnection.requestPickerOnNextConnect();
   if (bleConnection.isConnected()) {
     await bleConnection.disconnect();
   }
@@ -109,8 +115,9 @@ export async function selectRelayConnection(): Promise<void> {
   if (appState.connection.mode !== "device") {
     applyMode("device");
   }
+  setConnectionRuntimeMode(CONNECTION_RUNTIME_MODE_REMOTE);
   resetLiveDataState();
-  await deviceLinker.setConnection(defaultConnectionForMode("device"));
+  await deviceLinker.setConnection(defaultConnectionForMode("device", CONNECTION_RUNTIME_MODE_REMOTE));
   logLine("active connection switched to cloud-relay");
 }
 
@@ -122,9 +129,49 @@ export async function selectBluetoothConnection(): Promise<void> {
   if (appState.connection.mode !== "device") {
     applyMode("device");
   }
+  setConnectionRuntimeMode(CONNECTION_RUNTIME_MODE_ONBOARD);
   resetLiveDataState();
   await deviceLinker.setConnection(getBluetoothConnection());
   logLine("active connection switched to bluetooth");
+}
+
+export async function switchToOnboardMode(): Promise<void> {
+  ensureConfiguredDeviceForConnectionSelection();
+  if (appState.connection.mode !== "device") {
+    applyMode("device");
+  }
+  setConnectionRuntimeMode(CONNECTION_RUNTIME_MODE_ONBOARD);
+  resetLiveDataState();
+  await deviceLinker.setConnection(getBluetoothConnection());
+  logLine("runtime mode switched to onboard (BLE only)");
+}
+
+export async function switchToRemoteMode(): Promise<void> {
+  ensureConfiguredDeviceForConnectionSelection();
+  if (appState.connection.mode !== "device") {
+    applyMode("device");
+  }
+  setConnectionRuntimeMode(CONNECTION_RUNTIME_MODE_REMOTE);
+  resetLiveDataState();
+  await deviceLinker.setConnection(defaultConnectionForMode("device", CONNECTION_RUNTIME_MODE_REMOTE));
+  logLine("runtime mode switched to remote (relay only)");
+}
+
+export async function reconnectLastKnownBleDevice(): Promise<void> {
+  ensureConfiguredDeviceForConnectionSelection();
+  if (appState.connection.mode !== "device") {
+    applyMode("device");
+  }
+  setConnectionRuntimeMode(CONNECTION_RUNTIME_MODE_ONBOARD);
+  resetLiveDataState();
+  const bleConnection = getBluetoothConnection();
+  const reconnectState = await bleConnection.refreshReconnectAvailability();
+  if (!reconnectState.available) {
+    bleConnection.requestPickerOnNextConnect();
+    logLine("no remembered BLE device found; opening picker");
+  }
+  await deviceLinker.setConnection(bleConnection);
+  logLine("reconnect requested for last known BLE device");
 }
 
 export async function saveRelayUrl(): Promise<void> {
@@ -134,7 +181,7 @@ export async function saveRelayUrl(): Promise<void> {
   logLine(`relay base URL saved: ${normalized || "(empty)"}`);
 
   if (appState.connection.mode === "device" && deviceLinker.getConnection().kind !== "bluetooth") {
-    await deviceLinker.setConnection(defaultConnectionForMode("device"));
+    await deviceLinker.setConnection(defaultConnectionForMode("device", appState.connection.runtimeMode));
   }
 }
 

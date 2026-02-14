@@ -8,7 +8,7 @@ import {
   PROTOCOL_VERSION,
 } from "../../core/constants";
 import type { Envelope, InboundSource, JsonRecord, PendingAck, TrackPoint, WifiScanNetwork } from "../../core/types";
-import { connectBleWithCharacteristics, disconnectBleDevice } from "./ble-connection";
+import { connectBleWithCharacteristics, disconnectBleDevice, listGrantedBleDevices } from "./ble-connection";
 import {
   clearPendingAcks,
   consumeChunkedBleFrame,
@@ -19,7 +19,14 @@ import { makeMsgId, writeChunked } from "./ble-transport";
 import { dataViewToBytes, isObject, parseTrackSnapshot, parseWifiScanNetworks, safeParseJson } from "../../services/data-utils";
 import { buildConfigPatchPayload, buildProtocolEnvelope, type ConfigPatchCommand } from "../../services/protocol-messages";
 import { readAlertRuntimeEntries } from "../../services/state-derive";
-import { ensurePhoneId, getBoatId } from "../../services/persistence-domain";
+import {
+  ensurePhoneId,
+  getBoatId,
+  getLastBleDeviceId,
+  getLastBleDeviceName,
+  setLastBleDevice,
+} from "../../services/persistence-domain";
+import { appendDebugMessage } from "../../state/app-state.svelte";
 import type {
   DeviceConnection,
   DeviceCommandResult,
@@ -84,11 +91,25 @@ export class DeviceConnectionBle implements DeviceConnection {
 
   private pendingTracks: PendingTrackRequest[] = [];
 
+  private reconnectDevice: BluetoothDevice | null = null;
+
+  private forceRequestPicker = false;
+
+  requestPickerOnNextConnect(): void {
+    this.forceRequestPicker = true;
+  }
+
   async connect(): Promise<void> {
     if (this.state.connected) {
       return;
     }
 
+    const usePicker = this.forceRequestPicker;
+    const maybeKnown = usePicker ? null : await this.resolveReconnectDevice();
+    this.forceRequestPicker = false;
+    if (!usePicker && !maybeKnown) {
+      throw new Error("No previously granted BLE device. Use Bluetooth search once.");
+    }
     const {
       device,
       server,
@@ -105,7 +126,7 @@ export class DeviceConnectionBle implements DeviceConnection {
       authUuid: BLE_AUTH_UUID,
       onDisconnected: this.onBleDisconnected as EventListener,
       onNotification: this.onBleNotification as EventListener,
-    });
+    }, maybeKnown);
 
     this.state.device = device;
     this.state.server = server;
@@ -116,6 +137,58 @@ export class DeviceConnectionBle implements DeviceConnection {
     this.state.auth = auth;
     this.state.connected = true;
     this.state.chunkAssemblies.clear();
+    this.reconnectDevice = device;
+    setLastBleDevice(device.id, device.name?.trim() || "");
+
+    await this.refreshAuthState();
+    this.emitStatus();
+  }
+
+  async refreshReconnectAvailability(): Promise<{ available: boolean; deviceName: string }> {
+    const device = await this.resolveReconnectDevice();
+    return {
+      available: Boolean(device),
+      deviceName: device?.name?.trim() || getLastBleDeviceName(),
+    };
+  }
+
+  async connectLastKnown(): Promise<void> {
+    if (this.state.connected) {
+      return;
+    }
+    const device = await this.resolveReconnectDevice();
+    if (!device) {
+      throw new Error("No previously granted Bluetooth device found.");
+    }
+
+    const {
+      server,
+      service,
+      controlTx,
+      eventRx,
+      snapshot,
+      auth,
+    } = await connectBleWithCharacteristics({
+      serviceUuid: BLE_SERVICE_UUID,
+      controlTxUuid: BLE_CONTROL_TX_UUID,
+      eventRxUuid: BLE_EVENT_RX_UUID,
+      snapshotUuid: BLE_SNAPSHOT_UUID,
+      authUuid: BLE_AUTH_UUID,
+      onDisconnected: this.onBleDisconnected as EventListener,
+      onNotification: this.onBleNotification as EventListener,
+    }, device);
+
+    this.state.device = device;
+    this.state.server = server;
+    this.state.service = service;
+    this.state.controlTx = controlTx;
+    this.state.eventRx = eventRx;
+    this.state.snapshot = snapshot;
+    this.state.auth = auth;
+    this.state.connected = true;
+    this.state.chunkAssemblies.clear();
+    this.reconnectDevice = device;
+    setLastBleDevice(device.id, device.name?.trim() || "");
 
     await this.refreshAuthState();
     this.emitStatus();
@@ -199,6 +272,7 @@ export class DeviceConnectionBle implements DeviceConnection {
       : null;
 
     try {
+      this.debugTraffic("outgoing", msgType, raw);
       await writeChunked(this.state.controlTx, envelope.msgId as string, raw, encoder);
       if (!ackPromise) {
         return null;
@@ -324,7 +398,10 @@ export class DeviceConnectionBle implements DeviceConnection {
     resolvePendingAckFromPayload(this.state.pendingAcks, payload);
   }
 
-  private handleIncomingEnvelope(envelope: Envelope, source: InboundSource): void {
+  private handleIncomingEnvelope(envelope: Envelope, source: InboundSource, rawEnvelope: string | null = null): void {
+    const msgType = typeof envelope.msgType === "string" && envelope.msgType ? envelope.msgType : "unknown";
+    this.debugTraffic("incoming", msgType, rawEnvelope ?? envelope);
+
     if (envelope.msgType === "command.ack") {
       const payload = isObject(envelope.payload) ? envelope.payload : {};
       this.handleCommandAck(payload);
@@ -426,11 +503,12 @@ export class DeviceConnectionBle implements DeviceConnection {
     }
 
     if (bytes[0] === 0x7b) {
-      const parsed = safeParseJson(decoder.decode(bytes));
+      const raw = decoder.decode(bytes);
+      const parsed = safeParseJson(raw);
       if (!parsed || !isObject(parsed)) {
         return;
       }
-      this.handleIncomingEnvelope(parsed as Envelope, "ble/eventRx");
+      this.handleIncomingEnvelope(parsed as Envelope, "ble/eventRx", raw);
       return;
     }
 
@@ -448,7 +526,7 @@ export class DeviceConnectionBle implements DeviceConnection {
     if (!parsed || !isObject(parsed)) {
       return;
     }
-    this.handleIncomingEnvelope(parsed as Envelope, "ble/eventRx");
+    this.handleIncomingEnvelope(parsed as Envelope, "ble/eventRx", frame.raw);
   };
 
   private onBleDisconnected = (): void => {
@@ -489,5 +567,32 @@ export class DeviceConnectionBle implements DeviceConnection {
     }
     this.pendingTracks = [];
     this.emitStatus();
+  }
+
+  private async resolveReconnectDevice(): Promise<BluetoothDevice | null> {
+    if (this.reconnectDevice) {
+      return this.reconnectDevice;
+    }
+    const lastDeviceId = getLastBleDeviceId();
+    if (!lastDeviceId) {
+      return null;
+    }
+    const grantedDevices = await listGrantedBleDevices();
+    const match = grantedDevices.find((device) => device.id === lastDeviceId) ?? null;
+    this.reconnectDevice = match;
+    return match;
+  }
+
+  private debugTraffic(
+    direction: "incoming" | "outgoing",
+    msgType: string,
+    body: unknown,
+  ): void {
+    appendDebugMessage({
+      direction,
+      route: "ble",
+      msgType,
+      body,
+    });
   }
 }

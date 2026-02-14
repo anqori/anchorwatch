@@ -14,9 +14,13 @@
   export let boatIdText = "--";
   export let secretStatusText = "not stored";
   export let connectedDeviceName = "";
+  export let runtimeModeText = "Remote (relay only)";
+  export let reconnectAvailable = false;
+  export let reconnectDeviceName = "";
 
   export let onBack: () => void = () => {};
   export let onSearchDevice: () => void = () => {};
+  export let onReconnect: () => void = () => {};
   export let onUseDemoData: () => void = () => {};
 </script>
 
@@ -42,12 +46,18 @@
   {:else}
     <List strong inset>
       <ListItem title="App state" after={appState} />
+      <ListItem title="Runtime mode" after={runtimeModeText} />
       <ListItem title="BLE" after={bleStatusText} />
       <ListItem title="Connected Device" after={connectedDeviceName || "--"} />
       <ListItem title="Boat ID" after={boatIdText} />
       <ListItem title="Boat secret" after={secretStatusText} />
     </List>
     <div class="actions">
+      {#if reconnectAvailable}
+        <KonstaButton onClick={onReconnect} disabled={!bleSupported}>
+          Reconnect {reconnectDeviceName.trim() ? `(${reconnectDeviceName.trim()})` : ""}
+        </KonstaButton>
+      {/if}
       <KonstaButton onClick={onSearchDevice} disabled={!bleSupported}>
         Search for other Device via Bluetooth
       </KonstaButton>

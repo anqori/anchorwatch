@@ -1,12 +1,17 @@
 import {
+  CONNECTION_RUNTIME_MODE_REMOTE,
   CONFIG_SECTIONS,
   MODE_FAKE,
   PWA_BUILD_VERSION,
   TRACK_MAX_POINTS,
 } from "../core/constants";
 import type {
+  ConnectionRuntimeMode,
   ConnectionState,
   ConfigDraftsState,
+  DebugMessageDirection,
+  DebugMessageEntry,
+  DebugMessageRoute,
   InboundSource,
   JsonRecord,
   NavigationState,
@@ -25,7 +30,9 @@ import {
   getBoatSecret,
   getRelayBaseUrl,
   hasConnectedViaBleOnce,
+  loadConnectionRuntimeMode,
   loadMode,
+  setConnectionRuntimeMode as setConnectionRuntimeModeStored,
   setBoatId as setBoatIdStored,
   setBoatSecret as setBoatSecretStored,
   setMode as setModeStored,
@@ -220,6 +227,7 @@ interface ExtendedConnectionState extends ConnectionState {
 function defaultConnectionState(): ExtendedConnectionState {
   return {
     mode: loadMode(),
+    runtimeMode: loadConnectionRuntimeMode(),
     appState: "UNCONFIGURED",
     bleSupported: false,
     bleStatusText: "disconnected",
@@ -256,7 +264,10 @@ export const appState = $state({
   notifications: defaultNotificationState(),
   configDrafts: defaultConfigDrafts(),
   logLines: [] as string[],
+  debugMessages: [] as DebugMessageEntry[],
 });
+
+let debugMessageNextId = 1;
 
 export function initAppStateEnvironment(hasBluetooth: boolean, hasMaptilerKey: boolean): void {
   appState.connection.bleSupported = hasBluetooth;
@@ -316,6 +327,13 @@ export function applyMode(mode: "fake" | "device", persist = true): void {
 export function setActiveConnection(kind: "fake" | "bluetooth" | "cloud-relay"): void {
   appState.connection.activeConnection = kind;
   appState.connection.activeConnectionConnected = false;
+}
+
+export function setConnectionRuntimeMode(mode: ConnectionRuntimeMode, persist = true): void {
+  appState.connection.runtimeMode = mode;
+  if (persist) {
+    setConnectionRuntimeModeStored(mode);
+  }
 }
 
 export function setActiveConnectionConnected(connected: boolean): void {
@@ -478,6 +496,37 @@ export function logLine(message: string): void {
   appState.logLines = [...appState.logLines, line].slice(-140);
 }
 
+function debugMessageBody(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (value === undefined) {
+    return "";
+  }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+export function appendDebugMessage(input: {
+  direction: DebugMessageDirection;
+  route: DebugMessageRoute;
+  msgType: string;
+  body: unknown;
+}): void {
+  const entry: DebugMessageEntry = {
+    id: debugMessageNextId++,
+    ts: Date.now(),
+    direction: input.direction,
+    route: input.route,
+    msgType: input.msgType.trim() || "unknown",
+    body: debugMessageBody(input.body),
+  };
+  appState.debugMessages = [...appState.debugMessages, entry];
+}
+
 export function initAppStateEffects(): void {
   // Intentionally no-op. Derived/UI synchronization is registered from App.svelte.
 }
@@ -485,5 +534,7 @@ export function initAppStateEffects(): void {
 refreshIdentityUi();
 ensurePhoneId();
 if (appState.connection.mode !== MODE_FAKE) {
-  appState.connection.activeConnection = "cloud-relay";
+  appState.connection.activeConnection = appState.connection.runtimeMode === CONNECTION_RUNTIME_MODE_REMOTE
+    ? "cloud-relay"
+    : "bluetooth";
 }

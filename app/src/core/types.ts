@@ -1,9 +1,12 @@
 export type Mode = "fake" | "device";
+export type ConnectionRuntimeMode = "onboard" | "remote";
 export type AppConnectivityState = "UNCONFIGURED" | "CONFIGURED_BUT_UNCONNECTED" | "CONNECTED";
 export type InboundSource = "ble/eventRx" | "ble/snapshot" | "cloud/status.snapshot" | "fake/snapshot";
+export type DebugMessageDirection = "incoming" | "outgoing";
+export type DebugMessageRoute = "ble" | "relay" | "simulation";
 export type PillClass = "ok" | "warn" | "alarm";
 export type ViewId = "summary" | "satellite" | "map" | "radar" | "config";
-export type ConfigSectionId = "device" | "internet" | "connection" | "information" | "anchor" | "alerts" | "profiles";
+export type ConfigSectionId = "device" | "internet" | "connection" | "anchor" | "alerts" | "profiles" | "debugging" | "information";
 export type ConfigViewId = "settings" | ConfigSectionId;
 export type ProfileMode = "manual" | "auto";
 export type ColorScheme = "full" | "red" | "blue";
@@ -30,6 +33,7 @@ export interface ConfigSectionStatusItem {
 
 export interface ConnectionState {
   mode: Mode;
+  runtimeMode: ConnectionRuntimeMode;
   appState: AppConnectivityState;
   bleSupported: boolean;
   bleStatusText: string;
@@ -200,4 +204,13 @@ export interface ChunkAssembly {
   partCount: number;
   parts: Array<string | null>;
   updatedAt: number;
+}
+
+export interface DebugMessageEntry {
+  id: number;
+  ts: number;
+  direction: DebugMessageDirection;
+  route: DebugMessageRoute;
+  msgType: string;
+  body: string;
 }
