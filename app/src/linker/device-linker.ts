@@ -25,6 +25,10 @@ import { defaultConnectionForMode } from "../connections/connection-factory";
 import { markConnectedViaBleOnce } from "../services/persistence-domain";
 
 export class DeviceLinker {
+  private static readonly BLE_MESSAGE_STALE_MS = 12_000;
+
+  private static readonly BLE_RECOVERY_COOLDOWN_MS = 10_000;
+
   private activeConnection: DeviceConnection;
 
   private running = false;
@@ -38,6 +42,10 @@ export class DeviceLinker {
   private unsubscribeEvents: (() => void) | null = null;
 
   private unsubscribeStatus: (() => void) | null = null;
+
+  private bleRecoveryInFlight = false;
+
+  private lastBleRecoveryAttemptAtMs = 0;
 
   constructor(initialConnection: DeviceConnection) {
     this.activeConnection = initialConnection;
@@ -85,6 +93,7 @@ export class DeviceLinker {
     if (next === this.activeConnection) {
       if (!next.isConnected()) {
         await next.connect();
+        void this.primeConnection(next);
       }
       return;
     }
@@ -136,6 +145,7 @@ export class DeviceLinker {
 
       if (status.connected) {
         markConnectedViaBleOnce();
+        markBleMessageSeen(Date.now());
         refreshIdentityUi();
       }
       return;
@@ -253,6 +263,8 @@ export class DeviceLinker {
   }
 
   private async tickDeviceSummary(nowMs: number): Promise<void> {
+    await this.recoverBleIfStale();
+
     if (Object.keys(appState.latestState).length > 0) {
       renderTelemetryFromLatestState();
       if (appState.connection.mode === "fake") {
@@ -275,6 +287,43 @@ export class DeviceLinker {
     }
     setSummarySource("none");
     setSummaryState(this.activeConnection.isConnected() ? "DEVICE: WAITING DATA" : "DEVICE: NO LINK", "warn");
+  }
+
+  private async recoverBleIfStale(): Promise<void> {
+    if (
+      this.switchingConnection
+      || this.bleRecoveryInFlight
+      || this.activeConnection.kind !== "bluetooth"
+      || !appState.connection.activeConnectionConnected
+    ) {
+      return;
+    }
+
+    const lastBleMessageAtMs = appState.runtime.lastBleMessageAtMs;
+    if (!lastBleMessageAtMs) {
+      return;
+    }
+
+    const now = Date.now();
+    if (now - lastBleMessageAtMs < DeviceLinker.BLE_MESSAGE_STALE_MS) {
+      return;
+    }
+    if (now - this.lastBleRecoveryAttemptAtMs < DeviceLinker.BLE_RECOVERY_COOLDOWN_MS) {
+      return;
+    }
+
+    this.bleRecoveryInFlight = true;
+    this.lastBleRecoveryAttemptAtMs = now;
+    try {
+      logLine("BLE link stale; reconnecting BLE transport");
+      await this.activeConnection.disconnect();
+      await this.activeConnection.connect();
+      await this.primeConnection(this.activeConnection);
+    } catch (error) {
+      logLine(`BLE stale-link recovery failed: ${String(error)}`);
+    } finally {
+      this.bleRecoveryInFlight = false;
+    }
   }
 }
 

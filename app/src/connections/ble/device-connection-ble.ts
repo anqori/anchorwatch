@@ -101,7 +101,11 @@ export class DeviceConnectionBle implements DeviceConnectionBleLike {
 
   async connect(): Promise<void> {
     if (this.state.connected) {
-      return;
+      if (this.state.device?.gatt?.connected) {
+        return;
+      }
+      // Recover from stale local state when browser did not deliver disconnection callback.
+      this.handleDisconnectedState();
     }
 
     const usePicker = this.forceRequestPicker;
@@ -154,7 +158,11 @@ export class DeviceConnectionBle implements DeviceConnectionBleLike {
 
   async connectLastKnown(): Promise<void> {
     if (this.state.connected) {
-      return;
+      if (this.state.device?.gatt?.connected) {
+        return;
+      }
+      // Recover from stale local state when browser did not deliver disconnection callback.
+      this.handleDisconnectedState();
     }
     const device = await this.resolveReconnectDevice();
     if (!device) {
@@ -196,6 +204,12 @@ export class DeviceConnectionBle implements DeviceConnectionBleLike {
 
   async disconnect(): Promise<void> {
     if (disconnectBleDevice(this.state.device)) {
+      // Browsers may miss gattserverdisconnected callbacks after repeated reconnects.
+      setTimeout(() => {
+        if (this.state.connected && !this.state.device?.gatt?.connected) {
+          this.handleDisconnectedState();
+        }
+      }, 350);
       return;
     }
     this.handleDisconnectedState();

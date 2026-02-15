@@ -893,6 +893,11 @@
     vizMenuOpen = false;
   }
 
+  function openRuntimeModeSelectorFromVizMenu(): void {
+    closeVizMenu();
+    runtimeModeSheetOpen = true;
+  }
+
   function startAnchorMoveFromMenu(): void {
     closeVizMenu();
     startAnchorMove();
@@ -1241,20 +1246,8 @@
   {/if}
 
     </main>
-    {#if connection.mode === MODE_DEVICE && connection.hasConfiguredDevice}
-      <button
-        type="button"
-        class="runtime-mode-fab"
-        aria-label="Open connection mode"
-        onclick={() => {
-          runtimeModeSheetOpen = true;
-        }}
-      >
-        {connection.runtimeMode === CONNECTION_RUNTIME_MODE_ONBOARD ? "Onboard BLE" : "Remote Relay"}
-      </button>
-    {/if}
-
     <Actions
+      class="am-actions-sheet"
       opened={runtimeModeSheetOpen}
       onBackdropClick={() => {
         runtimeModeSheetOpen = false;
@@ -1286,6 +1279,7 @@
     </Actions>
 
     <Actions
+      class="am-actions-sheet"
       opened={disconnectWarningSheetOpen}
       onBackdropClick={() => {
         ignoreDisconnectWarning();
@@ -1414,6 +1408,14 @@
         </div>
         {#if canShowVizMenu() && vizMenuOpen}
           <div class="viz-menu-panel viz-menu-floating-panel" role="menu" aria-label="View actions">
+            <button
+              type="button"
+              class="viz-menu-item"
+              role="menuitem"
+              onclick={openRuntimeModeSelectorFromVizMenu}
+            >
+              Connection mode: {connection.runtimeMode === CONNECTION_RUNTIME_MODE_ONBOARD ? "Onboard BLE" : "Remote Relay"}
+            </button>
             <button
               type="button"
               class="viz-menu-item"

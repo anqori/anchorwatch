@@ -44,6 +44,19 @@ static const unsigned long PRIV_SESSION_TTL_MS = 10UL * 60UL * 1000UL;
 static const unsigned long WIFI_RETRY_MAX_MS = 30UL * 1000UL;
 static const size_t BLE_CHUNK_MAX_PAYLOAD = 120U;
 
+// Fake telemetry route area: 200m radius around Plueschowhafen, Kiel.
+static const float SIM_CENTER_LAT_DEG = 54.38329f;
+static const float SIM_CENTER_LON_DEG = 10.16349f;
+static const float SIM_RADIUS_M = 200.0f;
+static const float SIM_METERS_PER_DEG_LAT = 111320.0f;
+static const float SIM_KNOTS_PER_MPS = 1.94384f;
+static const float SIM_MIN_SOG_KN = 0.4f;
+static const float SIM_MAX_SOG_KN = 2.4f;
+static const float SIM_HEADING_JITTER_DEG = 32.0f;
+static const float SIM_MIN_DT_SEC = 0.2f;
+static const float SIM_MAX_DT_SEC = 2.5f;
+static const int SIM_WIFI_SCAN_MAX_RESULTS = 32;
+
 enum AlarmLevel {
   ALARM_NONE = 0,
   ALARM_WARNING,
@@ -87,6 +100,7 @@ struct CommandResult {
   String status;
   String errorCode;
   String errorDetail;
+  String ackExtraFields;
 };
 
 struct BleChunkAssembler {
@@ -128,6 +142,12 @@ WiFiConfig wifiConfig = {};
 BleChunkAssembler bleAssembler = {};
 float anchorLat = 0.0f;
 float anchorLon = 0.0f;
+bool simMotionInitialized = false;
+unsigned long simLastUpdateMs = 0;
+float simOffsetEastM = 0.0f;
+float simOffsetNorthM = 0.0f;
+float simCogDeg = 0.0f;
+float simSogKnots = 0.0f;
 
 BLEServer *bleServer = nullptr;
 BLEService *bleService = nullptr;
@@ -188,6 +208,78 @@ String randomToken(size_t len) {
     out += chars[esp_random() % charCount];
   }
   return out;
+}
+
+float randomUnitF() {
+  return (float)esp_random() / 4294967295.0f;
+}
+
+float randomRangeF(float minValue, float maxValue) {
+  return minValue + (maxValue - minValue) * randomUnitF();
+}
+
+float normalizeHeadingDeg(float deg) {
+  while (deg < 0.0f) {
+    deg += 360.0f;
+  }
+  while (deg >= 360.0f) {
+    deg -= 360.0f;
+  }
+  return deg;
+}
+
+void initSimMotion(unsigned long nowMs) {
+  const float radius = SIM_RADIUS_M * sqrtf(randomUnitF());
+  const float angle = randomRangeF(0.0f, TWO_PI);
+  simOffsetEastM = radius * cosf(angle);
+  simOffsetNorthM = radius * sinf(angle);
+  simCogDeg = randomRangeF(0.0f, 360.0f);
+  simSogKnots = randomRangeF(SIM_MIN_SOG_KN, SIM_MAX_SOG_KN);
+  simLastUpdateMs = nowMs;
+  simMotionInitialized = true;
+}
+
+void updateSimMotion(unsigned long nowMs) {
+  if (!simMotionInitialized) {
+    initSimMotion(nowMs);
+    return;
+  }
+
+  float dtSec = (float)(nowMs - simLastUpdateMs) / 1000.0f;
+  simLastUpdateMs = nowMs;
+  if (dtSec < SIM_MIN_DT_SEC) {
+    dtSec = SIM_MIN_DT_SEC;
+  } else if (dtSec > SIM_MAX_DT_SEC) {
+    dtSec = SIM_MAX_DT_SEC;
+  }
+
+  simCogDeg = normalizeHeadingDeg(simCogDeg + randomRangeF(-SIM_HEADING_JITTER_DEG, SIM_HEADING_JITTER_DEG));
+  const float targetSogKnots = randomRangeF(SIM_MIN_SOG_KN, SIM_MAX_SOG_KN);
+  simSogKnots += (targetSogKnots - simSogKnots) * 0.35f;
+  if (simSogKnots < SIM_MIN_SOG_KN) {
+    simSogKnots = SIM_MIN_SOG_KN;
+  } else if (simSogKnots > SIM_MAX_SOG_KN) {
+    simSogKnots = SIM_MAX_SOG_KN;
+  }
+
+  const float speedMps = simSogKnots / SIM_KNOTS_PER_MPS;
+  const float headingRad = simCogDeg * DEG_TO_RAD;
+  const float eastVelMps = sinf(headingRad) * speedMps;
+  const float northVelMps = cosf(headingRad) * speedMps;
+
+  float nextEastM = simOffsetEastM + eastVelMps * dtSec;
+  float nextNorthM = simOffsetNorthM + northVelMps * dtSec;
+  const float distanceM = sqrtf((nextEastM * nextEastM) + (nextNorthM * nextNorthM));
+  if (distanceM > SIM_RADIUS_M) {
+    const float scale = SIM_RADIUS_M / distanceM;
+    nextEastM *= scale;
+    nextNorthM *= scale;
+    const float inwardCogDeg = atan2f(-nextEastM, -nextNorthM) * 180.0f / PI;
+    simCogDeg = normalizeHeadingDeg(inwardCogDeg + randomRangeF(-25.0f, 25.0f));
+  }
+
+  simOffsetEastM = nextEastM;
+  simOffsetNorthM = nextNorthM;
 }
 
 void persistIdentity() {
@@ -577,13 +669,17 @@ void sendEnvelopeOverBle(const String &msgType, const String &payloadJson, bool 
   }
 }
 
-void sendCommandAck(const String &ackForMsgId, const String &status, const String &errorCode, const String &errorDetail) {
+void sendCommandAck(const String &ackForMsgId, const String &status, const String &errorCode, const String &errorDetail, const String &extraFields = "") {
   String payload = "{";
   bool first = true;
   appendJsonField(payload, first, "ackForMsgId", jsonString(ackForMsgId));
   appendJsonField(payload, first, "status", jsonString(status));
   appendJsonField(payload, first, "errorCode", errorCode.length() ? jsonString(errorCode) : "null");
   appendJsonField(payload, first, "errorDetail", errorDetail.length() ? jsonString(errorDetail) : "null");
+  if (extraFields.length() > 0) {
+    payload += ",";
+    payload += extraFields;
+  }
   payload += "}";
   sendEnvelopeOverBle("command.ack", payload, false);
 }
@@ -800,11 +896,19 @@ AlarmLevel evaluateAlarm(const TelemetrySample &in) {
 
 // Placeholder NMEA2000 reader.
 void readTelemetry(TelemetrySample &out, unsigned long nowMs) {
+  updateSimMotion(nowMs);
+
+  // x = east/west, y = north/south in local meters.
+  const float eastOffsetM = simOffsetEastM;
+  const float northOffsetM = simOffsetNorthM;
+  const float cosLat = cosf(SIM_CENTER_LAT_DEG * DEG_TO_RAD);
+  const float metersPerDegLon = SIM_METERS_PER_DEG_LAT * (cosLat > 0.01f ? cosLat : 0.01f);
+
   out.gpsValid = true;
-  out.latDeg = 54.3200f;
-  out.lonDeg = 10.1400f;
-  out.cogDeg = fmodf((nowMs / 2000.0f) * 6.0f, 360.0f);
-  out.sogKnots = 0.2f;
+  out.latDeg = SIM_CENTER_LAT_DEG + (northOffsetM / SIM_METERS_PER_DEG_LAT);
+  out.lonDeg = SIM_CENTER_LON_DEG + (eastOffsetM / metersPerDegLon);
+  out.cogDeg = simCogDeg;
+  out.sogKnots = simSogKnots;
   out.depthM = 3.1f;
   out.windKnots = 12.5f;
   out.windDirDeg = 205.0f;
@@ -929,7 +1033,83 @@ CommandResult makeResult(const String &status, const String &errorCode = "", con
   result.status = status;
   result.errorCode = errorCode;
   result.errorDetail = errorDetail;
+  result.ackExtraFields = "";
   return result;
+}
+
+String wifiSecurityLabel(wifi_auth_mode_t auth) {
+  switch (auth) {
+    case WIFI_AUTH_OPEN:
+      return "open";
+#if defined(WIFI_AUTH_WPA3_PSK)
+    case WIFI_AUTH_WPA3_PSK:
+      return "wpa3";
+#endif
+#if defined(WIFI_AUTH_WPA2_WPA3_PSK)
+    case WIFI_AUTH_WPA2_WPA3_PSK:
+      return "wpa3";
+#endif
+    case WIFI_AUTH_WPA2_PSK:
+      return "wpa2";
+#if defined(WIFI_AUTH_WPA_PSK)
+    case WIFI_AUTH_WPA_PSK:
+      return "wpa2";
+#endif
+#if defined(WIFI_AUTH_WPA_WPA2_PSK)
+    case WIFI_AUTH_WPA_WPA2_PSK:
+      return "wpa2";
+#endif
+    default:
+      return "unknown";
+  }
+}
+
+bool buildWifiScanNetworksJson(int maxResults, bool includeHidden, String &networksJson, String &scanError) {
+  const int limitedMax = max(1, min(maxResults, SIM_WIFI_SCAN_MAX_RESULTS));
+  const int found = WiFi.scanNetworks(false, includeHidden);
+  if (found < 0) {
+    scanError = "wifi scan failed";
+    WiFi.scanDelete();
+    return false;
+  }
+
+  networksJson = "[";
+  bool firstNetwork = true;
+  int emitted = 0;
+  for (int i = 0; i < found && emitted < limitedMax; i++) {
+    const String ssid = WiFi.SSID(i);
+    const bool hidden = ssid.length() == 0;
+    if (hidden && !includeHidden) {
+      continue;
+    }
+
+    if (!firstNetwork) {
+      networksJson += ",";
+    }
+    networksJson += "{";
+    bool firstField = true;
+    appendJsonField(networksJson, firstField, "ssid", jsonString(ssid));
+    appendJsonField(networksJson, firstField, "security", jsonString(wifiSecurityLabel((wifi_auth_mode_t)WiFi.encryptionType(i))));
+    appendJsonField(networksJson, firstField, "rssi", String(WiFi.RSSI(i)));
+    appendJsonField(networksJson, firstField, "channel", String(WiFi.channel(i)));
+    appendJsonField(networksJson, firstField, "hidden", jsonBool(hidden));
+    networksJson += "}";
+    firstNetwork = false;
+    emitted++;
+  }
+  networksJson += "]";
+  WiFi.scanDelete();
+  return true;
+}
+
+void sendOnboardingWifiScanResult(const String &requestId, const String &networksJson) {
+  String payload = "{";
+  bool first = true;
+  appendJsonField(payload, first, "requestId", jsonString(requestId));
+  appendJsonField(payload, first, "completedAt", String((unsigned long)millis()));
+  appendJsonField(payload, first, "networks", networksJson);
+  payload += "}";
+  sendEnvelopeOverBle("onboarding.wifi.scan_result", payload, false);
 }
 
 bool applyWiFiConfigPatch(const String &raw, String &errorCode, String &errorDetail) {
@@ -1012,6 +1192,71 @@ CommandResult handleOnboardingRequestSecret() {
   return makeResult("ok");
 }
 
+CommandResult handleOnboardingWifiScan(const ParsedEnvelope &envelope, const String &raw) {
+  String requestId = envelope.msgId;
+  extractJsonStringValue(raw, "requestId", requestId);
+  requestId.trim();
+  if (requestId.length() == 0) {
+    requestId = envelope.msgId;
+  }
+
+  int maxResults = 20;
+  extractJsonIntValue(raw, "maxResults", maxResults);
+  bool includeHidden = false;
+  extractJsonBoolValue(raw, "includeHidden", includeHidden);
+
+  String networksJson = "[]";
+  String scanError = "";
+  if (!buildWifiScanNetworksJson(maxResults, includeHidden, networksJson, scanError)) {
+    return makeResult("rejected", "DEVICE_FAILED", scanError);
+  }
+
+  sendOnboardingWifiScanResult(requestId, networksJson);
+  CommandResult result = makeResult("ok");
+  result.ackExtraFields = "\"requestId\":" + jsonString(requestId) + ",\"networks\":" + networksJson;
+  return result;
+}
+
+CommandResult handleOnboardingWifiConnect(const String &raw) {
+  const unsigned long nowMs = millis();
+  if (!isPrivilegedSessionActive(nowMs)) {
+    return makeResult("rejected", "AUTH_FAILED", "pair mode and paired session required");
+  }
+
+  String ssid = "";
+  String passphrase = "";
+  String security = wifiConfig.security.length() ? wifiConfig.security : "wpa2";
+  String country = wifiConfig.country.length() ? wifiConfig.country : "DE";
+  bool hidden = wifiConfig.hidden;
+
+  const bool hasSsid = extractJsonStringByAnyKey(raw, "network.wifi.ssid", "ssid", ssid);
+  extractJsonStringByAnyKey(raw, "network.wifi.passphrase", "passphrase", passphrase);
+  extractJsonStringByAnyKey(raw, "network.wifi.security", "security", security);
+  extractJsonStringByAnyKey(raw, "network.wifi.country", "country", country);
+  extractJsonBoolByAnyKey(raw, "network.wifi.hidden", "hidden", hidden);
+
+  if (!hasSsid || ssid.length() == 0) {
+    return makeResult("rejected", "INVALID_PAYLOAD", "ssid is required");
+  }
+  if (security.length() == 0) {
+    security = "wpa2";
+  }
+  if (country.length() == 0) {
+    country = "DE";
+  }
+
+  wifiConfig.ssid = ssid;
+  wifiConfig.passphrase = passphrase;
+  wifiConfig.security = security;
+  wifiConfig.country = country;
+  wifiConfig.hidden = hidden;
+  wifiConfig.version = max(wifiConfig.version + 1, 1);
+  persistWiFiConfig();
+  scheduleWifiConnectNow();
+  sendStatusPatch();
+  return makeResult("ok");
+}
+
 CommandResult handleAnchorRise() {
   anchorState = "up";
   anchorPositionValid = false;
@@ -1048,6 +1293,12 @@ CommandResult dispatchMessage(const ParsedEnvelope &envelope, const String &raw,
   }
   if (envelope.msgType == "onboarding.request_secret") {
     return handleOnboardingRequestSecret();
+  }
+  if (envelope.msgType == "onboarding.wifi.scan") {
+    return handleOnboardingWifiScan(envelope, raw);
+  }
+  if (envelope.msgType == "onboarding.wifi.connect") {
+    return handleOnboardingWifiConnect(raw);
   }
   if (envelope.msgType == "status.snapshot.request") {
     sendStatusSnapshot();
@@ -1099,7 +1350,7 @@ void processInboundMessage(const String &raw, InboundSource source) {
     envelope.msgType == "config.patch" ||
     envelope.msgType.startsWith("onboarding.");
   if (shouldAck) {
-    sendCommandAck(envelope.msgId, result.status, result.errorCode, result.errorDetail);
+    sendCommandAck(envelope.msgId, result.status, result.errorCode, result.errorDetail, result.ackExtraFields);
   }
 }
 
