@@ -55,9 +55,13 @@
     padding: 0.55rem;
     max-height: calc(100dvh - var(--am-tabbar-height) - 7.4rem);
     overflow: auto;
-    display: grid;
+    display: flex;
+    flex-direction: column;
     gap: 0.45rem;
     background: rgba(0, 0, 0, 0.08);
+    color: rgba(236, 244, 248, 0.96);
+    overflow-y: auto;
+    overflow-x: hidden;
   }
 
   .debugging-empty {
@@ -71,6 +75,8 @@
     border-radius: 0.6rem;
     background: rgba(0, 0, 0, 0.2);
     overflow: hidden;
+    color: inherit;
+    flex: 0 0 auto;
   }
 
   .debug-message-header {
@@ -92,6 +98,7 @@
     text-transform: uppercase;
     letter-spacing: 0.01em;
     background: rgba(255, 255, 255, 0.12);
+    color: rgba(241, 247, 251, 0.96);
   }
 
   .debug-chip.direction.incoming {
@@ -112,7 +119,7 @@
 
   .debug-time {
     margin-left: auto;
-    opacity: 0.78;
+    color: rgba(218, 232, 239, 0.88);
     font-size: 0.75rem;
   }
 
@@ -128,5 +135,6 @@
     min-height: 0;
     font-size: 0.72rem;
     line-height: 1.33;
+    color: rgba(237, 244, 248, 0.97);
   }
 </style>

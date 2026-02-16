@@ -524,7 +524,7 @@ export function appendDebugMessage(input: {
     msgType: input.msgType.trim() || "unknown",
     body: debugMessageBody(input.body),
   };
-  appState.debugMessages = [...appState.debugMessages, entry];
+  appState.debugMessages = [entry, ...appState.debugMessages];
 }
 
 export function initAppStateEffects(): void {

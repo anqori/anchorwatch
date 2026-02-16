@@ -4,6 +4,7 @@ import {
   BLE_AUTH_UUID,
   BLE_CHUNK_TIMEOUT_MS,
   BLE_CONTROL_TX_UUID,
+  BLE_DEVICE_NAME_PREFIX,
   BLE_EVENT_RX_UUID,
   BLE_SERVICE_UUID,
   PROTOCOL_VERSION,
@@ -113,10 +114,7 @@ export class DeviceConnectionBleNative implements DeviceConnectionBleLike {
       throw new Error("No previously paired BLE device. Use Bluetooth search once.");
     }
 
-    const nextDevice = maybeKnown ?? await BleClient.requestDevice({
-      services: [BLE_SERVICE_UUID],
-      optionalServices: [BLE_SERVICE_UUID],
-    });
+    const nextDevice = maybeKnown ?? await this.requestDeviceFromPicker();
     await this.connectToDevice(nextDevice);
   }
 
@@ -270,6 +268,21 @@ export class DeviceConnectionBleNative implements DeviceConnectionBleLike {
     this.initPromise = null;
   }
 
+  private async requestDeviceFromPicker(): Promise<BleDevice> {
+    try {
+      return await BleClient.requestDevice({
+        namePrefix: BLE_DEVICE_NAME_PREFIX,
+        optionalServices: [BLE_SERVICE_UUID],
+      });
+    } catch {
+      // Some phone stacks fail to list our device when only filtered results are shown.
+      // Fallback to a broad picker and validate required characteristics after connect.
+      return await BleClient.requestDevice({
+        optionalServices: [BLE_SERVICE_UUID],
+      });
+    }
+  }
+
   private async connectToDevice(device: BleDevice): Promise<void> {
     const deviceId = device.deviceId.trim();
     if (!deviceId) {
@@ -282,14 +295,6 @@ export class DeviceConnectionBleNative implements DeviceConnectionBleLike {
       this.assertRequiredCharacteristics(services);
       await BleClient.startNotifications(deviceId, BLE_SERVICE_UUID, BLE_EVENT_RX_UUID, this.onBleNotification);
 
-      if (Capacitor.getPlatform() === "android") {
-        try {
-          await BleClient.requestConnectionPriority(deviceId, ConnectionPriority.CONNECTION_PRIORITY_HIGH);
-        } catch {
-          // Connection priority is optional.
-        }
-      }
-
       this.state.deviceId = deviceId;
       this.state.deviceName = device.name?.trim() || "";
       this.state.connected = true;
@@ -299,9 +304,17 @@ export class DeviceConnectionBleNative implements DeviceConnectionBleLike {
         name: this.state.deviceName,
       };
       setLastBleDevice(deviceId, this.state.deviceName);
-
-      await this.refreshAuthState();
       this.emitStatus();
+
+      if (Capacitor.getPlatform() === "android") {
+        void BleClient.requestConnectionPriority(deviceId, ConnectionPriority.CONNECTION_PRIORITY_HIGH).catch(() => {
+          // Connection priority is optional.
+        });
+      }
+
+      void this.refreshAuthState().then(() => {
+        this.emitStatus();
+      });
     } catch (error) {
       try {
         await BleClient.disconnect(deviceId);
@@ -517,6 +530,18 @@ export class DeviceConnectionBleNative implements DeviceConnectionBleLike {
   }
 
   private onBleNotification = (value: DataView): void => {
+    if (!this.state.connected) {
+      const recoveredDeviceId = this.state.deviceId.trim() || this.reconnectDevice?.deviceId?.trim() || "";
+      if (recoveredDeviceId) {
+        this.state.connected = true;
+        this.state.deviceId = recoveredDeviceId;
+        if (!this.state.deviceName) {
+          this.state.deviceName = this.reconnectDevice?.name?.trim() || "";
+        }
+        this.emitStatus();
+      }
+    }
+
     const bytes = dataViewToBytes(value);
     if (!bytes.length) {
       return;
@@ -550,10 +575,38 @@ export class DeviceConnectionBleNative implements DeviceConnectionBleLike {
   };
 
   private onBleDisconnected = (deviceId: string): void => {
-    if (!this.state.deviceId || this.state.deviceId === deviceId) {
-      this.handleDisconnectedState();
-    }
+    void this.handleDisconnectSignal(deviceId);
   };
+
+  private async handleDisconnectSignal(deviceId: string): Promise<void> {
+    const currentDeviceId = this.state.deviceId.trim();
+    if (!currentDeviceId) {
+      this.handleDisconnectedState();
+      return;
+    }
+
+    if (deviceId.trim() && !this.sameDeviceId(currentDeviceId, deviceId)) {
+      return;
+    }
+
+    try {
+      const connectedDevices = await BleClient.getConnectedDevices([BLE_SERVICE_UUID]);
+      const stillConnected = connectedDevices.some((candidate) => this.sameDeviceId(candidate.deviceId, currentDeviceId));
+      if (stillConnected) {
+        const match = connectedDevices.find((candidate) => this.sameDeviceId(candidate.deviceId, currentDeviceId));
+        if (match?.name?.trim() && !this.state.deviceName) {
+          this.state.deviceName = match.name.trim();
+        }
+        this.state.connected = true;
+        this.emitStatus();
+        return;
+      }
+    } catch {
+      // If verification fails, fall through to local disconnect handling.
+    }
+
+    this.handleDisconnectedState();
+  }
 
   private handleDisconnectedState(): void {
     this.state.connected = false;
@@ -623,6 +676,10 @@ export class DeviceConnectionBleNative implements DeviceConnectionBleLike {
   }
 
   private sameUuid(left: string, right: string): boolean {
+    return left.trim().toLowerCase() === right.trim().toLowerCase();
+  }
+
+  private sameDeviceId(left: string, right: string): boolean {
     return left.trim().toLowerCase() === right.trim().toLowerCase();
   }
 
