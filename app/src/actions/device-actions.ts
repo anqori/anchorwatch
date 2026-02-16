@@ -65,8 +65,8 @@ function ensureConfiguredDeviceForConnectionSelection(): void {
 
 export async function startDeviceRuntime(): Promise<void> {
   const active = defaultConnectionForMode(appState.connection.mode, appState.connection.runtimeMode);
-  await deviceLinker.setConnection(active, false);
   await deviceLinker.start();
+  await deviceLinker.setConnection(active, false);
 }
 
 export async function stopDeviceRuntime(): Promise<void> {

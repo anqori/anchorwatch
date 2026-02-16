@@ -43,6 +43,10 @@ export class DeviceLinker {
 
   private unsubscribeStatus: (() => void) | null = null;
 
+  private boundConnection: DeviceConnection | null = null;
+
+  private subscriptionEpoch = 0;
+
   private bleRecoveryInFlight = false;
 
   private lastBleRecoveryAttemptAtMs = 0;
@@ -59,14 +63,20 @@ export class DeviceLinker {
     if (this.running) {
       return;
     }
+    let started = false;
     this.running = true;
-    await this.bindConnection(this.activeConnection, false);
-
-    this.interval = setInterval(() => {
+    try {
+      await this.bindConnection(this.activeConnection, false);
+      this.interval = setInterval(() => {
+        void this.tick();
+      }, 250);
       void this.tick();
-    }, 250);
-
-    void this.tick();
+      started = true;
+    } finally {
+      if (!started) {
+        this.running = false;
+      }
+    }
   }
 
   async stop(): Promise<void> {
@@ -77,6 +87,49 @@ export class DeviceLinker {
       this.interval = null;
     }
 
+    this.clearSubscriptions();
+
+    await this.activeConnection.disconnect();
+  }
+
+  async setConnection(next: DeviceConnection, disconnectPrevious = true): Promise<void> {
+    await this.bindConnection(next, disconnectPrevious);
+  }
+
+  private async bindConnection(next: DeviceConnection, disconnectPrevious: boolean): Promise<void> {
+    this.switchingConnection = true;
+    try {
+      const previous = this.activeConnection;
+      const switchedConnection = previous !== next;
+
+      if (switchedConnection) {
+        this.clearSubscriptions();
+
+        if (disconnectPrevious) {
+          await previous.disconnect();
+        }
+
+        this.activeConnection = next;
+        setActiveConnection(next.kind);
+      }
+
+      const rebound = this.bindSubscriptions(next);
+      let shouldPrime = rebound;
+
+      if (!next.isConnected()) {
+        await next.connect();
+        shouldPrime = true;
+      }
+
+      if (shouldPrime) {
+        void this.primeConnection(next);
+      }
+    } finally {
+      this.switchingConnection = false;
+    }
+  }
+
+  private clearSubscriptions(): void {
     if (this.unsubscribeEvents) {
       this.unsubscribeEvents();
       this.unsubscribeEvents = null;
@@ -85,58 +138,41 @@ export class DeviceLinker {
       this.unsubscribeStatus();
       this.unsubscribeStatus = null;
     }
-
-    await this.activeConnection.disconnect();
+    this.boundConnection = null;
   }
 
-  async setConnection(next: DeviceConnection, disconnectPrevious = true): Promise<void> {
-    if (next === this.activeConnection) {
-      if (!next.isConnected()) {
-        await next.connect();
-        void this.primeConnection(next);
-      }
-      return;
+  private bindSubscriptions(connection: DeviceConnection): boolean {
+    if (this.boundConnection === connection && this.unsubscribeEvents && this.unsubscribeStatus) {
+      return false;
     }
-    await this.bindConnection(next, disconnectPrevious);
+
+    this.clearSubscriptions();
+    const epoch = ++this.subscriptionEpoch;
+    this.boundConnection = connection;
+
+    this.unsubscribeEvents = connection.subscribeEvents((event) => {
+      if (!this.isCurrentSubscription(connection, epoch)) {
+        return;
+      }
+      this.handleEvent(event);
+    });
+
+    this.unsubscribeStatus = connection.subscribeStatus((status) => {
+      if (!this.isCurrentSubscription(connection, epoch)) {
+        return;
+      }
+      this.handleConnectionStatus(status);
+    });
+    return true;
   }
 
-  private async bindConnection(next: DeviceConnection, disconnectPrevious: boolean): Promise<void> {
-    this.switchingConnection = true;
-    try {
-      const previous = this.activeConnection;
-
-      if (this.unsubscribeEvents) {
-        this.unsubscribeEvents();
-        this.unsubscribeEvents = null;
-      }
-      if (this.unsubscribeStatus) {
-        this.unsubscribeStatus();
-        this.unsubscribeStatus = null;
-      }
-
-      if (disconnectPrevious) {
-        await previous.disconnect();
-      }
-
-      this.activeConnection = next;
-      setActiveConnection(next.kind);
-
-      this.unsubscribeEvents = next.subscribeEvents((event) => {
-        this.handleEvent(event);
-      });
-
-      this.unsubscribeStatus = next.subscribeStatus((status) => {
-        void this.handleConnectionStatus(status);
-      });
-
-      await next.connect();
-      void this.primeConnection(next);
-    } finally {
-      this.switchingConnection = false;
-    }
+  private isCurrentSubscription(connection: DeviceConnection, epoch: number): boolean {
+    return this.subscriptionEpoch === epoch
+      && this.boundConnection === connection
+      && this.activeConnection === connection;
   }
 
-  private async handleConnectionStatus(status: DeviceConnectionStatus): Promise<void> {
+  private handleConnectionStatus(status: DeviceConnectionStatus): void {
     setActiveConnectionConnected(status.connected);
 
     if (this.activeConnection.kind === "bluetooth") {
@@ -156,6 +192,21 @@ export class DeviceLinker {
   }
 
   private handleEvent(event: DeviceEvent): void {
+    // If BLE payloads are flowing, the BLE link is effectively alive even if a status callback was missed.
+    if (
+      this.activeConnection.kind === "bluetooth"
+      && (event.source === "ble/eventRx" || event.source === "ble/snapshot")
+    ) {
+      if (!appState.connection.activeConnectionConnected) {
+        setActiveConnectionConnected(true);
+      }
+      if (!appState.ble.connected) {
+        setBleConnectionState(true, appState.ble.deviceName || "");
+      }
+      markConnectedViaBleOnce();
+      markBleMessageSeen(Date.now());
+    }
+
     if (event.boatId) {
       setBoatId(event.boatId);
     }
