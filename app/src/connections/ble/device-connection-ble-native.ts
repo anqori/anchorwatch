@@ -193,8 +193,12 @@ export class DeviceConnectionBleNative implements DeviceConnectionBleLike {
         maxResults,
         includeHidden,
       }, true);
+      const ackRequestId = typeof ack?.requestId === "string" ? ack.requestId.trim() : "";
+      if (ackRequestId && ackRequestId !== requestId) {
+        this.rekeyPendingWifiScanRequest(requestId, ackRequestId);
+      }
       if (ack && "networks" in ack) {
-        this.handleWifiScanResult({ requestId, networks: ack.networks });
+        this.handleWifiScanResult({ requestId: ackRequestId || requestId, networks: ack.networks });
       }
     } catch (error) {
       this.rejectPendingWifiScanRequest(requestId, error);
@@ -470,19 +474,33 @@ export class DeviceConnectionBleNative implements DeviceConnectionBleLike {
     pending.reject(error instanceof Error ? error : new Error(String(error)));
   }
 
-  private handleWifiScanResult(payload: JsonRecord): void {
-    const requestId = typeof payload.requestId === "string" ? payload.requestId.trim() : "";
-    if (!requestId) {
+  private rekeyPendingWifiScanRequest(previousRequestId: string, nextRequestId: string): void {
+    if (previousRequestId === nextRequestId || this.pendingWifiScans.has(nextRequestId)) {
       return;
     }
+    const pending = this.pendingWifiScans.get(previousRequestId);
+    if (!pending) {
+      return;
+    }
+    this.pendingWifiScans.delete(previousRequestId);
+    this.pendingWifiScans.set(nextRequestId, pending);
+  }
 
-    const pending = this.pendingWifiScans.get(requestId);
+  private handleWifiScanResult(payload: JsonRecord): void {
+    const requestId = typeof payload.requestId === "string" ? payload.requestId.trim() : "";
+    let pendingKey = requestId;
+    let pending = pendingKey ? this.pendingWifiScans.get(pendingKey) : undefined;
+    if (!pending && this.pendingWifiScans.size === 1) {
+      const [fallbackKey, fallbackPending] = this.pendingWifiScans.entries().next().value as [string, PendingWifiScanRequest];
+      pendingKey = fallbackKey;
+      pending = fallbackPending;
+    }
     if (!pending) {
       return;
     }
 
     clearTimeout(pending.timeout);
-    this.pendingWifiScans.delete(requestId);
+    this.pendingWifiScans.delete(pendingKey);
 
     const errorCode = typeof payload.errorCode === "string" ? payload.errorCode.trim() : "";
     const errorDetail = typeof payload.errorDetail === "string" ? payload.errorDetail.trim() : "";

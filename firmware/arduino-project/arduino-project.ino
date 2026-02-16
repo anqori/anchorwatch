@@ -37,12 +37,17 @@ static const char *BLE_AUTH_UUID = "9f2d0004-87aa-4f4a-a0ea-4d5d4f415354";
 
 // Timing constants.
 static const unsigned long MAIN_TICK_MS = 1000UL;
-static const unsigned long BLE_STATUS_CADENCE_MS = 1000UL;
+static const unsigned long BLE_STATUS_CADENCE_MS = 3000UL;
 static const unsigned long BLE_CHUNK_TIMEOUT_MS = 2000UL;
 static const unsigned long PAIR_MODE_TTL_MS = 10UL * 60UL * 1000UL;
 static const unsigned long PRIV_SESSION_TTL_MS = 10UL * 60UL * 1000UL;
 static const unsigned long WIFI_RETRY_MAX_MS = 30UL * 1000UL;
 static const size_t BLE_CHUNK_MAX_PAYLOAD = 120U;
+static const unsigned long BLE_NOTIFY_INTER_CHUNK_DELAY_MS = 40UL;
+static const unsigned long BLE_NOTIFY_RETRY_DELAY_MS = 150UL;
+static const uint8_t BLE_NOTIFY_MAX_RETRIES = 1;
+static const unsigned long BLE_NOTIFY_ENOMEM_BACKOFF_MS = 5000UL;
+static const int BLE_NOTIFY_NIMBLE_ENOMEM = 6;
 
 // Fake telemetry route area: 200m radius around Plueschowhafen, Kiel.
 static const float SIM_CENTER_LAT_DEG = 54.38329f;
@@ -156,6 +161,11 @@ BLECharacteristic *controlTxCharacteristic = nullptr;
 BLECharacteristic *eventRxCharacteristic = nullptr;
 BLECharacteristic *snapshotCharacteristic = nullptr;
 BLECharacteristic *authCharacteristic = nullptr;
+BLECharacteristicCallbacks::Status bleLastEventNotifyStatus = BLECharacteristicCallbacks::Status::SUCCESS_NOTIFY;
+uint32_t bleLastEventNotifyCode = 0;
+bool bleLastEventNotifyValid = false;
+bool bleEventSubscriberActive = false;
+unsigned long bleNotifyBackoffUntilMs = 0;
 
 void resetBleAssembler() {
   bleAssembler.active = false;
@@ -623,7 +633,27 @@ bool tryAssembleBleMessage(const uint8_t *data, size_t len, String &completedJso
   return true;
 }
 
-bool notifyBleChunked(const String &msgId, const String &json) {
+size_t resolveBleChunkPayloadLimit() {
+  size_t limit = BLE_CHUNK_MAX_PAYLOAD;
+  if (!bleConnected || bleServer == nullptr) {
+    return limit;
+  }
+  const uint16_t connId = bleServer->getConnId();
+  if (connId == BLE_HS_CONN_HANDLE_NONE) {
+    return limit;
+  }
+  const uint16_t peerMtu = bleServer->getPeerMTU(connId);
+  if (peerMtu <= 9) {
+    return 1;
+  }
+  const size_t mtuLimited = (size_t)peerMtu - 9U;  // ATT value limit (mtu-3) minus chunk header (6).
+  if (mtuLimited < 1) {
+    return 1;
+  }
+  return min(limit, mtuLimited);
+}
+
+bool notifyBleChunked(const String &msgId, const String &json, bool retryOnEnomem = true) {
   if (!bleConnected || eventRxCharacteristic == nullptr) {
     if (debugProtocol) {
       Serial.print("[proto] tx drop msgId=");
@@ -635,8 +665,13 @@ bool notifyBleChunked(const String &msgId, const String &json) {
 
   const uint32_t msgId32 = fnv1a32(msgId);
   const size_t total = json.length();
-  size_t partCount = total / BLE_CHUNK_MAX_PAYLOAD;
-  if ((total % BLE_CHUNK_MAX_PAYLOAD) != 0 || partCount == 0) {
+  const size_t chunkPayloadLimit = resolveBleChunkPayloadLimit();
+  if (chunkPayloadLimit == 0) {
+    return false;
+  }
+
+  size_t partCount = total / chunkPayloadLimit;
+  if ((total % chunkPayloadLimit) != 0 || partCount == 0) {
     partCount++;
   }
   if (partCount > 255) {
@@ -650,8 +685,9 @@ bool notifyBleChunked(const String &msgId, const String &json) {
 
   uint8_t frame[BLE_CHUNK_MAX_PAYLOAD + 6];
   for (size_t part = 0; part < partCount; part++) {
-    const size_t offset = part * BLE_CHUNK_MAX_PAYLOAD;
-    const size_t chunkLen = min(BLE_CHUNK_MAX_PAYLOAD, total - offset);
+    const size_t offset = part * chunkPayloadLimit;
+    const size_t chunkLen = min(chunkPayloadLimit, total - offset);
+    const uint8_t maxAttempts = retryOnEnomem ? BLE_NOTIFY_MAX_RETRIES : 0;
 
     frame[0] = msgId32 & 0xFF;
     frame[1] = (msgId32 >> 8) & 0xFF;
@@ -663,21 +699,69 @@ bool notifyBleChunked(const String &msgId, const String &json) {
       frame[6 + i] = (uint8_t)json[offset + i];
     }
 
-    eventRxCharacteristic->setValue(frame, chunkLen + 6);
-    eventRxCharacteristic->notify();
-    delay(4);
+    bool partSent = false;
+    for (uint8_t attempt = 0; attempt <= maxAttempts; attempt++) {
+      bleLastEventNotifyValid = false;
+      bleLastEventNotifyCode = 0;
+      eventRxCharacteristic->setValue(frame, chunkLen + 6);
+      eventRxCharacteristic->notify();
+
+      const bool notifySuccess =
+        bleLastEventNotifyValid &&
+        (bleLastEventNotifyStatus == BLECharacteristicCallbacks::Status::SUCCESS_NOTIFY ||
+         bleLastEventNotifyStatus == BLECharacteristicCallbacks::Status::SUCCESS_INDICATE);
+      if (notifySuccess) {
+        partSent = true;
+        break;
+      }
+
+      const bool notifyOutOfMemory =
+        bleLastEventNotifyValid &&
+        bleLastEventNotifyStatus == BLECharacteristicCallbacks::Status::ERROR_GATT &&
+        (int)bleLastEventNotifyCode == BLE_NOTIFY_NIMBLE_ENOMEM;
+      if (!notifyOutOfMemory || attempt >= maxAttempts) {
+        if (notifyOutOfMemory) {
+          bleNotifyBackoffUntilMs = millis() + BLE_NOTIFY_ENOMEM_BACKOFF_MS;
+        }
+        if (debugProtocol) {
+          Serial.print("[proto] tx drop msgId=");
+          Serial.print(msgId);
+          Serial.print(" reason=notify-failed part=");
+          Serial.print((int)part);
+          Serial.print(" partCount=");
+          Serial.print((int)partCount);
+          Serial.print(" status=");
+          Serial.print((int)bleLastEventNotifyStatus);
+          Serial.print(" code=");
+          Serial.println((int)bleLastEventNotifyCode);
+        }
+        return false;
+      }
+
+      delay(BLE_NOTIFY_RETRY_DELAY_MS);
+    }
+
+    if (!partSent) {
+      return false;
+    }
+    delay(BLE_NOTIFY_INTER_CHUNK_DELAY_MS);
   }
   return true;
 }
 
 void sendEnvelopeOverBle(const String &msgType, const String &payloadJson, bool requiresAck = false) {
   OutboundEnvelope envelope = makeEnvelope(msgType, payloadJson, requiresAck);
-  const bool sent = notifyBleChunked(envelope.msgId, envelope.json);
+  const bool retryOnEnomem = msgType != "status.patch";
+  const bool sent = notifyBleChunked(envelope.msgId, envelope.json, retryOnEnomem);
   if (debugProtocol) {
     Serial.print("[proto] tx ");
     Serial.print(msgType);
     Serial.print(" bytes=");
     Serial.print(envelope.json.length());
+    Serial.print(" chunkMax=");
+    Serial.print(resolveBleChunkPayloadLimit());
+    Serial.print(" retryOnEnomem=");
+    Serial.print(retryOnEnomem ? "true" : "false");
     Serial.print(" sent=");
     Serial.println(sent ? "true" : "false");
   }
@@ -1471,6 +1555,10 @@ class AnchorServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer *server) override {
     (void)server;
     bleConnected = true;
+    bleEventSubscriberActive = false;
+    bleNotifyBackoffUntilMs = 0;
+    bleLastEventNotifyValid = false;
+    bleLastEventNotifyCode = 0;
     lastBleStatusAtMs = 0;
     resetBleAssembler();
     refreshAuthCharacteristic();
@@ -1480,6 +1568,10 @@ class AnchorServerCallbacks : public BLEServerCallbacks {
   void onDisconnect(BLEServer *server) override {
     (void)server;
     bleConnected = false;
+    bleEventSubscriberActive = false;
+    bleNotifyBackoffUntilMs = 0;
+    bleLastEventNotifyValid = false;
+    bleLastEventNotifyCode = 0;
     privSessionUntilMs = 0;
     resetBleAssembler();
     BLEDevice::startAdvertising();
@@ -1497,6 +1589,47 @@ class ControlTxCallbacks : public BLECharacteristicCallbacks {
     }
     processControlTxWrite(data, len);
   }
+};
+
+class EventRxCallbacks : public BLECharacteristicCallbacks {
+ public:
+  void onStatus(BLECharacteristic *characteristic, Status status, uint32_t code) override {
+    (void)characteristic;
+    const unsigned long nowMs = millis();
+    bleLastEventNotifyStatus = status;
+    bleLastEventNotifyCode = code;
+    bleLastEventNotifyValid = true;
+    if (status == BLECharacteristicCallbacks::Status::SUCCESS_NOTIFY ||
+        status == BLECharacteristicCallbacks::Status::SUCCESS_INDICATE) {
+      bleEventSubscriberActive = true;
+    }
+    if (status == BLECharacteristicCallbacks::Status::ERROR_NO_SUBSCRIBER ||
+        status == BLECharacteristicCallbacks::Status::ERROR_NO_CLIENT) {
+      bleEventSubscriberActive = false;
+    }
+    if (status == BLECharacteristicCallbacks::Status::ERROR_GATT && (int)code == BLE_NOTIFY_NIMBLE_ENOMEM) {
+      bleNotifyBackoffUntilMs = nowMs + BLE_NOTIFY_ENOMEM_BACKOFF_MS;
+    }
+  }
+
+#if defined(CONFIG_NIMBLE_ENABLED)
+  void onSubscribe(BLECharacteristic *characteristic, ble_gap_conn_desc *desc, uint16_t subValue) override {
+    (void)characteristic;
+    bleEventSubscriberActive = (subValue != 0);
+    if (debugProtocol) {
+      uint16_t peerMtu = 0;
+      if (bleServer != nullptr && desc != nullptr) {
+        peerMtu = bleServer->getPeerMTU(desc->conn_handle);
+      }
+      Serial.print("[ble] event_rx subscribe=");
+      Serial.print(bleEventSubscriberActive ? "true" : "false");
+      Serial.print(" value=");
+      Serial.print(subValue);
+      Serial.print(" mtu=");
+      Serial.println(peerMtu);
+    }
+  }
+#endif
 };
 
 class SnapshotCallbacks : public BLECharacteristicCallbacks {
@@ -1559,6 +1692,7 @@ void initBle() {
     BLECharacteristic::PROPERTY_NOTIFY
   );
   eventRxCharacteristic->addDescriptor(new BLE2902());
+  eventRxCharacteristic->setCallbacks(new EventRxCallbacks());
 
   snapshotCharacteristic = bleService->createCharacteristic(
     BLE_SNAPSHOT_UUID,
@@ -1584,11 +1718,9 @@ void initBle() {
 }
 
 void emitBlePeriodicMessages(unsigned long nowMs) {
-  if (!bleConnected || nowMs - lastBleStatusAtMs < BLE_STATUS_CADENCE_MS) {
-    return;
-  }
-  lastBleStatusAtMs = nowMs;
-  sendStatusPatch();
+  (void)nowMs;
+  // Disabled: periodic status.patch pushes have caused repeated NimBLE ENOMEM on some clients.
+  // State still updates via command responses, snapshots, and explicit status.patch emits on config/anchor changes.
 }
 
 void runSerialCommand(const String &lineRaw) {

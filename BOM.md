@@ -1,5 +1,8 @@
 # Anqori AnchorWatch BOM (Berrybase-first)
 
+
+
+
 Last checked: 2026-02-12  
 Currency: EUR (incl. VAT, excl. shipping)  
 Target: 1 device, ESP32-S3 + CAN (NMEA2000 listener) + WLAN + local alarm, Grove plug-and-play style.

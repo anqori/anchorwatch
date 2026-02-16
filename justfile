@@ -67,6 +67,11 @@ firmware-monitor:
   if [[ -z "$port" ]]; then echo "PORT not set and no board auto-detected. Set PORT=/dev/tty..." >&2; exit 1; fi
   "$arduino_cli" monitor --config-file "$cli_config" --fqbn "$fqbn" -p "$port" --config "baudrate=$baud"
 
+# Monitor connected device serial output.
+# Example: PORT=/dev/ttyACM0 BAUD=115200 just device-monitor
+device-monitor:
+  just firmware-monitor
+
 # Build + upload firmware to local board.
 # Uses release tag as version when on a tagged revision, otherwise run-<timestamp>.
 firmware:
