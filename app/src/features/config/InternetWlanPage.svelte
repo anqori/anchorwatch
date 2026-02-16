@@ -42,21 +42,25 @@
   }
 </script>
 
-<Navbar title="Internet & WLAN">
+<Navbar title="Device - Configure Internet">
   {#snippet left()}
     <NavbarBackLink onclick={onBack} text="Settings" />
   {/snippet}
 </Navbar>
 
 <div class="space-y-3">
-  {#if wifiScanInFlight}
-    <div class="internet-scan-indicator hint mono" aria-live="polite">
-      <span class="internet-scan-spinner" aria-hidden="true"></span>
-      <span>Scanning WLAN networks...</span>
+  {#if wifiScanInFlight || wifiScanErrorText}
+    <div class="internet-status-card" aria-live="polite">
+      {#if wifiScanInFlight}
+        <div class="internet-scan-indicator hint mono">
+          <span class="internet-scan-spinner" aria-hidden="true"></span>
+          <span>Scanning WLAN networks...</span>
+        </div>
+      {/if}
+      {#if wifiScanErrorText}
+        <div class="hint onboarding-error">{wifiScanErrorText}</div>
+      {/if}
     </div>
-  {/if}
-  {#if wifiScanErrorText}
-    <div class="hint onboarding-error">{wifiScanErrorText}</div>
   {/if}
 
   <List strong inset class="wifi-network-list" aria-label="Available WLAN networks">
@@ -133,6 +137,15 @@
 {/if}
 
 <style>
+  .internet-status-card {
+    border: 0;
+    border-radius: 0.7rem;
+    padding: 0.7rem;
+    background: rgba(125, 125, 125, 0.08);
+    display: grid;
+    gap: 0.45rem;
+  }
+
   .internet-scan-indicator {
     display: inline-flex;
     align-items: center;

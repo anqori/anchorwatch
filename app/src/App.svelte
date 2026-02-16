@@ -62,6 +62,7 @@
     fetchTrackSnapshot,
     moveAnchorToPosition,
     raiseAnchor,
+    saveManualConnectionCredentials,
     scanWifiNetworks,
     selectBluetoothConnection,
     selectRelayConnection,
@@ -88,6 +89,7 @@
   import SummaryPage from "./features/summary/SummaryPage.svelte";
   import SettingsHomePage from "./features/config/SettingsHomePage.svelte";
   import DeviceBluetoothPage from "./features/config/DeviceBluetoothPage.svelte";
+  import DeviceManualConnectionPage from "./features/config/DeviceManualConnectionPage.svelte";
   import InternetWlanPage from "./features/config/InternetWlanPage.svelte";
   import ConnectionPage from "./features/config/ConnectionPage.svelte";
   import InfoVersionPage from "./features/config/InfoVersionPage.svelte";
@@ -796,6 +798,19 @@
     applyOpenConfigSection(navigation, nextConfigView);
   }
 
+  function openManualConnectionView(): void {
+    navigation.activeConfigView = "device_manual";
+  }
+
+  function returnToDeviceView(): void {
+    navigation.activeConfigView = "device";
+  }
+
+  async function saveManualConnectionAndReturn(boatId: string, boatSecret: string): Promise<void> {
+    await saveManualConnectionCredentials(boatId, boatSecret);
+    returnToDeviceView();
+  }
+
   $effect(() => {
     if (navigation.activeView === "config" && navigation.activeConfigView === "internet" && !connection.activeConnectionConnected) {
       goToSettingsView();
@@ -878,7 +893,7 @@
   }
 
   function canShowVizMenu(): boolean {
-    return navigation.activeView === "map" || navigation.activeView === "satellite" || navigation.activeView === "radar";
+    return navigation.activeView !== "config";
   }
 
   function toggleVizMenu(): void {
@@ -1103,7 +1118,6 @@
 
   {#if navigation.activeView === "config" && navigation.activeConfigView === "device"}
     <DeviceBluetoothPage
-      isConfigured={connection.hasConfiguredDevice}
       appState={connection.appState}
       bleSupported={connection.bleSupported}
       runtimeModeText={runtimeModeText()}
@@ -1111,12 +1125,21 @@
       boatIdText={connection.boatIdText}
       secretStatusText={connection.secretStatusText}
       connectedDeviceName={connection.connectedDeviceName}
-      reconnectAvailable={reconnectDeviceAvailable}
-      reconnectDeviceName={reconnectDeviceName}
       onBack={() => goToSettingsView()}
       onSearchDevice={() => void runAction("search device via bluetooth", searchForDeviceViaBluetooth)}
-      onReconnect={() => void runAction("reconnect last known device", reconnectLastKnownBleDevice)}
+      onOpenManualConnection={openManualConnectionView}
       onUseDemoData={() => void runAction("use fake mode", useFakeModeAndReturnHome)}
+    />
+  {/if}
+
+  {#if navigation.activeView === "config" && navigation.activeConfigView === "device_manual"}
+    <DeviceManualConnectionPage
+      boatIdText={connection.boatIdText}
+      onBack={returnToDeviceView}
+      onSave={(boatId, boatSecret) => void runAction(
+        "save manual connection",
+        () => saveManualConnectionAndReturn(boatId, boatSecret),
+      )}
     />
   {/if}
 

@@ -4,7 +4,6 @@ import {
   BLE_AUTH_UUID,
   BLE_CHUNK_TIMEOUT_MS,
   BLE_CONTROL_TX_UUID,
-  BLE_DEVICE_NAME_PREFIX,
   BLE_EVENT_RX_UUID,
   BLE_SERVICE_UUID,
   PROTOCOL_VERSION,
@@ -64,8 +63,15 @@ interface PendingTrackRequest {
   timeout: ReturnType<typeof setTimeout>;
 }
 
+interface PendingWifiScanRequest {
+  resolve: (networks: WifiScanNetwork[]) => void;
+  reject: (error: Error) => void;
+  timeout: ReturnType<typeof setTimeout>;
+}
+
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
+const WIFI_SCAN_RESULT_TIMEOUT_MS = 20_000;
 
 export class DeviceConnectionBleNative implements DeviceConnectionBleLike {
   readonly kind = "bluetooth" as const;
@@ -91,6 +97,8 @@ export class DeviceConnectionBleNative implements DeviceConnectionBleLike {
   private pendingSnapshots: PendingSnapshotRequest[] = [];
 
   private pendingTracks: PendingTrackRequest[] = [];
+
+  private pendingWifiScans = new Map<string, PendingWifiScanRequest>();
 
   private reconnectDevice: BleDevice | null = null;
 
@@ -178,12 +186,21 @@ export class DeviceConnectionBleNative implements DeviceConnectionBleLike {
 
   async commandWifiScan(maxResults: number, includeHidden: boolean): Promise<WifiScanNetwork[]> {
     const requestId = `wifi-${makeMsgId()}`;
-    const ack = await this.sendBleCommand("onboarding.wifi.scan", {
-      requestId,
-      maxResults,
-      includeHidden,
-    }, true);
-    return parseWifiScanNetworks(ack?.networks);
+    const scanResultPromise = this.makeWifiScanPromise(requestId);
+    try {
+      const ack = await this.sendBleCommand("onboarding.wifi.scan", {
+        requestId,
+        maxResults,
+        includeHidden,
+      }, true);
+      if (ack && "networks" in ack) {
+        this.handleWifiScanResult({ requestId, networks: ack.networks });
+      }
+    } catch (error) {
+      this.rejectPendingWifiScanRequest(requestId, error);
+      throw error;
+    }
+    return await scanResultPromise;
   }
 
   async commandAnchorRise(): Promise<DeviceCommandResult> {
@@ -270,13 +287,13 @@ export class DeviceConnectionBleNative implements DeviceConnectionBleLike {
 
   private async requestDeviceFromPicker(): Promise<BleDevice> {
     try {
+      // Prefer service-based filtering first to avoid missing devices whose advertised name is absent/truncated.
       return await BleClient.requestDevice({
-        namePrefix: BLE_DEVICE_NAME_PREFIX,
+        services: [BLE_SERVICE_UUID],
         optionalServices: [BLE_SERVICE_UUID],
       });
     } catch {
-      // Some phone stacks fail to list our device when only filtered results are shown.
-      // Fallback to a broad picker and validate required characteristics after connect.
+      // Fallback to broad picker and validate required characteristics after connect.
       return await BleClient.requestDevice({
         optionalServices: [BLE_SERVICE_UUID],
       });
@@ -433,6 +450,50 @@ export class DeviceConnectionBleNative implements DeviceConnectionBleLike {
     };
   }
 
+  private makeWifiScanPromise(requestId: string): Promise<WifiScanNetwork[]> {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingWifiScans.delete(requestId);
+        reject(new Error("WLAN scan result timeout"));
+      }, WIFI_SCAN_RESULT_TIMEOUT_MS);
+      this.pendingWifiScans.set(requestId, { resolve, reject, timeout });
+    });
+  }
+
+  private rejectPendingWifiScanRequest(requestId: string, error: unknown): void {
+    const pending = this.pendingWifiScans.get(requestId);
+    if (!pending) {
+      return;
+    }
+    clearTimeout(pending.timeout);
+    this.pendingWifiScans.delete(requestId);
+    pending.reject(error instanceof Error ? error : new Error(String(error)));
+  }
+
+  private handleWifiScanResult(payload: JsonRecord): void {
+    const requestId = typeof payload.requestId === "string" ? payload.requestId.trim() : "";
+    if (!requestId) {
+      return;
+    }
+
+    const pending = this.pendingWifiScans.get(requestId);
+    if (!pending) {
+      return;
+    }
+
+    clearTimeout(pending.timeout);
+    this.pendingWifiScans.delete(requestId);
+
+    const errorCode = typeof payload.errorCode === "string" ? payload.errorCode.trim() : "";
+    const errorDetail = typeof payload.errorDetail === "string" ? payload.errorDetail.trim() : "";
+    if (errorCode || errorDetail) {
+      pending.reject(new Error(`${errorCode || "DEVICE_FAILED"}: ${errorDetail || "WLAN scan failed"}`));
+      return;
+    }
+
+    pending.resolve(parseWifiScanNetworks(payload.networks));
+  }
+
   private handleCommandAck(payload: JsonRecord): void {
     resolvePendingAckFromPayload(this.state.pendingAcks, payload);
   }
@@ -444,6 +505,11 @@ export class DeviceConnectionBleNative implements DeviceConnectionBleLike {
     if (envelope.msgType === "command.ack") {
       const payload = isObject(envelope.payload) ? envelope.payload : {};
       this.handleCommandAck(payload);
+      return;
+    }
+    if (envelope.msgType === "onboarding.wifi.scan_result") {
+      const payload = isObject(envelope.payload) ? envelope.payload : {};
+      this.handleWifiScanResult(payload);
       return;
     }
     const event = this.toDeviceEvent(envelope, source);
@@ -626,6 +692,11 @@ export class DeviceConnectionBleNative implements DeviceConnectionBleLike {
       pending.reject(new Error("BLE disconnected"));
     }
     this.pendingTracks = [];
+    for (const pending of this.pendingWifiScans.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error("BLE disconnected"));
+    }
+    this.pendingWifiScans.clear();
     this.emitStatus();
   }
 

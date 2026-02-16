@@ -20,8 +20,10 @@ export function hasCloudCredentialsConfigured(relayBaseUrl: string, boatId: stri
   return Boolean(relayBaseUrl && boatId && boatSecret);
 }
 
-export function hasConfiguredDevice(boatId: string, connectedViaBleOnce: boolean): boolean {
-  return boatId.trim().length > 0 && connectedViaBleOnce;
+export function hasConfiguredDevice(boatId: string, boatSecret: string, connectedViaBleOnce: boolean): boolean {
+  const hasBoatId = boatId.trim().length > 0;
+  const hasManualCredentials = boatSecret.trim().length > 0;
+  return hasBoatId && (connectedViaBleOnce || hasManualCredentials);
 }
 
 export function hasActiveCloudRelayConnection(input: RelayConnectionInput): boolean {

@@ -101,6 +101,7 @@ struct CommandResult {
   String errorCode;
   String errorDetail;
   String ackExtraFields;
+  bool skipAutoAck;
 };
 
 struct BleChunkAssembler {
@@ -622,9 +623,14 @@ bool tryAssembleBleMessage(const uint8_t *data, size_t len, String &completedJso
   return true;
 }
 
-void notifyBleChunked(const String &msgId, const String &json) {
+bool notifyBleChunked(const String &msgId, const String &json) {
   if (!bleConnected || eventRxCharacteristic == nullptr) {
-    return;
+    if (debugProtocol) {
+      Serial.print("[proto] tx drop msgId=");
+      Serial.print(msgId);
+      Serial.println(" reason=ble-not-connected");
+    }
+    return false;
   }
 
   const uint32_t msgId32 = fnv1a32(msgId);
@@ -634,7 +640,12 @@ void notifyBleChunked(const String &msgId, const String &json) {
     partCount++;
   }
   if (partCount > 255) {
-    return;
+    if (debugProtocol) {
+      Serial.print("[proto] tx drop msgId=");
+      Serial.print(msgId);
+      Serial.println(" reason=too-many-chunks");
+    }
+    return false;
   }
 
   uint8_t frame[BLE_CHUNK_MAX_PAYLOAD + 6];
@@ -656,16 +667,19 @@ void notifyBleChunked(const String &msgId, const String &json) {
     eventRxCharacteristic->notify();
     delay(4);
   }
+  return true;
 }
 
 void sendEnvelopeOverBle(const String &msgType, const String &payloadJson, bool requiresAck = false) {
   OutboundEnvelope envelope = makeEnvelope(msgType, payloadJson, requiresAck);
-  notifyBleChunked(envelope.msgId, envelope.json);
+  const bool sent = notifyBleChunked(envelope.msgId, envelope.json);
   if (debugProtocol) {
     Serial.print("[proto] tx ");
     Serial.print(msgType);
     Serial.print(" bytes=");
-    Serial.println(envelope.json.length());
+    Serial.print(envelope.json.length());
+    Serial.print(" sent=");
+    Serial.println(sent ? "true" : "false");
   }
 }
 
@@ -1034,6 +1048,7 @@ CommandResult makeResult(const String &status, const String &errorCode = "", con
   result.errorCode = errorCode;
   result.errorDetail = errorDetail;
   result.ackExtraFields = "";
+  result.skipAutoAck = false;
   return result;
 }
 
@@ -1069,8 +1084,20 @@ bool buildWifiScanNetworksJson(int maxResults, bool includeHidden, String &netwo
   const int found = WiFi.scanNetworks(false, includeHidden);
   if (found < 0) {
     scanError = "wifi scan failed";
+    if (debugProtocol) {
+      Serial.print("[scan] wifi.scanNetworks failed code=");
+      Serial.println(found);
+    }
     WiFi.scanDelete();
     return false;
+  }
+  if (debugProtocol) {
+    Serial.print("[scan] wifi.scanNetworks found=");
+    Serial.print(found);
+    Serial.print(" limitedMax=");
+    Serial.print(limitedMax);
+    Serial.print(" includeHidden=");
+    Serial.println(includeHidden ? "true" : "false");
   }
 
   networksJson = "[";
@@ -1098,16 +1125,28 @@ bool buildWifiScanNetworksJson(int maxResults, bool includeHidden, String &netwo
     emitted++;
   }
   networksJson += "]";
+  if (debugProtocol) {
+    Serial.print("[scan] wifi.scanNetworks emitted=");
+    Serial.print(emitted);
+    Serial.print(" networksJsonBytes=");
+    Serial.println(networksJson.length());
+  }
   WiFi.scanDelete();
   return true;
 }
 
-void sendOnboardingWifiScanResult(const String &requestId, const String &networksJson) {
+void sendOnboardingWifiScanResult(const String &requestId, const String &networksJson, const String &errorCode = "", const String &errorDetail = "") {
   String payload = "{";
   bool first = true;
   appendJsonField(payload, first, "requestId", jsonString(requestId));
   appendJsonField(payload, first, "completedAt", String((unsigned long)millis()));
   appendJsonField(payload, first, "networks", networksJson);
+  if (errorCode.length() > 0) {
+    appendJsonField(payload, first, "errorCode", jsonString(errorCode));
+  }
+  if (errorDetail.length() > 0) {
+    appendJsonField(payload, first, "errorDetail", jsonString(errorDetail));
+  }
   payload += "}";
   sendEnvelopeOverBle("onboarding.wifi.scan_result", payload, false);
 }
@@ -1193,6 +1232,7 @@ CommandResult handleOnboardingRequestSecret() {
 }
 
 CommandResult handleOnboardingWifiScan(const ParsedEnvelope &envelope, const String &raw) {
+  const unsigned long scanStartedAtMs = millis();
   String requestId = envelope.msgId;
   extractJsonStringValue(raw, "requestId", requestId);
   requestId.trim();
@@ -1205,15 +1245,51 @@ CommandResult handleOnboardingWifiScan(const ParsedEnvelope &envelope, const Str
   bool includeHidden = false;
   extractJsonBoolValue(raw, "includeHidden", includeHidden);
 
+  if (debugProtocol) {
+    Serial.print("[scan] requestId=");
+    Serial.print(requestId);
+    Serial.print(" msgId=");
+    Serial.print(envelope.msgId);
+    Serial.print(" maxResults=");
+    Serial.print(maxResults);
+    Serial.print(" includeHidden=");
+    Serial.print(includeHidden ? "true" : "false");
+    Serial.print(" bleConnected=");
+    Serial.println(bleConnected ? "true" : "false");
+  }
+
+  sendCommandAck(envelope.msgId, "ok", "", "", "\"requestId\":" + jsonString(requestId));
+
   String networksJson = "[]";
   String scanError = "";
   if (!buildWifiScanNetworksJson(maxResults, includeHidden, networksJson, scanError)) {
-    return makeResult("rejected", "DEVICE_FAILED", scanError);
+    if (debugProtocol) {
+      Serial.print("[scan] failed requestId=");
+      Serial.print(requestId);
+      Serial.print(" elapsedMs=");
+      Serial.print(millis() - scanStartedAtMs);
+      Serial.print(" error=");
+      Serial.println(scanError);
+    }
+    sendOnboardingWifiScanResult(requestId, "[]", "DEVICE_FAILED", scanError);
+    CommandResult result = makeResult("ok");
+    result.skipAutoAck = true;
+    return result;
   }
 
+  if (debugProtocol) {
+    Serial.print("[scan] success requestId=");
+    Serial.print(requestId);
+    Serial.print(" elapsedMs=");
+    Serial.print(millis() - scanStartedAtMs);
+    Serial.print(" networksBytes=");
+    Serial.print(networksJson.length());
+    Serial.print(" bleConnected=");
+    Serial.println(bleConnected ? "true" : "false");
+  }
   sendOnboardingWifiScanResult(requestId, networksJson);
   CommandResult result = makeResult("ok");
-  result.ackExtraFields = "\"requestId\":" + jsonString(requestId) + ",\"networks\":" + networksJson;
+  result.skipAutoAck = true;
   return result;
 }
 
@@ -1349,7 +1425,7 @@ void processInboundMessage(const String &raw, InboundSource source) {
     envelope.msgType.endsWith(".request") ||
     envelope.msgType == "config.patch" ||
     envelope.msgType.startsWith("onboarding.");
-  if (shouldAck) {
+  if (shouldAck && !result.skipAutoAck) {
     sendCommandAck(envelope.msgId, result.status, result.errorCode, result.errorDetail, result.ackExtraFields);
   }
 }

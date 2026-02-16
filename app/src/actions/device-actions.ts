@@ -32,6 +32,7 @@ import {
 } from "../state/app-state.svelte";
 
 let wifiScanTimeout: ReturnType<typeof setTimeout> | null = null;
+const WIFI_SCAN_RESULT_TIMEOUT_MS = 20_000;
 
 function makeRequestId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -95,6 +96,26 @@ export async function searchForDeviceViaBluetooth(): Promise<void> {
   await deviceLinker.setConnection(bleConnection);
   refreshIdentityUi();
   logLine("BLE connected and active connection switched to bluetooth");
+}
+
+export async function saveManualConnectionCredentials(boatId: string, boatSecret: string): Promise<void> {
+  const normalizedBoatId = boatId.trim();
+  const normalizedBoatSecret = boatSecret.trim();
+  if (!normalizedBoatId) {
+    throw new Error("boat_id is required");
+  }
+  if (!normalizedBoatSecret) {
+    throw new Error("boat_secret is required");
+  }
+
+  if (appState.connection.mode !== "device") {
+    applyMode("device");
+  }
+  setBoatId(normalizedBoatId);
+  setBoatSecret(normalizedBoatSecret);
+  setConnectionRuntimeMode(CONNECTION_RUNTIME_MODE_REMOTE);
+  refreshIdentityUi();
+  logLine("manual connection credentials saved");
 }
 
 export async function useFakeMode(): Promise<void> {
@@ -201,7 +222,15 @@ export async function probe(): Promise<void> {
 }
 
 export async function scanWifiNetworks(): Promise<void> {
+  if (appState.network.wifiScanInFlight) {
+    return;
+  }
+
   clearWifiScanTimeout();
+  const connection = deviceLinker.getConnection();
+  if (connection.kind === "cloud-relay") {
+    throw new Error("WLAN scan requires local Bluetooth. Switch Connection to 'Connected via BT'.");
+  }
 
   const requestId = makeRequestId();
   appState.network.wifiScanRequestId = requestId;
@@ -217,10 +246,10 @@ export async function scanWifiNetworks(): Promise<void> {
     appState.network.wifiScanErrorText = "No scan result received from device.";
     appState.network.wifiScanStatusText = "WLAN scan timed out. Try scanning again.";
     logLine("onboarding.wifi.scan_result timeout");
-  }, 10_000);
+  }, WIFI_SCAN_RESULT_TIMEOUT_MS);
 
   try {
-    const networks = await deviceLinker.getConnection().commandWifiScan(20, false);
+    const networks = await connection.commandWifiScan(20, false);
     applyWifiScanNetworks(networks);
     appState.network.wifiScanUpdatedAtMs = Date.now();
     clearWifiScanTimeout();

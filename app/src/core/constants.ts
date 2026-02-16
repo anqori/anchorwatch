@@ -51,9 +51,9 @@ export const VIEW_TABS: Array<{ id: ViewId; label: string; icon: string }> = [
 ];
 
 export const CONFIG_SECTIONS: Array<{ id: ConfigSectionId; label: string; icon: string }> = [
-  { id: "device", label: "Device / Bluetooth", icon: "bluetooth" },
-  { id: "internet", label: "Internet & WLAN", icon: "wifi" },
+  { id: "device", label: "Device / Boat", icon: "directions_boat" },
   { id: "connection", label: "Connection", icon: "sensors" },
+  { id: "internet", label: "Device - Configure Internet", icon: "wifi" },
   { id: "anchor", label: "Anchor Automatic Placement", icon: "anchor" },
   { id: "alerts", label: "Alerts", icon: "warning" },
   { id: "profiles", label: "Profiles", icon: "tune" },

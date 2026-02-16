@@ -32,16 +32,31 @@
   {#if !isConfigured}
     <div class="hint onboarding-error">Device setup required before changing connection type.</div>
   {:else}
-    <div class="actions">
-      <KonstaButton onClick={onSelectBluetooth} disabled={mode === "device" && activeConnection === "bluetooth"}>
-        Connected via BT
-      </KonstaButton>
-      <KonstaButton onClick={onSelectRelay} disabled={mode === "device" && activeConnection === "cloud-relay"}>
-        Connected via Relay
-      </KonstaButton>
-      <KonstaButton onClick={onSelectFake} disabled={mode === "fake" && activeConnection === "fake"}>
-        Connected to Fake data
-      </KonstaButton>
+    <div class="connection-actions-card">
+      <div class="actions">
+        <KonstaButton onClick={onSelectBluetooth} disabled={mode === "device" && activeConnection === "bluetooth"}>
+          Connected via BT
+        </KonstaButton>
+        <KonstaButton onClick={onSelectRelay} disabled={mode === "device" && activeConnection === "cloud-relay"}>
+          Connected via Relay
+        </KonstaButton>
+        <KonstaButton onClick={onSelectFake} disabled={mode === "fake" && activeConnection === "fake"}>
+          Connected to Fake data
+        </KonstaButton>
+      </div>
     </div>
   {/if}
 </div>
+
+<style>
+  .connection-actions-card {
+    border: 0;
+    border-radius: 0.7rem;
+    padding: 0.7rem;
+    background: rgba(125, 125, 125, 0.08);
+  }
+
+  .connection-actions-card .actions {
+    margin-top: 0;
+  }
+</style>

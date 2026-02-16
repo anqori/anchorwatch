@@ -279,7 +279,7 @@ export function initAppStateEnvironment(hasBluetooth: boolean, hasMaptilerKey: b
 }
 
 function computeConfiguredDeviceState(): boolean {
-  return hasConfiguredDevice(getBoatId(), hasConnectedViaBleOnce());
+  return hasConfiguredDevice(getBoatId(), getBoatSecret(), hasConnectedViaBleOnce());
 }
 
 export function readCloudCredentialFields(): { base: string; boatId: string; boatSecret: string } {

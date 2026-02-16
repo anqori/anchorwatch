@@ -31,7 +31,14 @@ interface PendingTrackRequest {
   timeout: ReturnType<typeof setTimeout>;
 }
 
+interface PendingWifiScanRequest {
+  resolve: (networks: WifiScanNetwork[]) => void;
+  reject: (error: Error) => void;
+  timeout: ReturnType<typeof setTimeout>;
+}
+
 const RELAY_SOURCE: InboundSource = "cloud/status.snapshot";
+const WIFI_SCAN_RESULT_TIMEOUT_MS = 20_000;
 
 export class DeviceConnectionRelayCloud implements DeviceConnection {
   readonly kind = "cloud-relay" as const;
@@ -57,6 +64,8 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
   private pendingSnapshots: PendingSnapshotRequest[] = [];
 
   private pendingTracks: PendingTrackRequest[] = [];
+
+  private pendingWifiScans = new Map<string, PendingWifiScanRequest>();
 
   constructor(
     private readonly readCredentials: () => RelayCloudCredentials | null,
@@ -138,12 +147,21 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
 
   async commandWifiScan(maxResults: number, includeHidden: boolean): Promise<WifiScanNetwork[]> {
     const requestId = `wifi-${makeMsgId()}`;
-    const ack = await this.sendEnvelope("onboarding.wifi.scan", {
-      requestId,
-      maxResults,
-      includeHidden,
-    }, true);
-    return parseWifiScanNetworks(ack?.networks);
+    const scanResultPromise = this.makeWifiScanPromise(requestId);
+    try {
+      const ack = await this.sendEnvelope("onboarding.wifi.scan", {
+        requestId,
+        maxResults,
+        includeHidden,
+      }, true);
+      if (ack && "networks" in ack) {
+        this.handleWifiScanResult({ requestId, networks: ack.networks });
+      }
+    } catch (error) {
+      this.rejectPendingWifiScanRequest(requestId, error);
+      throw error;
+    }
+    return await scanResultPromise;
   }
 
   async commandAnchorRise(): Promise<DeviceCommandResult> {
@@ -377,6 +395,50 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
     };
   }
 
+  private makeWifiScanPromise(requestId: string): Promise<WifiScanNetwork[]> {
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingWifiScans.delete(requestId);
+        reject(new Error("WLAN scan result timeout"));
+      }, WIFI_SCAN_RESULT_TIMEOUT_MS);
+      this.pendingWifiScans.set(requestId, { resolve, reject, timeout });
+    });
+  }
+
+  private rejectPendingWifiScanRequest(requestId: string, error: unknown): void {
+    const pending = this.pendingWifiScans.get(requestId);
+    if (!pending) {
+      return;
+    }
+    clearTimeout(pending.timeout);
+    this.pendingWifiScans.delete(requestId);
+    pending.reject(error instanceof Error ? error : new Error(String(error)));
+  }
+
+  private handleWifiScanResult(payload: JsonRecord): void {
+    const requestId = typeof payload.requestId === "string" ? payload.requestId.trim() : "";
+    if (!requestId) {
+      return;
+    }
+
+    const pending = this.pendingWifiScans.get(requestId);
+    if (!pending) {
+      return;
+    }
+
+    clearTimeout(pending.timeout);
+    this.pendingWifiScans.delete(requestId);
+
+    const errorCode = typeof payload.errorCode === "string" ? payload.errorCode.trim() : "";
+    const errorDetail = typeof payload.errorDetail === "string" ? payload.errorDetail.trim() : "";
+    if (errorCode || errorDetail) {
+      pending.reject(new Error(`${errorCode || "DEVICE_FAILED"}: ${errorDetail || "WLAN scan failed"}`));
+      return;
+    }
+
+    pending.resolve(parseWifiScanNetworks(payload.networks));
+  }
+
   private async ensureConnected(): Promise<void> {
     if (this.connected && this.ws && this.ws.readyState === WebSocket.OPEN) {
       return;
@@ -494,6 +556,12 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
       pending.reject(new Error(reason));
     }
     this.pendingTracks = [];
+
+    for (const pending of this.pendingWifiScans.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error(reason));
+    }
+    this.pendingWifiScans.clear();
   }
 
   private handleSocketClosed(socket: WebSocket): void {
@@ -522,6 +590,11 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
     if (envelope.msgType === "command.ack") {
       const payload = isObject(envelope.payload) ? envelope.payload : {};
       resolvePendingAckFromPayload(this.pendingAcks, payload);
+      return;
+    }
+    if (envelope.msgType === "onboarding.wifi.scan_result") {
+      const payload = isObject(envelope.payload) ? envelope.payload : {};
+      this.handleWifiScanResult(payload);
       return;
     }
 
