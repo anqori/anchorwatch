@@ -136,6 +136,145 @@ android-apk-docker:
       ;;
   esac
 
+# Build/check Android Helper app in a plain Android SDK docker image.
+# No local Android SDK needed.
+# Cache dir defaults to: $HOME/.cache/anchormaster/android-helper-docker
+android-helper-docker-debug:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  image="${ANDROID_HELPER_DOCKER_IMAGE:-ghcr.io/cirruslabs/android-sdk:35}"
+  cache_root="${ANDROID_HELPER_DOCKER_CACHE_DIR:-$HOME/.cache/anchormaster/android-helper-docker}"
+  gradle_home="$cache_root/gradle-home"
+  uid="$(id -u)"
+  gid="$(id -g)"
+  version="${HELPER_BUILD_VERSION:-$(./scripts/versioning.sh run-id)}"
+  mkdir -p "$gradle_home"
+  echo "Android Helper build version: $version"
+  echo "Gradle cache: $gradle_home"
+  status=0
+  docker run --rm \
+    -v "$PWD:/build" \
+    -v "$gradle_home:/tmp/gradle-home" \
+    -e GRADLE_USER_HOME=/tmp/gradle-home \
+    -w /build \
+    "$image" \
+    /bin/bash -lc "mkdir -p /tmp/gradle-home /tmp/gradle-project-cache && cd android-helper && ./gradlew --project-cache-dir /tmp/gradle-project-cache assembleDebug -PHELPER_BUILD_VERSION=\"$version\"" || status=$?
+  docker run --rm \
+    -v "$PWD:/build" \
+    "$image" \
+    /bin/bash -lc "for p in /build/android-helper/.gradle /build/android-helper/build /build/android-helper/app/build; do if [ -e \"\$p\" ]; then chown -R $uid:$gid \"\$p\"; fi; done"
+  if [[ "$status" -ne 0 ]]; then exit "$status"; fi
+
+android-helper-docker-release:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  image="${ANDROID_HELPER_DOCKER_IMAGE:-ghcr.io/cirruslabs/android-sdk:35}"
+  cache_root="${ANDROID_HELPER_DOCKER_CACHE_DIR:-$HOME/.cache/anchormaster/android-helper-docker}"
+  gradle_home="$cache_root/gradle-home"
+  uid="$(id -u)"
+  gid="$(id -g)"
+  version="${HELPER_BUILD_VERSION:-$(./scripts/versioning.sh run-id)}"
+  mkdir -p "$gradle_home"
+  echo "Android Helper build version: $version"
+  echo "Gradle cache: $gradle_home"
+  status=0
+  docker run --rm \
+    -v "$PWD:/build" \
+    -v "$gradle_home:/tmp/gradle-home" \
+    -e GRADLE_USER_HOME=/tmp/gradle-home \
+    -w /build \
+    "$image" \
+    /bin/bash -lc "mkdir -p /tmp/gradle-home /tmp/gradle-project-cache && cd android-helper && ./gradlew --project-cache-dir /tmp/gradle-project-cache assembleRelease -PHELPER_BUILD_VERSION=\"$version\"" || status=$?
+  docker run --rm \
+    -v "$PWD:/build" \
+    "$image" \
+    /bin/bash -lc "for p in /build/android-helper/.gradle /build/android-helper/build /build/android-helper/app/build; do if [ -e \"\$p\" ]; then chown -R $uid:$gid \"\$p\"; fi; done"
+  if [[ "$status" -ne 0 ]]; then exit "$status"; fi
+
+android-helper-docker-lint:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  image="${ANDROID_HELPER_DOCKER_IMAGE:-ghcr.io/cirruslabs/android-sdk:35}"
+  cache_root="${ANDROID_HELPER_DOCKER_CACHE_DIR:-$HOME/.cache/anchormaster/android-helper-docker}"
+  gradle_home="$cache_root/gradle-home"
+  uid="$(id -u)"
+  gid="$(id -g)"
+  mkdir -p "$gradle_home"
+  echo "Gradle cache: $gradle_home"
+  status=0
+  docker run --rm \
+    -v "$PWD:/build" \
+    -v "$gradle_home:/tmp/gradle-home" \
+    -e GRADLE_USER_HOME=/tmp/gradle-home \
+    -w /build \
+    "$image" \
+    /bin/bash -lc "mkdir -p /tmp/gradle-home /tmp/gradle-project-cache && cd android-helper && ./gradlew --project-cache-dir /tmp/gradle-project-cache lintRelease test -Dandroid.lint.abortOnError=false" || status=$?
+  docker run --rm \
+    -v "$PWD:/build" \
+    "$image" \
+    /bin/bash -lc "for p in /build/android-helper/.gradle /build/android-helper/build /build/android-helper/app/build; do if [ -e \"\$p\" ]; then chown -R $uid:$gid \"\$p\"; fi; done"
+  if [[ "$status" -ne 0 ]]; then exit "$status"; fi
+
+# Install Android Helper debug APK via USB ADB.
+# Optional: ADB_SERIAL (device id), ADB_APK_PATH (default debug APK), ADB_PATH (default adb), ADB_UNINSTALL_FIRST (1 to force remove existing package first).
+android-helper-adb-install:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  adb_path="${ADB_PATH:-adb}"
+  apk_path="${ADB_APK_PATH:-android-helper/app/build/outputs/apk/debug/app-debug.apk}"
+  serial="${ADB_SERIAL:-}"
+  uninstall_first="${ADB_UNINSTALL_FIRST:-1}"
+
+  if ! command -v "$adb_path" >/dev/null 2>&1; then
+    echo "ADB command not found. Set ADB_PATH or install Android platform tools." >&2
+    exit 1
+  fi
+
+  "$adb_path" start-server
+
+  if [[ ! -f "$apk_path" ]]; then
+    echo "APK not found: $apk_path" >&2
+    echo "Run 'just android-helper-docker-debug' first." >&2
+    exit 1
+  fi
+
+  package_name="com.anchormaster.helper"
+
+  install_to_device() {
+    local target="$1"
+
+    if [[ "$uninstall_first" == "1" ]]; then
+      "$adb_path" -s "$target" uninstall "$package_name" || true
+    fi
+
+    "$adb_path" -s "$target" install -r "$apk_path"
+    echo "Installed: $apk_path"
+    echo "Device: $target"
+  }
+
+  if [[ -n "$serial" ]]; then
+    install_to_device "$serial"
+    exit 0
+  fi
+
+  device_count="$($adb_path devices | awk 'NR>1 && $2=="device" {print $1}' | wc -l | tr -d ' ')"
+  if [[ "$device_count" -eq 0 ]]; then
+    echo "No connected adb devices found." >&2
+    exit 1
+  fi
+  if [[ "$device_count" -gt 1 ]]; then
+    echo "Multiple connected devices found. Set ADB_SERIAL to choose one:" >&2
+    "$adb_path" devices | awk 'NR>1 && $2=="device" {print $1}'
+    exit 1
+  fi
+
+  target_device="$($adb_path devices | awk 'NR>1 && $2=="device" {print $1}' | head -n 1)"
+  install_to_device "$target_device"
+
+android-helper-ble-diagnostics:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  scripts/android-helper-ble-diagnostics.sh
 # Build/check app and deploy PWA + Worker to dev domains.
 # Version format: dev-<commit>-<timestamp>.
 cloudflare-dev:

@@ -17,6 +17,13 @@
     onPreviewAnchorMove?: (lat: number, lon: number) => void;
   }
 
+  interface RingAxisLabel {
+    x: number;
+    y: number;
+    text: string;
+    anchor: "start" | "middle" | "end";
+  }
+
   let {
     trackPoints = [],
     anchorPosition = null,
@@ -67,6 +74,43 @@
       });
     }
     return out;
+  });
+
+  const ringAxisLabels = $derived.by<RingAxisLabel[]>(() => {
+    const labels: RingAxisLabel[] = [];
+    for (const ring of ringAnnotations) {
+      if (!ring.label) {
+        continue;
+      }
+
+      labels.push(
+        {
+          x: VIEW_CENTER,
+          y: VIEW_CENTER - ring.radiusPx + 1,
+          text: ring.label,
+          anchor: "middle",
+        },
+        {
+          x: VIEW_CENTER + ring.radiusPx - 1,
+          y: VIEW_CENTER + 3,
+          text: ring.label,
+          anchor: "end",
+        },
+        {
+          x: VIEW_CENTER,
+          y: VIEW_CENTER + ring.radiusPx - 3,
+          text: ring.label,
+          anchor: "middle",
+        },
+        {
+          x: VIEW_CENTER - ring.radiusPx + 1,
+          y: VIEW_CENTER + 3,
+          text: ring.label,
+          anchor: "start",
+        },
+      );
+    }
+    return labels;
   });
 
   const projectedTrack = $derived.by<Array<{ x: number; y: number }>>(() => {
@@ -243,9 +287,16 @@
 
         {#each ringAnnotations as ring}
           <circle cx={VIEW_CENTER} cy={VIEW_CENTER} r={ring.radiusPx} class={`radar-ring ${ring.radiusPx >= VIEW_RADIUS ? "outer" : ""}`} />
-          {#if ring.label}
-            <text x={VIEW_CENTER + ring.radiusPx - 1} y={VIEW_CENTER - 3} class="radar-ring-label">{ring.label}</text>
-          {/if}
+        {/each}
+
+        {#each ringAxisLabels as label}
+          <text
+            x={label.x}
+            y={label.y}
+            text-anchor={label.anchor}
+            dominant-baseline="central"
+            class="radar-ring-label"
+          >{label.text}</text>
         {/each}
 
         <text x={VIEW_CENTER} y={VIEW_CENTER - VIEW_RADIUS + 2} class="radar-compass-label" text-anchor="middle">N</text>

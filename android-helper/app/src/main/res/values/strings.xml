@@ -1,0 +1,16 @@
+<resources>
+    <string name="app_name">Anchor Helper</string>
+    <string name="service_channel_name">Anchor Helper Service</string>
+    <string name="service_channel_desc">Runs BLE + relay + location streaming for emulator behavior.</string>
+    <string name="default_boat_id">boat_demo_001</string>
+    <string name="default_relay_url">https://dev-aw-cloud.anqori.com</string>
+    <string name="default_device_id">android-helper-sim</string>
+    <string name="label_boat_id">Boat ID</string>
+    <string name="label_boat_secret">Boat Secret</string>
+    <string name="label_relay_url">Relay Base URL</string>
+    <string name="label_device_id">Device ID</string>
+    <string name="btn_start">Start emulator</string>
+    <string name="btn_stop">Stop emulator</string>
+    <string name="status_unknown">Status: idle</string>
+    <string name="version_unknown">Version: ?</string>
+</resources>

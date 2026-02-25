@@ -18,3 +18,13 @@ app/dist/
 app/.svelte-kit/
 app/.vite/
 coverage/
+
+# Android helper prototype
+android-helper/app/build/
+android-helper/app/.cxx/
+android-helper/app/.gradle/
+android-helper/.gradle/
+android-helper/.gradle-local/
+android-helper/build/
+android-helper/local.properties
+.android/

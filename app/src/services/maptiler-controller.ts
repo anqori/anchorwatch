@@ -324,6 +324,7 @@ function enforceViewportLimits(
   map: MapTilerMap,
   trackPoints: TrackPoint[],
   anchorPosition: GeoPoint | null,
+  boatPosition: GeoPoint | null,
   maxPanDistanceM: number,
   maxVisibleAreaM2: number,
 ): void {
@@ -337,7 +338,7 @@ function enforceViewportLimits(
       return;
     }
 
-    const anchorPoint = getMapTilerAnchorPoint(trackPoints, anchorPosition);
+    const anchorPoint = getMapTilerAnchorPoint(trackPoints, anchorPosition, boatPosition);
     const panBounds = buildMapTilerPanBounds(anchorPoint, maxPanDistanceM);
     const [[minLon, minLat], [maxLon, maxLat]] = panBounds;
     const center = map.getCenter();
@@ -386,7 +387,7 @@ export function updateMapTrackAndViewport(input: MapTilerTrackViewportInput): vo
     input.showAnchorHelperCircle,
     input.anchorHelperRadiusM,
   );
-  enforceViewportLimits(input.map, trackPoints, anchorPosition, input.maxPanDistanceM, input.maxVisibleAreaM2);
+  enforceViewportLimits(input.map, trackPoints, anchorPosition, boatPosition, input.maxPanDistanceM, input.maxVisibleAreaM2);
 }
 
 export function ensureMapTilerView(input: EnsureMapTilerViewInput): MapTilerMap | null {
@@ -405,10 +406,10 @@ export function ensureMapTilerView(input: EnsureMapTilerViewInput): MapTilerMap 
     return null;
   }
 
-  const latestPoint = input.getTrackPoints()[input.getTrackPoints().length - 1];
-  const center: [number, number] = latestPoint
-    ? [latestPoint.lon, latestPoint.lat]
-    : input.defaultCenter;
+  const trackPoints = input.getTrackPoints();
+  const anchorPosition = input.getAnchorPosition();
+  const boatPosition = input.getBoatPosition();
+  const center: [number, number] = getMapTilerAnchorPoint(trackPoints, anchorPosition, boatPosition);
 
   maptilerConfig.apiKey = input.apiKey;
   const styleRef = input.kind === "map" ? input.styleMapRef : input.styleSatelliteRef;

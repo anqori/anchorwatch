@@ -57,9 +57,16 @@ export function resolveMapTilerStyleUrl(styleRef: string, apiKey: string): strin
   return `https://api.maptiler.com/maps/${encodeURIComponent(trimmed)}/style.json?key=${encodeURIComponent(apiKey)}`;
 }
 
-export function getMapTilerAnchorPoint(trackPoints: TrackPoint[], anchorPosition: GeoPoint | null): [number, number] {
+export function getMapTilerAnchorPoint(
+  trackPoints: TrackPoint[],
+  anchorPosition: GeoPoint | null,
+  boatPosition: GeoPoint | null,
+): [number, number] {
   if (anchorPosition) {
     return [anchorPosition.lon, anchorPosition.lat];
+  }
+  if (boatPosition) {
+    return [boatPosition.lon, boatPosition.lat];
   }
   const latestPoint = trackPoints[trackPoints.length - 1];
   if (latestPoint) {

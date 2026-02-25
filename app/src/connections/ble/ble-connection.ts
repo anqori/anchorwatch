@@ -1,4 +1,5 @@
 import { Capacitor } from "@capacitor/core";
+import { BLE_DEVICE_NAME_PREFIX } from "../../core/constants";
 
 export interface BleConnectOptions {
   serviceUuid: BluetoothServiceUUID;
@@ -63,11 +64,42 @@ export async function connectBleWithCharacteristics(
     return await connectDeviceWithCharacteristics(knownDevice, options);
   }
 
-  const device = await navigator.bluetooth.requestDevice({
-    filters: [{ services: [options.serviceUuid] }],
-    optionalServices: [options.serviceUuid],
-  });
-  return await connectDeviceWithCharacteristics(device, options);
+  const requestPlans: RequestDeviceOptions[] = [
+    {
+      filters: [{ services: [options.serviceUuid] }],
+      optionalServices: [options.serviceUuid],
+    },
+    {
+      filters: [{ namePrefix: BLE_DEVICE_NAME_PREFIX }],
+      optionalServices: [options.serviceUuid],
+    },
+    {
+      acceptAllDevices: true,
+      optionalServices: [options.serviceUuid],
+    },
+  ];
+
+  let lastError: unknown;
+
+  for (const request of requestPlans) {
+    try {
+      const device = await navigator.bluetooth.requestDevice(request);
+      return await connectDeviceWithCharacteristics(device, options);
+    } catch (error) {
+      const err = error as DOMException;
+      const canFallback = err instanceof DOMException ? err.name === "NotFoundError" : true;
+      if (!canFallback) {
+        throw error;
+      }
+      lastError = error;
+    }
+  }
+
+  const failureReason =
+    lastError instanceof Error
+      ? `${lastError.name}: ${lastError.message}`
+      : "No compatible BLE device found";
+  throw new Error(failureReason);
 }
 
 export async function listGrantedBleDevices(): Promise<BluetoothDevice[]> {

@@ -21,6 +21,10 @@ BUILD_VERSION = "dev-unknown"
 # Optional non-secret boat scope lock for dev lane.
 # BOAT_ID = "boat_demo_dev_001"
 
+[[env.dev.durable_objects.bindings]]
+name = "BOAT_PIPE"
+class_name = "BoatPipeDurableObject"
+
 [[durable_objects.bindings]]
 name = "BOAT_PIPE"
 class_name = "BoatPipeDurableObject"
