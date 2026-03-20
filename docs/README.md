@@ -12,5 +12,6 @@ Planned additions:
 Current docs:
 
 - `docs/cloudflare-setup.md` plain `wrangler` setup for Pages + Workers
+- `docs/firmware-android-emulator-checklist.md` shared feature checklist for firmware and the Android helper emulator
 - `docs/maptiler-setup.md` MapTiler account + key setup for real map/satellite rendering
 - `docs/protocol-v1.md` draft wire protocol/messages for cloud path and BLE path
