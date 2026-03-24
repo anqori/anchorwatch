@@ -1,4 +1,8 @@
-# Anqori AnchorWatch Protocol v1 (MVP Frozen)
+# Archived Protocol v1
+
+This document is archived. The active protocol is [`docs/protocol-v2.md`](/home/pm/dev/anchormaster/docs/protocol-v2.md).
+
+## Anqori AnchorWatch Protocol v1 (MVP Frozen)
 
 Status: MVP frozen for implementation  
 Date: 2026-02-12  

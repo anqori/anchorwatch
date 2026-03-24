@@ -5,17 +5,15 @@ import {
 } from "../core/constants";
 import type { JsonRecord, WifiSecurity } from "../core/types";
 import { mapAlertDraftToConfigInput, mapAnchorDraftToConfigInput, mapProfilesDraftToConfigInput } from "../services/config-draft-mappers";
-import { buildAlertConfigPatch, buildAnchorConfigPatch, buildProfilesConfigPatch } from "../services/config-patch-builders";
+import { buildAlertConfigPart, buildAnchorConfigPart, buildProfilesConfigPart } from "../services/config-patch-builders";
 import { normalizeRelayBaseUrl } from "../services/local-storage";
 import { readCurrentGpsPosition } from "../services/state-derive";
 import {
   getRelayBaseUrl,
   markConnectedViaBleOnce,
-  nextConfigVersion,
-  setConfigVersion,
   setRelayBaseUrl,
 } from "../services/persistence-domain";
-import type { ConfigPatchCommand } from "../services/protocol-messages";
+import type { ConfigPartsCommand } from "../services/protocol-messages";
 import { defaultConnectionForMode, getBluetoothConnection, getFakeConnection } from "../connections/connection-factory";
 import { deviceLinker } from "../linker/device-linker";
 import {
@@ -34,13 +32,6 @@ import {
 let wifiScanTimeout: ReturnType<typeof setTimeout> | null = null;
 const WIFI_SCAN_RESULT_TIMEOUT_MS = 20_000;
 
-function makeRequestId(): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-  return `${Date.now().toString(16)}${Math.random().toString(16).slice(2, 12)}`;
-}
-
 function clearWifiScanTimeout(): void {
   if (!wifiScanTimeout) {
     return;
@@ -49,13 +40,11 @@ function clearWifiScanTimeout(): void {
   wifiScanTimeout = null;
 }
 
-async function sendConfigPatch(patch: JsonRecord, reason: string): Promise<void> {
-  const version = nextConfigVersion();
-  const command: ConfigPatchCommand = { version, patch };
+async function sendConfigParts(parts: JsonRecord, reason: string): Promise<void> {
+  const command: ConfigPartsCommand = { parts };
   const connection = deviceLinker.getConnection();
-  await connection.sendConfigPatch(command);
-  setConfigVersion(version);
-  logLine(`config.patch sent via ${connection.kind} (${reason}) version=${version}`);
+  await connection.sendConfigParts(command);
+  logLine(`update-config sent via ${connection.kind} (${reason})`);
 }
 
 function ensureConfiguredDeviceForConnectionSelection(): void {
@@ -232,7 +221,7 @@ export async function scanWifiNetworks(): Promise<void> {
     throw new Error("WLAN scan requires local Bluetooth. Switch Connection to 'Connected via BT'.");
   }
 
-  const requestId = makeRequestId();
+  const requestId = `scan-${Date.now()}`;
   appState.network.wifiScanRequestId = requestId;
   appState.network.wifiScanInFlight = true;
   appState.network.wifiScanErrorText = "";
@@ -293,15 +282,18 @@ export async function applyWifiConfig(): Promise<void> {
     throw new Error("Wi-Fi SSID is required");
   }
 
-  const patch: JsonRecord = {
-    "network.wifi.ssid": ssid,
-    "network.wifi.passphrase": passphrase,
-    "network.wifi.security": security,
-    "network.wifi.country": country || "DE",
-    "network.wifi.hidden": appState.network.selectedWifiNetwork?.hidden ?? false,
-  };
-
-  await sendConfigPatch(patch, "wifi");
+  const connection = deviceLinker.getConnection();
+  const result = await connection.commandWifiConnect({
+    ssid,
+    passphrase,
+    security,
+    country: country || "DE",
+    hidden: appState.network.selectedWifiNetwork?.hidden ?? false,
+  });
+  if (!result.accepted) {
+    throw new Error(result.errorDetail || result.errorCode || "connect-wlan rejected");
+  }
+  logLine(`connect-wlan sent via ${connection.kind} for ${ssid}`);
 }
 
 export async function refreshStateSnapshot(): Promise<void> {
@@ -310,7 +302,7 @@ export async function refreshStateSnapshot(): Promise<void> {
   if (snapshot === null) {
     return;
   }
-  logLine(`status.snapshot read via ${connection.kind}`);
+  logLine(`get-data snapshot read via ${connection.kind}`);
 }
 
 export async function applyWifiConfigFromInternetPage(): Promise<void> {
@@ -320,18 +312,21 @@ export async function applyWifiConfigFromInternetPage(): Promise<void> {
 
 export async function applyAnchorConfig(): Promise<void> {
   const anchorInput = mapAnchorDraftToConfigInput(appState.configDrafts.anchor);
-  const patch = buildAnchorConfigPatch(anchorInput);
-  await sendConfigPatch(patch, "anchor-auto-placement");
+  await sendConfigParts({
+    anchor_settings: buildAnchorConfigPart(anchorInput),
+  }, "anchor-auto-placement");
 }
 
 export async function applyAlertConfig(): Promise<void> {
-  const patch = buildAlertConfigPatch(mapAlertDraftToConfigInput(appState.configDrafts.alerts));
-  await sendConfigPatch(patch, "alerts");
+  await sendConfigParts({
+    alarm_config: buildAlertConfigPart(mapAlertDraftToConfigInput(appState.configDrafts.alerts)),
+  }, "alerts");
 }
 
 export async function applyProfilesConfig(): Promise<void> {
-  const patch = buildProfilesConfigPatch(mapProfilesDraftToConfigInput(appState.configDrafts.profiles));
-  await sendConfigPatch(patch, "profiles");
+  await sendConfigParts({
+    profiles: buildProfilesConfigPart(mapProfilesDraftToConfigInput(appState.configDrafts.profiles)),
+  }, "profiles");
 }
 
 export async function raiseAnchor(): Promise<void> {

@@ -1,43 +1,44 @@
 # Cloud
 
-Cloudflare Worker relay for AnchorWatch message forwarding.
+Cloudflare Worker relay for AnchorWatch WebSocket traffic.
 
 ## Layout
 
-- `cloud/worker/wrangler.toml` worker config
-- `cloud/worker/src/index.js` worker + Durable Object relay implementation
+- `cloud/worker/wrangler.toml`
+- `cloud/worker/src/index.js`
 
 ## Endpoint
 
 - `GET /v1/pipe` with `Upgrade: websocket`
-  - query params:
-    - `boatId` required
-    - `deviceId` recommended
-    - `role` optional (`app` default, `device`)
-    - `boatSecret` required when `BOAT_SECRET` is configured
+
+Query params:
+
+- `boatId` required
+- `deviceId` recommended
+- `role` optional (`app` default, `device`)
+- `boatSecret` required when `BOAT_SECRET` is configured
 
 ## Relay behavior
 
-- One Durable Object room per `boatId`.
-- Messages are forwarded unchanged to all other sockets in the same room.
-- No buffering, no replay, no derived state/config/track storage.
-- Sender does not receive its own message back.
+- one Durable Object room per `boatId`
+- authenticated socket acceptance on connect
+- opaque fan-out to every other socket in the same room
+- no replay
+- no state/config/track storage
+- no protocol-specific control messages
+- sender does not receive its own payload back
 
-Relay-local control message:
+The worker is intentionally dumb. If a message is valid enough for the client/device to send, the relay just forwards it.
 
-- `relay.probe` -> relay responds directly with `relay.probe.result` (never routed to peers).
+## Auth model
 
-## Auth model (KISS v1)
+- one shared `boatSecret` per boat/device
+- optional `BOAT_ID` env var can lock the worker to one boat ID
 
-- One shared `boatSecret` per boat/device.
-- `boatId` is a non-secret identifier only.
-- Optional `BOAT_ID` env var can lock relay requests to one boat ID.
-
-Set secret and optional scope:
+Set the secret:
 
 ```bash
 npx --yes wrangler secret put BOAT_SECRET
-# Set BOAT_ID in cloud/worker/wrangler.toml [vars] for single-boat scope lock.
 ```
 
 ## Local dev
@@ -55,9 +56,3 @@ From repo root:
 ```bash
 just cloudflare-release
 ```
-
-## Next implementation steps
-
-- device-side WLAN relay WebSocket client
-- secret rotation/recovery flow
-- push fan-out pipeline

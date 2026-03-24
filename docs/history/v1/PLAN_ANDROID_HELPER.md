@@ -1,4 +1,8 @@
-# Android Helper Device Emulator Plan
+# Archived v1 Android Helper Plan
+
+This document is archived. The active backend/API contract is [`docs/protocol-v2.md`](/home/pm/dev/anchormaster/docs/protocol-v2.md).
+
+## Android Helper Device Emulator Plan
 
 Status date: 2026-02-25
 

@@ -1,4 +1,4 @@
-import type { ConfigPatchCommand } from "../services/protocol-messages";
+import type { ConfigPartsCommand } from "../services/protocol-messages";
 import type { AlertRuntimeEntry, InboundSource, JsonRecord, TrackPoint, WifiScanNetwork } from "../core/types";
 
 export type DeviceConnectionKind = "bluetooth" | "cloud-relay" | "fake";
@@ -24,6 +24,14 @@ export interface DeviceCommandResult {
   errorDetail: string | null;
 }
 
+export interface DeviceWifiConnectInput {
+  ssid: string;
+  passphrase: string;
+  security: string;
+  country: string;
+  hidden: boolean;
+}
+
 export interface DeviceEventBase {
   source: InboundSource;
   boatId?: string;
@@ -37,12 +45,6 @@ export interface DeviceStatePatchEvent extends DeviceEventBase {
 export interface DeviceStateSnapshotEvent extends DeviceEventBase {
   type: "state.snapshot";
   snapshot: unknown;
-}
-
-export interface DeviceOnboardingBoatSecretEvent extends DeviceEventBase {
-  type: "onboarding.boatSecret";
-  onboardingBoatId?: string;
-  boatSecret?: string;
 }
 
 export interface DeviceTrackSnapshotEvent extends DeviceEventBase {
@@ -64,7 +66,6 @@ export interface DeviceUnknownEvent extends DeviceEventBase {
 export type DeviceEvent =
   | DeviceStatePatchEvent
   | DeviceStateSnapshotEvent
-  | DeviceOnboardingBoatSecretEvent
   | DeviceTrackSnapshotEvent
   | DeviceAlertsStateEvent
   | DeviceUnknownEvent;
@@ -76,8 +77,9 @@ export interface DeviceConnection {
   isConnected(): boolean;
   subscribeEvents(callback: (event: DeviceEvent) => void): () => void;
   subscribeStatus(callback: (status: DeviceConnectionStatus) => void): () => void;
-  sendConfigPatch(command: ConfigPatchCommand): Promise<void>;
+  sendConfigParts(command: ConfigPartsCommand): Promise<void>;
   commandWifiScan(maxResults: number, includeHidden: boolean): Promise<WifiScanNetwork[]>;
+  commandWifiConnect(input: DeviceWifiConnectInput): Promise<DeviceCommandResult>;
   commandAnchorRise(): Promise<DeviceCommandResult>;
   commandAnchorDown(lat: number, lon: number): Promise<DeviceCommandResult>;
   commandAlarmSilence(seconds: number): Promise<DeviceCommandResult>;

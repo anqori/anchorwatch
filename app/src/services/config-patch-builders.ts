@@ -9,6 +9,7 @@ import type {
 import {
   parseIntegerInput,
   parseNumberInput,
+  parsePolygonPoints,
 } from "./data-utils";
 
 export interface AnchorConfigInput {
@@ -35,73 +36,85 @@ export interface ProfilesConfigInput {
   profileNightStartLocal: string;
 }
 
-export function buildAnchorConfigPatch(input: AnchorConfigInput): JsonRecord {
+function buildAlertCommonFields(alert: AlertConfigDraft, defaultMinTimeMs: number, severity: AlertSeverity): JsonRecord {
   return {
-    "anchor.autoMode.minForwardSogKn": parseNumberInput(input.autoModeMinForwardSogKn, 0.8, 0, 20),
-    "anchor.autoMode.stallMaxSogKn": parseNumberInput(input.autoModeStallMaxSogKn, 0.3, 0, 20),
-    "anchor.autoMode.reverseMinSogKn": parseNumberInput(input.autoModeReverseMinSogKn, 0.4, 0, 20),
-    "anchor.autoMode.confirmSeconds": parseIntegerInput(input.autoModeConfirmSeconds, 20, 1, 300),
+    is_enabled: alert.isEnabled,
+    min_time_ms: parseIntegerInput(alert.minTimeMs, defaultMinTimeMs, 0, 600000),
+    severity,
   };
 }
 
-const FIXED_ANCHOR_DISTANCE_MAX_M = 35;
-const FIXED_BOATING_AREA_POLYGON: Array<{ lat: number; lon: number }> = [
-  { lat: 54.3194, lon: 10.1388 },
-  { lat: 54.3212, lon: 10.1388 },
-  { lat: 54.3212, lon: 10.1418 },
-  { lat: 54.3194, lon: 10.1418 },
-];
-
-function applyAlertCommonFields(patch: JsonRecord, alert: AlertConfigDraft, defaultMinTimeMs: number, severity: AlertSeverity): void {
-  patch[`alerts.${alert.id}.is_enabled`] = alert.isEnabled;
-  patch[`alerts.${alert.id}.min_time_ms`] = parseIntegerInput(alert.minTimeMs, defaultMinTimeMs, 0, 600000);
-  patch[`alerts.${alert.id}.severity`] = severity;
+export function buildAnchorConfigPart(input: AnchorConfigInput): JsonRecord {
+  return {
+    auto_mode: {
+      min_forward_sog_kn: parseNumberInput(input.autoModeMinForwardSogKn, 0.8, 0, 20),
+      stall_max_sog_kn: parseNumberInput(input.autoModeStallMaxSogKn, 0.3, 0, 20),
+      reverse_min_sog_kn: parseNumberInput(input.autoModeReverseMinSogKn, 0.4, 0, 20),
+      confirm_seconds: parseIntegerInput(input.autoModeConfirmSeconds, 20, 1, 300),
+    },
+  };
 }
 
-export function buildAlertConfigPatch(input: AlertConfigInput): JsonRecord {
-  const patch: JsonRecord = {};
+export function buildAlertConfigPart(input: AlertConfigInput): JsonRecord {
+  const alarmConfig: JsonRecord = {};
 
   for (const alert of input.alerts) {
     if (alert.id === "anchor_distance") {
-      applyAlertCommonFields(patch, alert, 20000, alert.severity);
-      patch["alerts.anchor_distance.max_distance_m"] = FIXED_ANCHOR_DISTANCE_MAX_M;
+      alarmConfig.anchor_distance = {
+        ...buildAlertCommonFields(alert, 20000, alert.severity),
+        max_distance_m: parseNumberInput(alert.maxDistanceM, 35, 0, 1000),
+      };
       continue;
     }
     if (alert.id === "boating_area") {
-      applyAlertCommonFields(patch, alert, 20000, alert.severity);
-      patch["alerts.boating_area.polygon"] = FIXED_BOATING_AREA_POLYGON;
+      alarmConfig.boating_area = {
+        ...buildAlertCommonFields(alert, 20000, alert.severity),
+        polygon: parsePolygonPoints(alert.polygonPointsInput),
+      };
       continue;
     }
     if (alert.id === "wind_strength") {
-      applyAlertCommonFields(patch, alert, 20000, alert.severity);
-      patch["alerts.wind_strength.max_tws"] = parseNumberInput(alert.maxTwsKn, 30, 0, 200);
+      alarmConfig.wind_strength = {
+        ...buildAlertCommonFields(alert, 20000, alert.severity),
+        max_tws: parseNumberInput(alert.maxTwsKn, 30, 0, 200),
+      };
       continue;
     }
     if (alert.id === "depth") {
-      applyAlertCommonFields(patch, alert, 10000, alert.severity);
-      patch["alerts.depth.min_depth"] = parseNumberInput(alert.minDepthM, 2, 0, 500);
+      alarmConfig.depth = {
+        ...buildAlertCommonFields(alert, 10000, alert.severity),
+        min_depth: parseNumberInput(alert.minDepthM, 2, 0, 500),
+      };
       continue;
     }
     if (alert.id === "data_outdated") {
-      applyAlertCommonFields(patch, alert, 5000, alert.severity);
-      patch["alerts.data_outdated.min_age"] = parseIntegerInput(alert.minAgeMs, 5000, 0, 600000);
+      alarmConfig.data_outdated = {
+        ...buildAlertCommonFields(alert, 5000, alert.severity),
+        min_age: parseIntegerInput(alert.minAgeMs, 5000, 0, 600000),
+      };
     }
   }
 
-  return patch;
+  return alarmConfig;
 }
 
-export function buildProfilesConfigPatch(input: ProfilesConfigInput): JsonRecord {
+export function buildProfilesConfigPart(input: ProfilesConfigInput): JsonRecord {
   return {
-    "profiles.mode": input.profilesMode,
-    "profiles.day.colorScheme": input.profileDayColorScheme,
-    "profiles.day.brightnessPct": parseIntegerInput(input.profileDayBrightnessPct, 100, 1, 100),
-    "profiles.day.outputProfile": input.profileDayOutputProfile.trim() || "normal",
-    "profiles.night.colorScheme": input.profileNightColorScheme,
-    "profiles.night.brightnessPct": parseIntegerInput(input.profileNightBrightnessPct, 20, 1, 100),
-    "profiles.night.outputProfile": input.profileNightOutputProfile.trim() || "night",
-    "profiles.autoSwitch.source": input.profileAutoSwitchSource,
-    "profiles.autoSwitch.dayStartLocal": input.profileDayStartLocal,
-    "profiles.autoSwitch.nightStartLocal": input.profileNightStartLocal,
+    mode: input.profilesMode,
+    day: {
+      color_scheme: input.profileDayColorScheme,
+      brightness_pct: parseIntegerInput(input.profileDayBrightnessPct, 100, 1, 100),
+      output_profile: input.profileDayOutputProfile.trim() || "normal",
+    },
+    night: {
+      color_scheme: input.profileNightColorScheme,
+      brightness_pct: parseIntegerInput(input.profileNightBrightnessPct, 20, 1, 100),
+      output_profile: input.profileNightOutputProfile.trim() || "night",
+    },
+    auto_switch: {
+      source: input.profileAutoSwitchSource,
+      day_start_local: input.profileDayStartLocal,
+      night_start_local: input.profileNightStartLocal,
+    },
   };
 }

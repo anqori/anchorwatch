@@ -8,64 +8,45 @@ Stack:
 - Svelte
 - TypeScript
 - Konsta UI
-- Tailwind CSS (for Konsta theme classes)
+- Tailwind CSS
 
 ## Responsibilities
 
-- device pairing and session auth
-- live telemetry and trigger display
+- live telemetry and alarm display
 - anchor placement workflows
-- day/night profile configuration
-- alarm acknowledgement/silence slider
-- multi-phone collaboration
-- fake mode for offline/demo use without device connection
+- config editing
+- BLE local control
+- remote relay control
+- fake mode for offline/demo use
 
-## Connectivity strategy for v1
+## Connectivity strategy
 
-- BLE local control/onboarding path (no non-BLE fallback in v1)
-- cloud sync via HTTPS to Cloudflare Worker using `boatSecret` bearer auth
-- remote push via Cloudflare Worker relay
+- BLE local path uses the same v2 command/reply envelopes as the cloud path
+- remote path uses WebSocket relay fan-out via Cloudflare Worker
+- relay is transport-only and forwards opaque payloads
+- app keeps the existing UI/state shape and maps v2 multipart payloads back into it
 
-## Files
-
-- `app/src/App.svelte` main UI and control-plane logic
-- `app/src/main.ts` app bootstrap
-- `app/public/manifest.webmanifest` install metadata
-- `app/public/sw.js` service worker
-- `app/public/icons/` app icons
+See [`docs/protocol-v2.md`](/home/pm/dev/anchormaster/docs/protocol-v2.md) for the active contract.
 
 ## Local development
 
-From repo root (first install once):
+From repo root:
 
 ```bash
 cd app && npm ci
 just pwa-run
 ```
 
-Type check and build:
+Type check:
 
 ```bash
-cd app && npm ci && npm run check
+cd app && npm run check
 ```
 
-## Deploy to Cloudflare Pages
+## Deploy
 
 From repo root:
 
 ```bash
 just cloudflare-release
 ```
-
-After deploy, install from browser:
-
-1. Open Pages URL on phone.
-2. Use browser install flow (`Add to Home Screen` / `Install app`).
-
-## BLE prerequisites / troubleshooting
-
-- Web Bluetooth requires a secure context (`https://` or `localhost`).
-- Linux Chrome may need experimental web platform features enabled for BLE:
-  1. Open `chrome://flags/#enable-experimental-web-platform-features`
-  2. Enable the flag.
-  3. Restart Chrome.

@@ -27,7 +27,7 @@ export function hasConfiguredDevice(boatId: string, boatSecret: string, connecte
 }
 
 export function hasActiveCloudRelayConnection(input: RelayConnectionInput): boolean {
-  if (input.latestStateSource !== "cloud/status.snapshot") {
+  if (input.latestStateSource !== "cloud/stream") {
     return false;
   }
   const maxAgeMs = Math.max(input.cloudPollMs * 3, 15_000);

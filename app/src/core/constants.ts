@@ -17,7 +17,7 @@ export const BLE_LAST_DEVICE_NAME_KEY = "anchorwatch.ble_last_device_name";
 export const WIFI_CFG_VERSION_KEY = "anchorwatch.wifi_cfg_version";
 export const PHONE_ID_KEY = "anchorwatch.phone_id";
 
-export const PROTOCOL_VERSION = "am.v1";
+export const PROTOCOL_VERSION = "am.v2";
 export const BLE_DEVICE_NAME_PREFIX = "Anqori-AnchorWatch-";
 export const BLE_SERVICE_UUID = "9f2d0000-87aa-4f4a-a0ea-4d5d4f415354";
 export const BLE_CONTROL_TX_UUID = "9f2d0001-87aa-4f4a-a0ea-4d5d4f415354";

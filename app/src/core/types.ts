@@ -1,7 +1,7 @@
 export type Mode = "fake" | "device";
 export type ConnectionRuntimeMode = "onboard" | "remote";
 export type AppConnectivityState = "UNCONFIGURED" | "CONFIGURED_BUT_UNCONNECTED" | "CONNECTED";
-export type InboundSource = "ble/eventRx" | "ble/snapshot" | "cloud/status.snapshot" | "fake/snapshot";
+export type InboundSource = "ble/eventRx" | "ble/snapshot" | "cloud/stream" | "fake/snapshot";
 export type DebugMessageDirection = "incoming" | "outgoing";
 export type DebugMessageRoute = "ble" | "relay" | "simulation";
 export type PillClass = "ok" | "warn" | "alarm";

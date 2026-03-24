@@ -8,7 +8,7 @@ import type {
   TrackPoint,
   WifiScanNetwork,
 } from "../core/types";
-import type { ConfigPatchCommand } from "../services/protocol-messages";
+import type { ConfigPartsCommand } from "../services/protocol-messages";
 import { appendDebugMessage } from "../state/app-state.svelte";
 import { getBoatId } from "../services/persistence-domain";
 import { geoDeltaMeters } from "../services/geo-nav";
@@ -19,6 +19,7 @@ import type {
   DeviceEvent,
   DeviceConnectionProbeResult,
   DeviceConnectionStatus,
+  DeviceWifiConnectInput,
 } from "./device-connection";
 
 interface FakeTick {
@@ -214,6 +215,14 @@ export class DeviceConnectionFake implements DeviceConnection {
 
   private lastHeadingUpdateMs = 0;
 
+  private wifiConnected = false;
+
+  private wifiSsid = "";
+
+  private wifiRssi = -58;
+
+  private wifiLastError = "";
+
   private alertsConfig: FakeAlertsConfig = defaultFakeAlertsConfig();
 
   private alertRuntime: Record<AlertId, FakeAlertRuntime> = defaultFakeAlertRuntime();
@@ -233,6 +242,10 @@ export class DeviceConnectionFake implements DeviceConnection {
     this.simulatedHeadingDeg = 0;
     this.lastHeadingUpdateMs = 0;
     this.alertRuntime = defaultFakeAlertRuntime();
+    this.wifiConnected = false;
+    this.wifiSsid = "";
+    this.wifiRssi = -58;
+    this.wifiLastError = "";
 
     this.publishInterval = setInterval(() => {
       this.publishSnapshot();
@@ -270,36 +283,36 @@ export class DeviceConnectionFake implements DeviceConnection {
     };
   }
 
-  async sendConfigPatch(command: ConfigPatchCommand): Promise<void> {
-    const patch = command.patch;
-    this.debugTraffic("outgoing", "config.patch", {
-      version: command.version,
-      patch,
+  async sendConfigParts(command: ConfigPartsCommand): Promise<void> {
+    const parts = command.parts;
+    const alarmConfig = isObject(parts.alarm_config) ? parts.alarm_config : {};
+    this.debugTraffic("outgoing", "update-config", {
+      parts,
     });
 
-    this.alertsConfig.anchor_distance.isEnabled = lookupPatchValue(patch, "alerts.anchor_distance.is_enabled") === true
+    this.alertsConfig.anchor_distance.isEnabled = lookupPatchValue(alarmConfig, "anchor_distance.is_enabled") === true
       ? true
-      : lookupPatchValue(patch, "alerts.anchor_distance.is_enabled") === false
+      : lookupPatchValue(alarmConfig, "anchor_distance.is_enabled") === false
         ? false
         : this.alertsConfig.anchor_distance.isEnabled;
-    this.alertsConfig.anchor_distance.minTimeMs = Math.max(0, toFiniteNumber(lookupPatchValue(patch, "alerts.anchor_distance.min_time_ms")) ?? this.alertsConfig.anchor_distance.minTimeMs);
+    this.alertsConfig.anchor_distance.minTimeMs = Math.max(0, toFiniteNumber(lookupPatchValue(alarmConfig, "anchor_distance.min_time_ms")) ?? this.alertsConfig.anchor_distance.minTimeMs);
     this.alertsConfig.anchor_distance.severity = alertSeverityFromPatch(
-      lookupPatchValue(patch, "alerts.anchor_distance.severity"),
+      lookupPatchValue(alarmConfig, "anchor_distance.severity"),
       this.alertsConfig.anchor_distance.severity,
     );
-    this.alertsConfig.anchor_distance.maxDistanceM = Math.max(0, toFiniteNumber(lookupPatchValue(patch, "alerts.anchor_distance.max_distance_m")) ?? this.alertsConfig.anchor_distance.maxDistanceM);
+    this.alertsConfig.anchor_distance.maxDistanceM = Math.max(0, toFiniteNumber(lookupPatchValue(alarmConfig, "anchor_distance.max_distance_m")) ?? this.alertsConfig.anchor_distance.maxDistanceM);
 
-    this.alertsConfig.boating_area.isEnabled = lookupPatchValue(patch, "alerts.boating_area.is_enabled") === true
+    this.alertsConfig.boating_area.isEnabled = lookupPatchValue(alarmConfig, "boating_area.is_enabled") === true
       ? true
-      : lookupPatchValue(patch, "alerts.boating_area.is_enabled") === false
+      : lookupPatchValue(alarmConfig, "boating_area.is_enabled") === false
         ? false
         : this.alertsConfig.boating_area.isEnabled;
-    this.alertsConfig.boating_area.minTimeMs = Math.max(0, toFiniteNumber(lookupPatchValue(patch, "alerts.boating_area.min_time_ms")) ?? this.alertsConfig.boating_area.minTimeMs);
+    this.alertsConfig.boating_area.minTimeMs = Math.max(0, toFiniteNumber(lookupPatchValue(alarmConfig, "boating_area.min_time_ms")) ?? this.alertsConfig.boating_area.minTimeMs);
     this.alertsConfig.boating_area.severity = alertSeverityFromPatch(
-      lookupPatchValue(patch, "alerts.boating_area.severity"),
+      lookupPatchValue(alarmConfig, "boating_area.severity"),
       this.alertsConfig.boating_area.severity,
     );
-    const boatingPolygon = lookupPatchValue(patch, "alerts.boating_area.polygon");
+    const boatingPolygon = lookupPatchValue(alarmConfig, "boating_area.polygon");
     if (Array.isArray(boatingPolygon)) {
       const polygonPoints: Array<{ lat: number; lon: number }> = [];
       for (const point of boatingPolygon) {
@@ -317,50 +330,50 @@ export class DeviceConnectionFake implements DeviceConnection {
       }
     }
 
-    this.alertsConfig.wind_strength.isEnabled = lookupPatchValue(patch, "alerts.wind_strength.is_enabled") === true
+    this.alertsConfig.wind_strength.isEnabled = lookupPatchValue(alarmConfig, "wind_strength.is_enabled") === true
       ? true
-      : lookupPatchValue(patch, "alerts.wind_strength.is_enabled") === false
+      : lookupPatchValue(alarmConfig, "wind_strength.is_enabled") === false
         ? false
         : this.alertsConfig.wind_strength.isEnabled;
-    this.alertsConfig.wind_strength.minTimeMs = Math.max(0, toFiniteNumber(lookupPatchValue(patch, "alerts.wind_strength.min_time_ms")) ?? this.alertsConfig.wind_strength.minTimeMs);
+    this.alertsConfig.wind_strength.minTimeMs = Math.max(0, toFiniteNumber(lookupPatchValue(alarmConfig, "wind_strength.min_time_ms")) ?? this.alertsConfig.wind_strength.minTimeMs);
     this.alertsConfig.wind_strength.severity = alertSeverityFromPatch(
-      lookupPatchValue(patch, "alerts.wind_strength.severity"),
+      lookupPatchValue(alarmConfig, "wind_strength.severity"),
       this.alertsConfig.wind_strength.severity,
     );
-    this.alertsConfig.wind_strength.maxTws = Math.max(0, toFiniteNumber(lookupPatchValue(patch, "alerts.wind_strength.max_tws")) ?? this.alertsConfig.wind_strength.maxTws);
+    this.alertsConfig.wind_strength.maxTws = Math.max(0, toFiniteNumber(lookupPatchValue(alarmConfig, "wind_strength.max_tws")) ?? this.alertsConfig.wind_strength.maxTws);
 
-    this.alertsConfig.depth.isEnabled = lookupPatchValue(patch, "alerts.depth.is_enabled") === true
+    this.alertsConfig.depth.isEnabled = lookupPatchValue(alarmConfig, "depth.is_enabled") === true
       ? true
-      : lookupPatchValue(patch, "alerts.depth.is_enabled") === false
+      : lookupPatchValue(alarmConfig, "depth.is_enabled") === false
         ? false
         : this.alertsConfig.depth.isEnabled;
-    this.alertsConfig.depth.minTimeMs = Math.max(0, toFiniteNumber(lookupPatchValue(patch, "alerts.depth.min_time_ms")) ?? this.alertsConfig.depth.minTimeMs);
+    this.alertsConfig.depth.minTimeMs = Math.max(0, toFiniteNumber(lookupPatchValue(alarmConfig, "depth.min_time_ms")) ?? this.alertsConfig.depth.minTimeMs);
     this.alertsConfig.depth.severity = alertSeverityFromPatch(
-      lookupPatchValue(patch, "alerts.depth.severity"),
+      lookupPatchValue(alarmConfig, "depth.severity"),
       this.alertsConfig.depth.severity,
     );
-    this.alertsConfig.depth.minDepth = Math.max(0, toFiniteNumber(lookupPatchValue(patch, "alerts.depth.min_depth")) ?? this.alertsConfig.depth.minDepth);
+    this.alertsConfig.depth.minDepth = Math.max(0, toFiniteNumber(lookupPatchValue(alarmConfig, "depth.min_depth")) ?? this.alertsConfig.depth.minDepth);
 
-    this.alertsConfig.data_outdated.isEnabled = lookupPatchValue(patch, "alerts.data_outdated.is_enabled") === true
+    this.alertsConfig.data_outdated.isEnabled = lookupPatchValue(alarmConfig, "data_outdated.is_enabled") === true
       ? true
-      : lookupPatchValue(patch, "alerts.data_outdated.is_enabled") === false
+      : lookupPatchValue(alarmConfig, "data_outdated.is_enabled") === false
         ? false
         : this.alertsConfig.data_outdated.isEnabled;
-    this.alertsConfig.data_outdated.minTimeMs = Math.max(0, toFiniteNumber(lookupPatchValue(patch, "alerts.data_outdated.min_time_ms")) ?? this.alertsConfig.data_outdated.minTimeMs);
+    this.alertsConfig.data_outdated.minTimeMs = Math.max(0, toFiniteNumber(lookupPatchValue(alarmConfig, "data_outdated.min_time_ms")) ?? this.alertsConfig.data_outdated.minTimeMs);
     this.alertsConfig.data_outdated.severity = alertSeverityFromPatch(
-      lookupPatchValue(patch, "alerts.data_outdated.severity"),
+      lookupPatchValue(alarmConfig, "data_outdated.severity"),
       this.alertsConfig.data_outdated.severity,
     );
-    this.alertsConfig.data_outdated.minAgeMs = Math.max(0, toFiniteNumber(lookupPatchValue(patch, "alerts.data_outdated.min_age")) ?? this.alertsConfig.data_outdated.minAgeMs);
+    this.alertsConfig.data_outdated.minAgeMs = Math.max(0, toFiniteNumber(lookupPatchValue(alarmConfig, "data_outdated.min_age")) ?? this.alertsConfig.data_outdated.minAgeMs);
 
     this.publishSnapshot();
-    this.debugTraffic("incoming", "command.ack", {
-      status: "ok",
+    this.debugTraffic("incoming", "update-config", {
+      state: "CLOSED_OK",
     });
   }
 
   async commandWifiScan(maxResults: number, includeHidden: boolean): Promise<WifiScanNetwork[]> {
-    this.debugTraffic("outgoing", "onboarding.wifi.scan", {
+    this.debugTraffic("outgoing", "scan-wlan", {
       maxResults,
       includeHidden,
     });
@@ -374,19 +387,38 @@ export class DeviceConnectionFake implements DeviceConnection {
       ? [...networks, hiddenNetwork]
       : [...networks];
     const result = resultNetworks.slice(0, Math.max(0, maxResults));
-    this.debugTraffic("incoming", "onboarding.wifi.scan_result", {
+    this.debugTraffic("incoming", "scan-wlan", {
+      state: "CLOSED_OK",
       networks: result,
     });
     return result;
   }
 
+  async commandWifiConnect(input: DeviceWifiConnectInput): Promise<DeviceCommandResult> {
+    this.debugTraffic("outgoing", "connect-wlan", input);
+    this.wifiConnected = true;
+    this.wifiSsid = input.ssid;
+    this.wifiLastError = "";
+    this.publishSnapshot();
+    this.debugTraffic("incoming", "connect-wlan", {
+      state: "CLOSED_OK",
+      ssid: input.ssid,
+    });
+    return {
+      accepted: true,
+      status: "ok",
+      errorCode: null,
+      errorDetail: null,
+    };
+  }
+
   async commandAnchorRise(): Promise<DeviceCommandResult> {
-    this.debugTraffic("outgoing", "anchor.rise", {});
+    this.debugTraffic("outgoing", "raise-anchor", {});
     this.anchorState = "up";
     this.points = [];
     this.publishSnapshot();
-    this.debugTraffic("incoming", "command.ack", {
-      status: "ok",
+    this.debugTraffic("incoming", "raise-anchor", {
+      state: "CLOSED_OK",
     });
     return {
       accepted: true,
@@ -397,7 +429,7 @@ export class DeviceConnectionFake implements DeviceConnection {
   }
 
   async commandAnchorDown(lat: number, lon: number): Promise<DeviceCommandResult> {
-    this.debugTraffic("outgoing", "anchor.down", { lat, lon });
+    this.debugTraffic("outgoing", "move-anchor", { lat, lon });
     const wasAnchorUp = this.anchorState === "up";
     this.anchorState = "down";
     this.anchorLat = Number.isFinite(lat) ? lat : null;
@@ -406,8 +438,8 @@ export class DeviceConnectionFake implements DeviceConnection {
       this.points = [];
     }
     this.publishSnapshot();
-    this.debugTraffic("incoming", "command.ack", {
-      status: "ok",
+    this.debugTraffic("incoming", "move-anchor", {
+      state: "CLOSED_OK",
     });
     return {
       accepted: true,
@@ -418,7 +450,7 @@ export class DeviceConnectionFake implements DeviceConnection {
   }
 
   async commandAlarmSilence(seconds: number): Promise<DeviceCommandResult> {
-    this.debugTraffic("outgoing", "alarm.silence.request", { seconds });
+    this.debugTraffic("outgoing", "silence-alarm", { seconds });
     const nowTs = Date.now();
     const silenceMs = Math.max(1000, Math.min(24 * 60 * 60 * 1000, Math.floor(seconds * 1000)));
     const silenceUntilTs = nowTs + silenceMs;
@@ -435,8 +467,8 @@ export class DeviceConnectionFake implements DeviceConnection {
     }
 
     this.publishSnapshot();
-    this.debugTraffic("incoming", "command.ack", {
-      status: "ok",
+    this.debugTraffic("incoming", "silence-alarm", {
+      state: "CLOSED_OK",
     });
     return {
       accepted: true,
@@ -447,20 +479,24 @@ export class DeviceConnectionFake implements DeviceConnection {
   }
 
   async requestStateSnapshot(): Promise<JsonRecord | null> {
-    this.debugTraffic("outgoing", "status.snapshot.request", {});
+    this.debugTraffic("outgoing", "get-data", {});
     const snapshot = this.buildSnapshot().snapshot;
-    this.debugTraffic("incoming", "status.snapshot", { snapshot });
+    this.debugTraffic("incoming", "get-data", {
+      state: "ONGOING",
+      snapshot,
+      track_points: this.points,
+    });
     return snapshot;
   }
 
   async requestTrackSnapshot(limit: number): Promise<TrackPoint[] | null> {
-    this.debugTraffic("outgoing", "track.snapshot.request", { limit });
+    this.debugTraffic("outgoing", "get-data", { limit });
     if (limit <= 0) {
-      this.debugTraffic("incoming", "track.snapshot", { points: [] });
+      this.debugTraffic("incoming", "get-data", { state: "ONGOING", track_points: [] });
       return [];
     }
     const points = this.points.slice(-limit);
-    this.debugTraffic("incoming", "track.snapshot", { points });
+    this.debugTraffic("incoming", "get-data", { state: "ONGOING", track_points: points });
     return points;
   }
 
@@ -515,8 +551,10 @@ export class DeviceConnectionFake implements DeviceConnection {
     this.debugTraffic("incoming", "alerts.state", {
       alerts: tick.alerts,
     });
-    this.debugTraffic("incoming", "status.snapshot", {
+    this.debugTraffic("incoming", "get-data", {
+      state: "ONGOING",
       snapshot,
+      track_points: this.points,
     });
 
     for (const subscriber of this.eventSubscribers) {
@@ -569,6 +607,17 @@ export class DeviceConnectionFake implements DeviceConnection {
       simulation: {
         stateText: tick.stateText,
         stateClass: tick.stateClass,
+      },
+      system: {
+        wifi: {
+          connected: this.wifiConnected,
+          ssid: this.wifiSsid,
+          rssi: this.wifiConnected ? this.wifiRssi : 0,
+          lastError: this.wifiLastError,
+        },
+        cloud: {
+          reachable: this.wifiConnected,
+        },
       },
       anchor: {
         state: this.anchorState,

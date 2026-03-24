@@ -17,7 +17,6 @@ import {
   setSummaryState,
   setTelemetry,
   setBoatId,
-  setBoatSecret,
   renderTelemetryFromLatestState,
 } from "../state/app-state.svelte";
 import type { DeviceConnection, DeviceConnectionStatus, DeviceEvent } from "../connections/device-connection";
@@ -229,25 +228,12 @@ export class DeviceLinker {
       return;
     }
 
-    if (event.type === "onboarding.boatSecret") {
-      if (event.onboardingBoatId) {
-        setBoatId(event.onboardingBoatId);
-      }
-      if (event.boatSecret && event.boatSecret.trim()) {
-        setBoatSecret(event.boatSecret);
-        logLine("received onboarding.boat_secret and stored secret");
-      } else {
-        logLine("onboarding.boat_secret missing boatSecret");
-      }
-      return;
-    }
-
     if (event.type === "track.snapshot") {
       if (event.points.length > 0) {
         replaceTrackPoints(event.points);
-        logLine(`track.snapshot received (${event.points.length} points)`);
+        logLine(`get-data track updated (${event.points.length} points)`);
       } else {
-        logLine("track.snapshot received (no valid points)");
+        logLine("get-data track updated (no valid points)");
       }
       return;
     }
@@ -283,13 +269,7 @@ export class DeviceLinker {
     try {
       await connection.requestStateSnapshot();
     } catch (error) {
-      logLine(`${connection.kind} initial status.snapshot failed: ${String(error)}`);
-    }
-
-    try {
-      await connection.requestTrackSnapshot(TRACK_SNAPSHOT_LIMIT);
-    } catch (error) {
-      logLine(`${connection.kind} initial track.snapshot failed: ${String(error)}`);
+      logLine(`${connection.kind} initial get-data failed: ${String(error)}`);
     }
   }
 

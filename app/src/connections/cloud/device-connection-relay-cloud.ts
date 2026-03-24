@@ -1,16 +1,32 @@
-import type { Envelope, InboundSource, JsonRecord, PendingAck, TrackPoint, WifiScanNetwork } from "../../core/types";
-import { isObject, parseTrackSnapshot, parseWifiScanNetworks, safeParseJson } from "../../services/data-utils";
-import { buildConfigPatchPayload, buildProtocolEnvelope, type ConfigPatchCommand } from "../../services/protocol-messages";
-import { readAlertRuntimeEntries } from "../../services/state-derive";
+import type { InboundSource, JsonRecord, PendingAck, TrackPoint, WifiScanNetwork } from "../../core/types";
+import { TRACK_MAX_POINTS } from "../../core/constants";
+import { deepMerge, isObject, parseWifiScanNetworks, safeParseJson } from "../../services/data-utils";
+import {
+  applyPartVersions,
+  applyUpdateVersion,
+  mapProtocolPartToLegacyPatch,
+  mapProtocolPartsToLegacyState,
+  readProtocolPartUpdate,
+  readProtocolSnapshotParts,
+  readProtocolTrackAppend,
+} from "../../services/protocol-v2-state";
+import {
+  buildCancelPayload,
+  buildCommandEnvelope,
+  buildConfigUpdatePayload,
+  extractProtocolError,
+  makeRequestId,
+  normalizeReplyState,
+  type ConfigPartsCommand,
+} from "../../services/protocol-messages";
 import { appendDebugMessage } from "../../state/app-state.svelte";
-import { makeAckPromise, clearPendingAcks, resolvePendingAckFromPayload } from "../ble/ble-session";
-import { makeMsgId } from "../ble/ble-transport";
 import type {
   DeviceConnection,
   DeviceCommandResult,
-  DeviceEvent,
   DeviceConnectionProbeResult,
   DeviceConnectionStatus,
+  DeviceEvent,
+  DeviceWifiConnectInput,
 } from "../device-connection";
 
 export interface RelayCloudCredentials {
@@ -19,26 +35,14 @@ export interface RelayCloudCredentials {
   boatSecret: string;
 }
 
-interface PendingSnapshotRequest {
-  resolve: (snapshot: JsonRecord | null) => void;
+const RELAY_SOURCE: InboundSource = "cloud/stream";
+
+interface PendingDataStart {
+  promise: Promise<void>;
+  resolve: () => void;
   reject: (error: Error) => void;
   timeout: ReturnType<typeof setTimeout>;
 }
-
-interface PendingTrackRequest {
-  resolve: (points: TrackPoint[] | null) => void;
-  reject: (error: Error) => void;
-  timeout: ReturnType<typeof setTimeout>;
-}
-
-interface PendingWifiScanRequest {
-  resolve: (networks: WifiScanNetwork[]) => void;
-  reject: (error: Error) => void;
-  timeout: ReturnType<typeof setTimeout>;
-}
-
-const RELAY_SOURCE: InboundSource = "cloud/status.snapshot";
-const WIFI_SCAN_RESULT_TIMEOUT_MS = 20_000;
 
 export class DeviceConnectionRelayCloud implements DeviceConnection {
   readonly kind = "cloud-relay" as const;
@@ -53,24 +57,25 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
 
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-  private seq = 1;
-
   private eventSubscribers = new Set<(event: DeviceEvent) => void>();
 
   private statusSubscribers = new Set<(status: DeviceConnectionStatus) => void>();
 
-  private pendingAcks = new Map<string, PendingAck>();
+  private pendingReplies = new Map<string, PendingAck>();
 
-  private pendingSnapshots: PendingSnapshotRequest[] = [];
+  private pendingDataStart: PendingDataStart | null = null;
 
-  private pendingTracks: PendingTrackRequest[] = [];
+  private activeDataRequestId: string | null = null;
 
-  private pendingWifiScans = new Map<string, PendingWifiScanRequest>();
+  private cachedSnapshot: JsonRecord | null = null;
+
+  private cachedTrack: TrackPoint[] = [];
+
+  private knownPartVersions: Record<string, number> = {};
 
   constructor(
     private readonly readCredentials: () => RelayCloudCredentials | null,
     private readonly getDeviceId: () => string,
-    private readonly protocolVersion: string,
   ) {}
 
   async connect(): Promise<void> {
@@ -111,6 +116,7 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
   async disconnect(): Promise<void> {
     this.wantConnected = false;
     this.clearReconnectTimer();
+    await this.cancelActiveDataRequest("disconnect");
 
     const socket = this.ws;
     this.ws = null;
@@ -141,81 +147,70 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
     };
   }
 
-  async sendConfigPatch(command: ConfigPatchCommand): Promise<void> {
-    await this.sendEnvelope("config.patch", buildConfigPatchPayload(command), true);
+  async sendConfigParts(command: ConfigPartsCommand): Promise<void> {
+    const ifVersions = command.ifVersions ?? this.buildIfVersions(Object.keys(command.parts), "config");
+    await this.sendTerminalCommand("update-config", buildConfigUpdatePayload({
+      parts: command.parts,
+      ifVersions,
+    }));
   }
 
   async commandWifiScan(maxResults: number, includeHidden: boolean): Promise<WifiScanNetwork[]> {
-    const requestId = `wifi-${makeMsgId()}`;
-    const scanResultPromise = this.makeWifiScanPromise(requestId);
-    try {
-      const ack = await this.sendEnvelope("onboarding.wifi.scan", {
-        requestId,
-        maxResults,
-        includeHidden,
-      }, true);
-      const ackRequestId = typeof ack?.requestId === "string" ? ack.requestId.trim() : "";
-      if (ackRequestId && ackRequestId !== requestId) {
-        this.rekeyPendingWifiScanRequest(requestId, ackRequestId);
-      }
-      if (ack && "networks" in ack) {
-        this.handleWifiScanResult({ requestId: ackRequestId || requestId, networks: ack.networks });
-      }
-    } catch (error) {
-      this.rejectPendingWifiScanRequest(requestId, error);
-      throw error;
-    }
-    return await scanResultPromise;
+    const reply = await this.sendTerminalCommand("scan-wlan", {
+      max_results: Math.max(1, Math.floor(maxResults)),
+      include_hidden: includeHidden,
+    });
+    return parseWifiScanNetworks(reply.networks);
+  }
+
+  async commandWifiConnect(input: DeviceWifiConnectInput): Promise<DeviceCommandResult> {
+    const reply = await this.sendTerminalCommand("connect-wlan", {
+      ssid: input.ssid,
+      passphrase: input.passphrase,
+      security: input.security,
+      country: input.country,
+      hidden: input.hidden,
+      if_versions: this.buildIfVersions(["wlan_config"], "config"),
+    });
+    return this.buildAcceptedResult(reply);
   }
 
   async commandAnchorRise(): Promise<DeviceCommandResult> {
-    const ack = await this.sendEnvelope("anchor.rise", {}, true);
-    return this.parseCommandResult(ack);
+    const reply = await this.sendTerminalCommand("raise-anchor", {
+      if_versions: this.buildIfVersions(["anchor_position"], "config"),
+    });
+    return this.buildAcceptedResult(reply);
   }
 
   async commandAnchorDown(lat: number, lon: number): Promise<DeviceCommandResult> {
-    const ack = await this.sendEnvelope("anchor.down", { lat, lon }, true);
-    return this.parseCommandResult(ack);
+    const reply = await this.sendTerminalCommand("move-anchor", {
+      lat,
+      lon,
+      if_versions: this.buildIfVersions(["anchor_position"], "config"),
+    });
+    return this.buildAcceptedResult(reply);
   }
 
   async commandAlarmSilence(seconds: number): Promise<DeviceCommandResult> {
     const silenceForMs = Math.max(1000, Math.min(24 * 60 * 60 * 1000, Math.floor(seconds * 1000)));
-    const ack = await this.sendEnvelope("alarm.silence.request", { silenceForMs }, true);
-    return this.parseCommandResult(ack);
+    const reply = await this.sendTerminalCommand("silence-alarm", {
+      silence_for_ms: silenceForMs,
+      if_versions: this.buildIfVersions(["alarm_state"], "state"),
+    });
+    return this.buildAcceptedResult(reply);
   }
 
   async requestStateSnapshot(): Promise<JsonRecord | null> {
-    await this.ensureConnected();
-
-    const snapshotPromise = new Promise<JsonRecord | null>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.pendingSnapshots = this.pendingSnapshots.filter((entry) => entry !== pending);
-        resolve(null);
-      }, 3500);
-      const pending: PendingSnapshotRequest = { resolve, reject, timeout };
-      this.pendingSnapshots.push(pending);
-    });
-
-    await this.sendEnvelope("status.snapshot.request", {}, false);
-    return snapshotPromise;
+    await this.ensureDataStream();
+    return this.cachedSnapshot;
   }
 
   async requestTrackSnapshot(limit: number): Promise<TrackPoint[] | null> {
-    await this.ensureConnected();
-
-    const trackPromise = new Promise<TrackPoint[] | null>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.pendingTracks = this.pendingTracks.filter((entry) => entry !== pending);
-        resolve(null);
-      }, 4500);
-      const pending: PendingTrackRequest = { resolve, reject, timeout };
-      this.pendingTracks.push(pending);
-    });
-
-    await this.sendEnvelope("track.snapshot.request", {
-      limit: Math.max(1, Math.floor(limit)),
-    }, false);
-    return trackPromise;
+    await this.ensureDataStream();
+    if (limit <= 0) {
+      return [];
+    }
+    return this.cachedTrack.slice(-Math.max(1, Math.floor(limit)));
   }
 
   async probe(base?: string): Promise<DeviceConnectionProbeResult> {
@@ -244,8 +239,7 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
       role: "app",
     });
 
-    const probeResult = await this.probeViaTemporarySocket(probeSocketUrl, currentCredentials.boatId);
-    return probeResult;
+    return await this.probeViaTemporarySocket(probeSocketUrl);
   }
 
   private async openSocket(credentials: RelayCloudCredentials): Promise<void> {
@@ -294,12 +288,11 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
     });
   }
 
-  private async probeViaTemporarySocket(socketUrl: string, boatId: string): Promise<DeviceConnectionProbeResult> {
+  private async probeViaTemporarySocket(socketUrl: string): Promise<DeviceConnectionProbeResult> {
     const socket = new WebSocket(socketUrl);
 
     return await new Promise<DeviceConnectionProbeResult>((resolve, reject) => {
       let done = false;
-      const msgId = makeMsgId();
 
       const finish = (result: DeviceConnectionProbeResult, isError = false): void => {
         if (done) {
@@ -316,79 +309,36 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
       };
 
       const timeout = setTimeout(() => {
-        finish({ ok: false, resultText: "relay probe timeout", buildVersion: null }, true);
+        finish({ ok: false, resultText: "relay socket timeout", buildVersion: null }, true);
       }, 3500);
 
       socket.addEventListener("open", () => {
-        const envelope = buildProtocolEnvelope({
-          protocolVersion: this.protocolVersion,
-          msgType: "relay.probe",
-          msgId,
-          boatId,
-          deviceId: this.getDeviceId(),
-          seq: 1,
-          requiresAck: false,
-          payload: {},
-        });
-        const raw = JSON.stringify(envelope);
-        this.debugTraffic("outgoing", "relay.probe", raw);
-        socket.send(raw);
-      });
-
-      socket.addEventListener("message", (event) => {
-        if (typeof event.data !== "string") {
-          return;
-        }
-        const parsed = safeParseJson(event.data);
-        if (!parsed) {
-          return;
-        }
-        const msgType = typeof parsed.msgType === "string" ? parsed.msgType : "";
-        this.debugTraffic("incoming", msgType || "unknown", event.data);
-        if (msgType !== "relay.probe.result") {
-          return;
-        }
-        const payload = isObject(parsed.payload) ? parsed.payload : {};
-        const inReplyToMsgId = typeof payload.inReplyToMsgId === "string" ? payload.inReplyToMsgId : "";
-        if (inReplyToMsgId && inReplyToMsgId !== msgId) {
-          return;
-        }
-
-        const ok = payload.ok === true;
-        const resultText = typeof payload.resultText === "string"
-          ? payload.resultText
-          : ok
-            ? "relay probe ok"
-            : "relay probe failed";
-        const buildVersion = typeof payload.buildVersion === "string" && payload.buildVersion.trim()
-          ? payload.buildVersion.trim()
-          : null;
-
-        finish({ ok, resultText, buildVersion }, !ok);
+        finish({ ok: true, resultText: "relay socket accepted", buildVersion: null });
       });
 
       socket.addEventListener("error", () => {
-        finish({ ok: false, resultText: "relay probe socket error", buildVersion: null }, true);
+        finish({ ok: false, resultText: "relay socket error", buildVersion: null }, true);
       });
 
       socket.addEventListener("close", () => {
         if (!done) {
-          finish({ ok: false, resultText: "relay probe socket closed", buildVersion: null }, true);
+          finish({ ok: false, resultText: "relay socket closed", buildVersion: null }, true);
         }
       });
     });
   }
 
-  private parseCommandResult(ack: JsonRecord | null): DeviceCommandResult {
-    const rawStatus = typeof ack?.status === "string" ? ack.status.trim() : "";
-    if (rawStatus === "ok" || rawStatus === "accepted" || rawStatus === "failed" || rawStatus === "rejected") {
-      const errorCode = typeof ack?.errorCode === "string" && ack.errorCode.trim() ? ack.errorCode : null;
-      const errorDetail = typeof ack?.errorDetail === "string" && ack.errorDetail.trim() ? ack.errorDetail : null;
+  private buildAcceptedResult(data: JsonRecord): DeviceCommandResult {
+    const rawStatus = typeof data.status === "string" ? data.status.trim() : "";
+    if (rawStatus === "ok" || rawStatus === "accepted") {
+      return { accepted: true, status: rawStatus, errorCode: null, errorDetail: null };
+    }
+    if (rawStatus === "failed" || rawStatus === "rejected") {
       return {
-        accepted: rawStatus === "ok" || rawStatus === "accepted",
+        accepted: false,
         status: rawStatus,
-        errorCode,
-        errorDetail,
+        errorCode: typeof data.errorCode === "string" ? data.errorCode : null,
+        errorDetail: typeof data.errorDetail === "string" ? data.errorDetail : null,
       };
     }
     return {
@@ -399,62 +349,15 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
     };
   }
 
-  private makeWifiScanPromise(requestId: string): Promise<WifiScanNetwork[]> {
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.pendingWifiScans.delete(requestId);
-        reject(new Error("WLAN scan result timeout"));
-      }, WIFI_SCAN_RESULT_TIMEOUT_MS);
-      this.pendingWifiScans.set(requestId, { resolve, reject, timeout });
-    });
-  }
-
-  private rejectPendingWifiScanRequest(requestId: string, error: unknown): void {
-    const pending = this.pendingWifiScans.get(requestId);
-    if (!pending) {
-      return;
+  private buildIfVersions(partNames: string[], group: "state" | "config"): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const partName of partNames) {
+      const key = `${group}:${partName}`;
+      if (typeof this.knownPartVersions[key] === "number") {
+        out[partName] = this.knownPartVersions[key];
+      }
     }
-    clearTimeout(pending.timeout);
-    this.pendingWifiScans.delete(requestId);
-    pending.reject(error instanceof Error ? error : new Error(String(error)));
-  }
-
-  private rekeyPendingWifiScanRequest(previousRequestId: string, nextRequestId: string): void {
-    if (previousRequestId === nextRequestId || this.pendingWifiScans.has(nextRequestId)) {
-      return;
-    }
-    const pending = this.pendingWifiScans.get(previousRequestId);
-    if (!pending) {
-      return;
-    }
-    this.pendingWifiScans.delete(previousRequestId);
-    this.pendingWifiScans.set(nextRequestId, pending);
-  }
-
-  private handleWifiScanResult(payload: JsonRecord): void {
-    const requestId = typeof payload.requestId === "string" ? payload.requestId.trim() : "";
-    let pendingKey = requestId;
-    let pending = pendingKey ? this.pendingWifiScans.get(pendingKey) : undefined;
-    if (!pending && this.pendingWifiScans.size === 1) {
-      const [fallbackKey, fallbackPending] = this.pendingWifiScans.entries().next().value as [string, PendingWifiScanRequest];
-      pendingKey = fallbackKey;
-      pending = fallbackPending;
-    }
-    if (!pending) {
-      return;
-    }
-
-    clearTimeout(pending.timeout);
-    this.pendingWifiScans.delete(pendingKey);
-
-    const errorCode = typeof payload.errorCode === "string" ? payload.errorCode.trim() : "";
-    const errorDetail = typeof payload.errorDetail === "string" ? payload.errorDetail.trim() : "";
-    if (errorCode || errorDetail) {
-      pending.reject(new Error(`${errorCode || "DEVICE_FAILED"}: ${errorDetail || "WLAN scan failed"}`));
-      return;
-    }
-
-    pending.resolve(parseWifiScanNetworks(payload.networks));
+    return out;
   }
 
   private async ensureConnected(): Promise<void> {
@@ -467,43 +370,228 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
     }
   }
 
-  private async sendEnvelope(msgType: string, payload: JsonRecord, requiresAck: boolean): Promise<JsonRecord | null> {
+  private async ensureDataStream(): Promise<void> {
     await this.ensureConnected();
 
-    const credentials = this.requireCredentials();
+    if (this.activeDataRequestId && this.cachedSnapshot) {
+      return;
+    }
+    if (this.pendingDataStart) {
+      await this.pendingDataStart.promise;
+      return;
+    }
+
+    await this.cancelActiveDataRequest("replace");
+
+    const reqId = makeRequestId();
+    let resolveStart!: () => void;
+    let rejectStart!: (error: Error) => void;
+    const promise = new Promise<void>((resolve, reject) => {
+      resolveStart = resolve;
+      rejectStart = reject;
+    });
+    const pending: PendingDataStart = {
+      promise,
+      resolve: resolveStart,
+      reject: rejectStart,
+      timeout: setTimeout(() => {
+        if (this.pendingDataStart === pending) {
+          this.pendingDataStart = null;
+        }
+        if (this.activeDataRequestId === reqId) {
+          this.activeDataRequestId = null;
+        }
+        rejectStart(new Error("get-data start timeout"));
+      }, 4500),
+    };
+    this.pendingDataStart = pending;
+    this.activeDataRequestId = reqId;
+    await this.sendRawCommand({
+      req_id: reqId,
+      command: "get-data",
+      data: {},
+    });
+    await pending.promise;
+  }
+
+  private async cancelActiveDataRequest(reason: string): Promise<void> {
+    if (this.pendingDataStart) {
+      clearTimeout(this.pendingDataStart.timeout);
+      this.pendingDataStart.reject(new Error(`get-data canceled: ${reason}`));
+      this.pendingDataStart = null;
+    }
+    if (!this.activeDataRequestId || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      this.activeDataRequestId = null;
+      return;
+    }
+
+    const originalReqId = this.activeDataRequestId;
+    this.activeDataRequestId = null;
+    this.pendingDataStart = null;
+    try {
+      await this.sendTerminalCommand("cancel", buildCancelPayload(originalReqId));
+      this.debugTraffic("outgoing", "cancel", { reason, original_req_id: originalReqId });
+    } catch {
+      // Best-effort cleanup only.
+    }
+  }
+
+  private async sendTerminalCommand(command: string, data: JsonRecord): Promise<JsonRecord> {
+    await this.ensureConnected();
+    const reqId = makeRequestId();
+    const responsePromise = new Promise<JsonRecord>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingReplies.delete(reqId);
+        reject(new Error(`${command} timeout`));
+      }, 5000);
+      this.pendingReplies.set(reqId, { resolve, reject, timeout });
+    });
+
+    try {
+      await this.sendRawCommand(buildCommandEnvelope({ reqId, command, data }));
+      return await responsePromise;
+    } catch (error) {
+      const pending = this.pendingReplies.get(reqId);
+      if (pending) {
+        clearTimeout(pending.timeout);
+        this.pendingReplies.delete(reqId);
+      }
+      throw error;
+    }
+  }
+
+  private async sendRawCommand(envelope: { req_id: string; command: string; data: JsonRecord }): Promise<void> {
+    await this.ensureConnected();
     const ws = this.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       throw new Error("Relay WebSocket not connected");
     }
 
-    const envelope = buildProtocolEnvelope({
-      protocolVersion: this.protocolVersion,
-      msgType,
-      msgId: makeMsgId(),
-      boatId: credentials.boatId,
-      deviceId: this.getDeviceId(),
-      seq: this.seq++,
-      requiresAck,
-      payload,
-    });
-
     const raw = JSON.stringify(envelope);
-    const ackPromise = requiresAck && envelope.msgId
-      ? makeAckPromise(this.pendingAcks, envelope.msgId)
-      : null;
+    this.debugTraffic("outgoing", envelope.command, raw);
+    ws.send(raw);
+  }
 
-    try {
-      this.debugTraffic("outgoing", msgType, raw);
-      ws.send(raw);
-      if (!ackPromise) {
-        return null;
+  private handleSocketClosed(socket: WebSocket): void {
+    if (this.ws !== socket) {
+      return;
+    }
+
+    this.ws = null;
+    this.failPending("Relay disconnected");
+    this.setConnected(false);
+    this.scheduleReconnect();
+  }
+
+  private handleSocketMessage(event: MessageEvent): void {
+    if (typeof event.data !== "string") {
+      return;
+    }
+
+    const envelope = safeParseJson(event.data);
+    if (!envelope) {
+      return;
+    }
+
+    const reqId = typeof envelope.req_id === "string" ? envelope.req_id : "";
+    const command = typeof envelope.command === "string" ? envelope.command : "";
+    const state = normalizeReplyState(envelope.state);
+    const data = isObject(envelope.data) ? envelope.data : {};
+    if (!reqId || !command || !state) {
+      this.debugTraffic("incoming", "unknown", event.data);
+      return;
+    }
+
+    this.debugTraffic("incoming", command, event.data);
+
+    if (command === "get-data") {
+      this.handleGetDataReply(reqId, state, data);
+      return;
+    }
+
+    if (state === "ONGOING") {
+      return;
+    }
+
+    const pending = this.pendingReplies.get(reqId);
+    if (!pending) {
+      return;
+    }
+    clearTimeout(pending.timeout);
+    this.pendingReplies.delete(reqId);
+
+    if (state === "CLOSED_OK") {
+      pending.resolve(data);
+      return;
+    }
+
+    const protocolError = extractProtocolError(data);
+    pending.reject(new Error(`${protocolError.code}: ${protocolError.message}`));
+  }
+
+  private handleGetDataReply(reqId: string, state: "ONGOING" | "CLOSED_OK" | "CLOSED_FAILED", data: JsonRecord): void {
+    const snapshot = readProtocolSnapshotParts(data);
+    if (snapshot) {
+      applyPartVersions(this.knownPartVersions, snapshot);
+      this.cachedSnapshot = mapProtocolPartsToLegacyState(snapshot);
+      this.cachedTrack = snapshot.trackPoints.slice(-TRACK_MAX_POINTS);
+      this.emitEvent({
+        type: "state.snapshot",
+        source: RELAY_SOURCE,
+        snapshot: this.cachedSnapshot,
+      });
+      if (this.cachedTrack.length > 0) {
+        this.emitEvent({
+          type: "track.snapshot",
+          source: RELAY_SOURCE,
+          points: this.cachedTrack,
+        });
       }
-      return await ackPromise;
-    } catch (error) {
-      if (envelope.msgId) {
-        this.pendingAcks.delete(envelope.msgId);
+      if (this.pendingDataStart && this.activeDataRequestId === reqId) {
+        const pending = this.pendingDataStart;
+        this.pendingDataStart = null;
+        clearTimeout(pending.timeout);
+        pending.resolve();
       }
-      throw error;
+    }
+
+    const update = readProtocolPartUpdate(data);
+    if (update) {
+      applyUpdateVersion(this.knownPartVersions, update);
+      const patch = mapProtocolPartToLegacyPatch(update.group, update.name, update.value);
+      if (Object.keys(patch).length > 0) {
+        this.cachedSnapshot = deepMerge(this.cachedSnapshot ?? {}, patch);
+        this.emitEvent({
+          type: "state.patch",
+          source: RELAY_SOURCE,
+          patch,
+        });
+      }
+    }
+
+    const appendedTrack = readProtocolTrackAppend(data);
+    if (appendedTrack.length > 0) {
+      this.cachedTrack = [...this.cachedTrack, ...appendedTrack].slice(-TRACK_MAX_POINTS);
+      this.emitEvent({
+        type: "track.snapshot",
+        source: RELAY_SOURCE,
+        points: this.cachedTrack,
+      });
+    }
+
+    if (state !== "ONGOING" && this.activeDataRequestId === reqId) {
+      this.activeDataRequestId = null;
+      if (this.pendingDataStart) {
+        const pending = this.pendingDataStart;
+        this.pendingDataStart = null;
+        clearTimeout(pending.timeout);
+        if (state === "CLOSED_OK") {
+          pending.resolve();
+        } else {
+          const protocolError = extractProtocolError(data);
+          pending.reject(new Error(`${protocolError.code}: ${protocolError.message}`));
+        }
+      }
     }
   }
 
@@ -540,16 +628,12 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
     if (!this.wantConnected || this.reconnectTimer) {
       return;
     }
-
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      if (!this.wantConnected) {
-        return;
-      }
       void this.connect().catch(() => {
-        this.scheduleReconnect();
+        // Retry loop is handled by connect -> scheduleReconnect.
       });
-    }, 1500);
+    }, 2500);
   }
 
   private clearReconnectTimer(): void {
@@ -561,156 +645,19 @@ export class DeviceConnectionRelayCloud implements DeviceConnection {
   }
 
   private failPending(reason: string): void {
-    clearPendingAcks(this.pendingAcks, reason);
-
-    for (const pending of this.pendingSnapshots) {
+    for (const pending of this.pendingReplies.values()) {
       clearTimeout(pending.timeout);
       pending.reject(new Error(reason));
     }
-    this.pendingSnapshots = [];
+    this.pendingReplies.clear();
 
-    for (const pending of this.pendingTracks) {
-      clearTimeout(pending.timeout);
-      pending.reject(new Error(reason));
-    }
-    this.pendingTracks = [];
-
-    for (const pending of this.pendingWifiScans.values()) {
-      clearTimeout(pending.timeout);
-      pending.reject(new Error(reason));
-    }
-    this.pendingWifiScans.clear();
-  }
-
-  private handleSocketClosed(socket: WebSocket): void {
-    if (this.ws !== socket) {
-      return;
+    if (this.pendingDataStart) {
+      clearTimeout(this.pendingDataStart.timeout);
+      this.pendingDataStart.reject(new Error(reason));
+      this.pendingDataStart = null;
     }
 
-    this.ws = null;
-    this.failPending("Relay disconnected");
-    this.setConnected(false);
-    this.scheduleReconnect();
-  }
-
-  private handleSocketMessage(event: MessageEvent): void {
-    if (typeof event.data !== "string") {
-      return;
-    }
-
-    const envelope = safeParseJson(event.data) as Envelope | null;
-    if (!envelope || !isObject(envelope)) {
-      return;
-    }
-    const msgType = typeof envelope.msgType === "string" && envelope.msgType ? envelope.msgType : "unknown";
-    this.debugTraffic("incoming", msgType, event.data);
-
-    if (envelope.msgType === "command.ack") {
-      const payload = isObject(envelope.payload) ? envelope.payload : {};
-      resolvePendingAckFromPayload(this.pendingAcks, payload);
-      return;
-    }
-    if (envelope.msgType === "onboarding.wifi.scan_result") {
-      const payload = isObject(envelope.payload) ? envelope.payload : {};
-      this.handleWifiScanResult(payload);
-      return;
-    }
-
-    const deviceEvent = this.toDeviceEvent(envelope);
-    if (!deviceEvent) {
-      return;
-    }
-
-    if (deviceEvent.type === "state.snapshot" && isObject(deviceEvent.snapshot)) {
-      const pending = this.pendingSnapshots.shift();
-      if (pending) {
-        clearTimeout(pending.timeout);
-        pending.resolve(deviceEvent.snapshot);
-      }
-    }
-
-    if (deviceEvent.type === "track.snapshot") {
-      const pending = this.pendingTracks.shift();
-      if (pending) {
-        clearTimeout(pending.timeout);
-        pending.resolve(deviceEvent.points);
-      }
-    }
-
-    this.emitEvent(deviceEvent);
-  }
-
-  private toDeviceEvent(envelope: Envelope): DeviceEvent | null {
-    const boatId = typeof envelope.boatId === "string" && envelope.boatId ? envelope.boatId : undefined;
-    const payload: JsonRecord = isObject(envelope.payload) ? envelope.payload : {};
-    const msgType = typeof envelope.msgType === "string" && envelope.msgType ? envelope.msgType : "unknown";
-
-    if (msgType === "relay.probe.result" || msgType === "relay.error") {
-      return null;
-    }
-
-    if (msgType === "status.patch") {
-      return {
-        type: "state.patch",
-        source: RELAY_SOURCE,
-        boatId,
-        patch: payload.statePatch,
-      };
-    }
-
-    if (msgType === "status.snapshot") {
-      return {
-        type: "state.snapshot",
-        source: RELAY_SOURCE,
-        boatId,
-        snapshot: payload.snapshot,
-      };
-    }
-
-    if (msgType === "onboarding.boat_secret") {
-      return {
-        type: "onboarding.boatSecret",
-        source: RELAY_SOURCE,
-        boatId,
-        onboardingBoatId: typeof payload.boatId === "string" ? payload.boatId : undefined,
-        boatSecret: typeof payload.boatSecret === "string" ? payload.boatSecret : undefined,
-      };
-    }
-
-    if (msgType === "track.snapshot") {
-      return {
-        type: "track.snapshot",
-        source: RELAY_SOURCE,
-        boatId,
-        points: parseTrackSnapshot(payload),
-      };
-    }
-
-    if (msgType === "alerts.state" || msgType === "alarm.state") {
-      const alertsPayload = isObject(payload.alerts) ? payload.alerts : payload;
-      return {
-        type: "alerts.state",
-        source: RELAY_SOURCE,
-        boatId,
-        alerts: readAlertRuntimeEntries({ alerts: alertsPayload }),
-      };
-    }
-
-    return {
-      type: "unknown",
-      source: RELAY_SOURCE,
-      boatId,
-      msgType,
-      payload,
-    };
-  }
-
-  private requireCredentials(): RelayCloudCredentials {
-    const credentials = this.readCredentials();
-    if (!credentials) {
-      throw new Error("Cloud relay credentials missing (relay URL + boatId + boatSecret)");
-    }
-    return credentials;
+    this.activeDataRequestId = null;
   }
 
   private debugTraffic(

@@ -1,17 +1,16 @@
 # Docs
 
-Technical documentation beyond `PRD.md` and `PLAN.md`.
+Active technical docs live here. Archived v1 planning/protocol material lives under [`docs/history/v1/`](/home/pm/dev/anchormaster/docs/history/v1).
 
-Planned additions:
+## Active docs
 
-- protocol and payload contracts
-- pairing/auth flows
-- NMEA2000 PGN mapping notes
-- test reports and sea-trial logs
+- [`docs/protocol-v2.md`](/home/pm/dev/anchormaster/docs/protocol-v2.md): current BLE/cloud request-reply contract
+- [`docs/server-functional-spec.md`](/home/pm/dev/anchormaster/docs/server-functional-spec.md): shared behavioral spec the firmware and Android server runtimes should both implement
+- [`docs/cloudflare-setup.md`](/home/pm/dev/anchormaster/docs/cloudflare-setup.md): Pages + Worker setup
+- [`docs/maptiler-setup.md`](/home/pm/dev/anchormaster/docs/maptiler-setup.md): MapTiler account/key setup
 
-Current docs:
+## Archived docs
 
-- `docs/cloudflare-setup.md` plain `wrangler` setup for Pages + Workers
-- `docs/firmware-android-emulator-checklist.md` shared feature checklist for firmware and the Android helper emulator
-- `docs/maptiler-setup.md` MapTiler account + key setup for real map/satellite rendering
-- `docs/protocol-v1.md` draft wire protocol/messages for cloud path and BLE path
+- [`docs/history/v1/PLAN.md`](/home/pm/dev/anchormaster/docs/history/v1/PLAN.md)
+- [`docs/history/v1/PLAN_ANDROID_HELPER.md`](/home/pm/dev/anchormaster/docs/history/v1/PLAN_ANDROID_HELPER.md)
+- [`docs/history/v1/protocol-v1.md`](/home/pm/dev/anchormaster/docs/history/v1/protocol-v1.md)

@@ -5,23 +5,31 @@ import {
   BLE_EVENT_RX_UUID,
   BLE_SERVICE_UUID,
   BLE_SNAPSHOT_UUID,
-  PROTOCOL_VERSION,
+  TRACK_MAX_POINTS,
 } from "../../core/constants";
-import type { Envelope, InboundSource, JsonRecord, PendingAck, TrackPoint, WifiScanNetwork } from "../../core/types";
+import type { InboundSource, JsonRecord, PendingAck, TrackPoint, WifiScanNetwork } from "../../core/types";
 import { connectBleWithCharacteristics, disconnectBleDevice, listGrantedBleDevices } from "./ble-connection";
-import {
-  clearPendingAcks,
-  consumeChunkedBleFrame,
-  makeAckPromise,
-  resolvePendingAckFromPayload,
-} from "./ble-session";
+import { consumeChunkedBleFrame } from "./ble-session";
 import { makeMsgId, writeChunked } from "./ble-transport";
-import { dataViewToBytes, isObject, parseTrackSnapshot, parseWifiScanNetworks, safeParseJson } from "../../services/data-utils";
-import { buildConfigPatchPayload, buildProtocolEnvelope, type ConfigPatchCommand } from "../../services/protocol-messages";
-import { readAlertRuntimeEntries } from "../../services/state-derive";
 import {
-  ensurePhoneId,
-  getBoatId,
+  applyPartVersions,
+  applyUpdateVersion,
+  mapProtocolPartToLegacyPatch,
+  mapProtocolPartsToLegacyState,
+  readProtocolPartUpdate,
+  readProtocolSnapshotParts,
+  readProtocolTrackAppend,
+} from "../../services/protocol-v2-state";
+import {
+  buildCancelPayload,
+  buildCommandEnvelope,
+  buildConfigUpdatePayload,
+  extractProtocolError,
+  makeRequestId,
+  type ConfigPartsCommand,
+} from "../../services/protocol-messages";
+import { dataViewToBytes, deepMerge, isObject, parseWifiScanNetworks, safeParseJson } from "../../services/data-utils";
+import {
   getLastBleDeviceId,
   getLastBleDeviceName,
   setLastBleDevice,
@@ -29,9 +37,10 @@ import {
 import { appendDebugMessage } from "../../state/app-state.svelte";
 import type {
   DeviceCommandResult,
-  DeviceEvent,
   DeviceConnectionProbeResult,
   DeviceConnectionStatus,
+  DeviceEvent,
+  DeviceWifiConnectInput,
 } from "../device-connection";
 import type { DeviceConnectionBleLike } from "./device-connection-ble-like";
 
@@ -44,34 +53,20 @@ interface BleTransportState {
   snapshot: BluetoothRemoteGATTCharacteristic | null;
   auth: BluetoothRemoteGATTCharacteristic | null;
   connected: boolean;
-  seq: number;
-  pendingAcks: Map<string, PendingAck>;
+  pendingReplies: Map<string, PendingAck>;
   chunkAssemblies: Map<string, { partCount: number; parts: Array<string | null>; updatedAt: number }>;
   authState: JsonRecord | null;
 }
 
+interface PendingDataStart {
+  promise: Promise<void>;
+  resolve: () => void;
+  reject: (error: Error) => void;
+  timeout: ReturnType<typeof setTimeout>;
+}
+
 const decoder = new TextDecoder();
 const encoder = new TextEncoder();
-
-interface PendingSnapshotRequest {
-  resolve: (snapshot: JsonRecord | null) => void;
-  reject: (error: Error) => void;
-  timeout: ReturnType<typeof setTimeout>;
-}
-
-interface PendingTrackRequest {
-  resolve: (points: TrackPoint[] | null) => void;
-  reject: (error: Error) => void;
-  timeout: ReturnType<typeof setTimeout>;
-}
-
-interface PendingWifiScanRequest {
-  resolve: (networks: WifiScanNetwork[]) => void;
-  reject: (error: Error) => void;
-  timeout: ReturnType<typeof setTimeout>;
-}
-
-const WIFI_SCAN_RESULT_TIMEOUT_MS = 20_000;
 
 export class DeviceConnectionBle implements DeviceConnectionBleLike {
   readonly kind = "bluetooth" as const;
@@ -85,8 +80,7 @@ export class DeviceConnectionBle implements DeviceConnectionBleLike {
     snapshot: null,
     auth: null,
     connected: false,
-    seq: 1,
-    pendingAcks: new Map(),
+    pendingReplies: new Map(),
     chunkAssemblies: new Map(),
     authState: null,
   };
@@ -95,15 +89,19 @@ export class DeviceConnectionBle implements DeviceConnectionBleLike {
 
   private statusSubscribers = new Set<(status: DeviceConnectionStatus) => void>();
 
-  private pendingSnapshots: PendingSnapshotRequest[] = [];
-
-  private pendingTracks: PendingTrackRequest[] = [];
-
-  private pendingWifiScans = new Map<string, PendingWifiScanRequest>();
-
   private reconnectDevice: BluetoothDevice | null = null;
 
   private forceRequestPicker = false;
+
+  private pendingDataStart: PendingDataStart | null = null;
+
+  private activeDataRequestId: string | null = null;
+
+  private cachedSnapshot: JsonRecord | null = null;
+
+  private cachedTrack: TrackPoint[] = [];
+
+  private knownPartVersions: Record<string, number> = {};
 
   requestPickerOnNextConnect(): void {
     this.forceRequestPicker = true;
@@ -114,7 +112,6 @@ export class DeviceConnectionBle implements DeviceConnectionBleLike {
       if (this.state.device?.gatt?.connected) {
         return;
       }
-      // Recover from stale local state when browser did not deliver disconnection callback.
       this.handleDisconnectedState();
     }
 
@@ -124,6 +121,7 @@ export class DeviceConnectionBle implements DeviceConnectionBleLike {
     if (!usePicker && !maybeKnown) {
       throw new Error("No previously granted BLE device. Use Bluetooth search once.");
     }
+
     const {
       device,
       server,
@@ -166,55 +164,9 @@ export class DeviceConnectionBle implements DeviceConnectionBleLike {
     };
   }
 
-  async connectLastKnown(): Promise<void> {
-    if (this.state.connected) {
-      if (this.state.device?.gatt?.connected) {
-        return;
-      }
-      // Recover from stale local state when browser did not deliver disconnection callback.
-      this.handleDisconnectedState();
-    }
-    const device = await this.resolveReconnectDevice();
-    if (!device) {
-      throw new Error("No previously granted Bluetooth device found.");
-    }
-
-    const {
-      server,
-      service,
-      controlTx,
-      eventRx,
-      snapshot,
-      auth,
-    } = await connectBleWithCharacteristics({
-      serviceUuid: BLE_SERVICE_UUID,
-      controlTxUuid: BLE_CONTROL_TX_UUID,
-      eventRxUuid: BLE_EVENT_RX_UUID,
-      snapshotUuid: BLE_SNAPSHOT_UUID,
-      authUuid: BLE_AUTH_UUID,
-      onDisconnected: this.onBleDisconnected as EventListener,
-      onNotification: this.onBleNotification as EventListener,
-    }, device);
-
-    this.state.device = device;
-    this.state.server = server;
-    this.state.service = service;
-    this.state.controlTx = controlTx;
-    this.state.eventRx = eventRx;
-    this.state.snapshot = snapshot;
-    this.state.auth = auth;
-    this.state.connected = true;
-    this.state.chunkAssemblies.clear();
-    this.reconnectDevice = device;
-    setLastBleDevice(device.id, device.name?.trim() || "");
-
-    await this.refreshAuthState();
-    this.emitStatus();
-  }
-
   async disconnect(): Promise<void> {
+    await this.cancelActiveDataRequest("disconnect");
     if (disconnectBleDevice(this.state.device)) {
-      // Browsers may miss gattserverdisconnected callbacks after repeated reconnects.
       setTimeout(() => {
         if (this.state.connected && !this.state.device?.gatt?.connected) {
           this.handleDisconnectedState();
@@ -244,95 +196,91 @@ export class DeviceConnectionBle implements DeviceConnectionBleLike {
     };
   }
 
-  async sendConfigPatch(command: ConfigPatchCommand): Promise<void> {
-    await this.sendBleCommand("config.patch", buildConfigPatchPayload(command), true);
+  async sendConfigParts(command: ConfigPartsCommand): Promise<void> {
+    const ifVersions = command.ifVersions ?? this.buildIfVersions(Object.keys(command.parts), "config");
+    await this.sendTerminalCommand("update-config", buildConfigUpdatePayload({
+      parts: command.parts,
+      ifVersions,
+    }));
   }
 
   async commandWifiScan(maxResults: number, includeHidden: boolean): Promise<WifiScanNetwork[]> {
-    const requestId = `wifi-${makeMsgId()}`;
-    const scanResultPromise = this.makeWifiScanPromise(requestId);
-    try {
-      const ack = await this.sendBleCommand("onboarding.wifi.scan", {
-        requestId,
-        maxResults,
-        includeHidden,
-      }, true);
-      const ackRequestId = typeof ack?.requestId === "string" ? ack.requestId.trim() : "";
-      if (ackRequestId && ackRequestId !== requestId) {
-        this.rekeyPendingWifiScanRequest(requestId, ackRequestId);
-      }
-      if (ack && "networks" in ack) {
-        this.handleWifiScanResult({ requestId: ackRequestId || requestId, networks: ack.networks });
-      }
-    } catch (error) {
-      this.rejectPendingWifiScanRequest(requestId, error);
-      throw error;
-    }
-    return await scanResultPromise;
+    const reply = await this.sendTerminalCommand("scan-wlan", {
+      max_results: Math.max(1, Math.floor(maxResults)),
+      include_hidden: includeHidden,
+    });
+    return parseWifiScanNetworks(reply.networks);
+  }
+
+  async commandWifiConnect(input: DeviceWifiConnectInput): Promise<DeviceCommandResult> {
+    const reply = await this.sendTerminalCommand("connect-wlan", {
+      ssid: input.ssid,
+      passphrase: input.passphrase,
+      security: input.security,
+      country: input.country,
+      hidden: input.hidden,
+      if_versions: this.buildIfVersions(["wlan_config"], "config"),
+    });
+    return this.buildAcceptedResult(reply);
   }
 
   async commandAnchorRise(): Promise<DeviceCommandResult> {
-    const ack = await this.sendBleCommand("anchor.rise", {}, true);
-    return this.parseCommandResult(ack);
+    const reply = await this.sendTerminalCommand("raise-anchor", {
+      if_versions: this.buildIfVersions(["anchor_position"], "config"),
+    });
+    return this.buildAcceptedResult(reply);
   }
 
   async commandAnchorDown(lat: number, lon: number): Promise<DeviceCommandResult> {
-    const ack = await this.sendBleCommand("anchor.down", { lat, lon }, true);
-    return this.parseCommandResult(ack);
+    const reply = await this.sendTerminalCommand("move-anchor", {
+      lat,
+      lon,
+      if_versions: this.buildIfVersions(["anchor_position"], "config"),
+    });
+    return this.buildAcceptedResult(reply);
   }
 
   async commandAlarmSilence(seconds: number): Promise<DeviceCommandResult> {
     const silenceForMs = Math.max(1000, Math.min(24 * 60 * 60 * 1000, Math.floor(seconds * 1000)));
-    const ack = await this.sendBleCommand("alarm.silence.request", { silenceForMs }, true);
-    return this.parseCommandResult(ack);
-  }
-
-  private async sendBleCommand(msgType: string, payload: JsonRecord, requiresAck = true): Promise<JsonRecord | null> {
-    if (!this.state.connected || !this.state.controlTx) {
-      throw new Error("BLE not connected");
-    }
-
-    const envelope = buildProtocolEnvelope({
-      protocolVersion: PROTOCOL_VERSION,
-      msgType,
-      msgId: makeMsgId(),
-      boatId: getBoatId() || "boat_unknown",
-      deviceId: ensurePhoneId(),
-      seq: this.state.seq++,
-      requiresAck,
-      payload,
+    const reply = await this.sendTerminalCommand("silence-alarm", {
+      silence_for_ms: silenceForMs,
+      if_versions: this.buildIfVersions(["alarm_state"], "state"),
     });
-
-    const raw = JSON.stringify(envelope);
-    const ackPromise = requiresAck && envelope.msgId
-      ? makeAckPromise(this.state.pendingAcks, envelope.msgId)
-      : null;
-
-    try {
-      this.debugTraffic("outgoing", msgType, raw);
-      await writeChunked(this.state.controlTx, envelope.msgId as string, raw, encoder);
-      if (!ackPromise) {
-        return null;
-      }
-      return await ackPromise;
-    } catch (error) {
-      if (envelope.msgId) {
-        this.state.pendingAcks.delete(envelope.msgId);
-      }
-      throw error;
-    }
+    return this.buildAcceptedResult(reply);
   }
 
-  private parseCommandResult(ack: JsonRecord | null): DeviceCommandResult {
-    const rawStatus = typeof ack?.status === "string" ? ack.status.trim() : "";
-    if (rawStatus === "ok" || rawStatus === "accepted" || rawStatus === "failed" || rawStatus === "rejected") {
-      const errorCode = typeof ack?.errorCode === "string" && ack.errorCode.trim() ? ack.errorCode : null;
-      const errorDetail = typeof ack?.errorDetail === "string" && ack.errorDetail.trim() ? ack.errorDetail : null;
+  async requestStateSnapshot(): Promise<JsonRecord | null> {
+    await this.ensureDataStream();
+    return this.cachedSnapshot;
+  }
+
+  async requestTrackSnapshot(limit: number): Promise<TrackPoint[] | null> {
+    await this.ensureDataStream();
+    if (limit <= 0) {
+      return [];
+    }
+    return this.cachedTrack.slice(-Math.max(1, Math.floor(limit)));
+  }
+
+  async probe(): Promise<DeviceConnectionProbeResult> {
+    return {
+      ok: this.state.connected,
+      resultText: this.state.connected ? "BLE device available" : "BLE disconnected",
+      buildVersion: null,
+    };
+  }
+
+  private buildAcceptedResult(data: JsonRecord): DeviceCommandResult {
+    const rawStatus = typeof data.status === "string" ? data.status.trim() : "";
+    if (rawStatus === "ok" || rawStatus === "accepted") {
+      return { accepted: true, status: rawStatus, errorCode: null, errorDetail: null };
+    }
+    if (rawStatus === "failed" || rawStatus === "rejected") {
       return {
-        accepted: rawStatus === "ok" || rawStatus === "accepted",
+        accepted: false,
         status: rawStatus,
-        errorCode,
-        errorDetail,
+        errorCode: typeof data.errorCode === "string" ? data.errorCode : null,
+        errorDetail: typeof data.errorDetail === "string" ? data.errorDetail : null,
       };
     }
     return {
@@ -343,119 +291,131 @@ export class DeviceConnectionBle implements DeviceConnectionBleLike {
     };
   }
 
-  private makeWifiScanPromise(requestId: string): Promise<WifiScanNetwork[]> {
-    return new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.pendingWifiScans.delete(requestId);
-        reject(new Error("WLAN scan result timeout"));
-      }, WIFI_SCAN_RESULT_TIMEOUT_MS);
-      this.pendingWifiScans.set(requestId, { resolve, reject, timeout });
+  private buildIfVersions(partNames: string[], group: "state" | "config"): Record<string, number> {
+    const out: Record<string, number> = {};
+    for (const partName of partNames) {
+      const key = `${group}:${partName}`;
+      if (typeof this.knownPartVersions[key] === "number") {
+        out[partName] = this.knownPartVersions[key];
+      }
+    }
+    return out;
+  }
+
+  private async ensureConnected(): Promise<void> {
+    if (this.state.connected && this.state.controlTx) {
+      return;
+    }
+    await this.connect();
+    if (!this.state.connected || !this.state.controlTx) {
+      throw new Error("BLE device not connected");
+    }
+  }
+
+  private async ensureDataStream(): Promise<void> {
+    await this.ensureConnected();
+
+    if (this.activeDataRequestId && this.cachedSnapshot) {
+      return;
+    }
+    if (this.pendingDataStart) {
+      await this.pendingDataStart.promise;
+      return;
+    }
+
+    await this.cancelActiveDataRequest("replace");
+
+    const reqId = makeRequestId();
+    let resolveStart!: () => void;
+    let rejectStart!: (error: Error) => void;
+    const promise = new Promise<void>((resolve, reject) => {
+      resolveStart = resolve;
+      rejectStart = reject;
     });
-  }
-
-  private rejectPendingWifiScanRequest(requestId: string, error: unknown): void {
-    const pending = this.pendingWifiScans.get(requestId);
-    if (!pending) {
-      return;
-    }
-    clearTimeout(pending.timeout);
-    this.pendingWifiScans.delete(requestId);
-    pending.reject(error instanceof Error ? error : new Error(String(error)));
-  }
-
-  private rekeyPendingWifiScanRequest(previousRequestId: string, nextRequestId: string): void {
-    if (previousRequestId === nextRequestId || this.pendingWifiScans.has(nextRequestId)) {
-      return;
-    }
-    const pending = this.pendingWifiScans.get(previousRequestId);
-    if (!pending) {
-      return;
-    }
-    this.pendingWifiScans.delete(previousRequestId);
-    this.pendingWifiScans.set(nextRequestId, pending);
-  }
-
-  private handleWifiScanResult(payload: JsonRecord): void {
-    const requestId = typeof payload.requestId === "string" ? payload.requestId.trim() : "";
-    let pendingKey = requestId;
-    let pending = pendingKey ? this.pendingWifiScans.get(pendingKey) : undefined;
-    if (!pending && this.pendingWifiScans.size === 1) {
-      const [fallbackKey, fallbackPending] = this.pendingWifiScans.entries().next().value as [string, PendingWifiScanRequest];
-      pendingKey = fallbackKey;
-      pending = fallbackPending;
-    }
-    if (!pending) {
-      return;
-    }
-
-    clearTimeout(pending.timeout);
-    this.pendingWifiScans.delete(pendingKey);
-
-    const errorCode = typeof payload.errorCode === "string" ? payload.errorCode.trim() : "";
-    const errorDetail = typeof payload.errorDetail === "string" ? payload.errorDetail.trim() : "";
-    if (errorCode || errorDetail) {
-      pending.reject(new Error(`${errorCode || "DEVICE_FAILED"}: ${errorDetail || "WLAN scan failed"}`));
-      return;
-    }
-
-    pending.resolve(parseWifiScanNetworks(payload.networks));
-  }
-
-  async requestStateSnapshot(): Promise<JsonRecord | null> {
-    if (!this.state.connected) {
-      throw new Error("BLE not connected");
-    }
-
-    const snapshotPromise = new Promise<JsonRecord | null>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.pendingSnapshots = this.pendingSnapshots.filter((entry) => entry !== pending);
-        resolve(null);
-      }, 3500);
-      const pending: PendingSnapshotRequest = { resolve, reject, timeout };
-      this.pendingSnapshots.push(pending);
-    });
-
-    await this.sendBleCommand("status.snapshot.request", {}, false);
-    return snapshotPromise;
-  }
-
-  async requestTrackSnapshot(limit: number): Promise<TrackPoint[] | null> {
-    if (!this.state.connected) {
-      throw new Error("BLE not connected");
-    }
-
-    const trackPromise = new Promise<TrackPoint[] | null>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        this.pendingTracks = this.pendingTracks.filter((entry) => entry !== pending);
-        resolve(null);
-      }, 4500);
-      const pending: PendingTrackRequest = { resolve, reject, timeout };
-      this.pendingTracks.push(pending);
-    });
-
-    await this.sendBleCommand("track.snapshot.request", { limit: Math.max(1, Math.floor(limit)) }, false);
-    return trackPromise;
-  }
-
-  async probe(): Promise<DeviceConnectionProbeResult> {
-    if (this.state.connected) {
-      return {
-        ok: true,
-        resultText: "BLE connected",
-        buildVersion: null,
-      };
-    }
-    return {
-      ok: false,
-      resultText: "BLE disconnected",
-      buildVersion: null,
+    const pending: PendingDataStart = {
+      promise,
+      resolve: resolveStart,
+      reject: rejectStart,
+      timeout: setTimeout(() => {
+        if (this.pendingDataStart === pending) {
+          this.pendingDataStart = null;
+        }
+        if (this.activeDataRequestId === reqId) {
+          this.activeDataRequestId = null;
+        }
+        rejectStart(new Error("get-data start timeout"));
+      }, 4500),
     };
+
+    this.pendingDataStart = pending;
+    this.activeDataRequestId = reqId;
+    await this.sendRawCommand({
+      req_id: reqId,
+      command: "get-data",
+      data: {},
+    });
+    await pending.promise;
+  }
+
+  private async cancelActiveDataRequest(reason: string): Promise<void> {
+    if (this.pendingDataStart) {
+      clearTimeout(this.pendingDataStart.timeout);
+      this.pendingDataStart.reject(new Error(`get-data canceled: ${reason}`));
+      this.pendingDataStart = null;
+    }
+    if (!this.activeDataRequestId || !this.state.controlTx) {
+      this.activeDataRequestId = null;
+      return;
+    }
+
+    const originalReqId = this.activeDataRequestId;
+    this.activeDataRequestId = null;
+    try {
+      await this.sendTerminalCommand("cancel", buildCancelPayload(originalReqId));
+    } catch {
+      // Best-effort cleanup only.
+    }
+  }
+
+  private async sendTerminalCommand(command: string, data: JsonRecord): Promise<JsonRecord> {
+    await this.ensureConnected();
+    const reqId = makeRequestId();
+    const responsePromise = new Promise<JsonRecord>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.state.pendingReplies.delete(reqId);
+        reject(new Error(`${command} timeout`));
+      }, 5000);
+      this.state.pendingReplies.set(reqId, { resolve, reject, timeout });
+    });
+
+    try {
+      await this.sendRawCommand(buildCommandEnvelope({ reqId, command, data }));
+      return await responsePromise;
+    } catch (error) {
+      const pending = this.state.pendingReplies.get(reqId);
+      if (pending) {
+        clearTimeout(pending.timeout);
+        this.state.pendingReplies.delete(reqId);
+      }
+      throw error;
+    }
+  }
+
+  private async sendRawCommand(envelope: { req_id: string; command: string; data: JsonRecord }): Promise<void> {
+    await this.ensureConnected();
+    if (!this.state.controlTx) {
+      throw new Error("BLE control characteristic unavailable");
+    }
+
+    const raw = JSON.stringify(envelope);
+    this.debugTraffic("outgoing", envelope.command, raw);
+    await writeChunked(this.state.controlTx, makeMsgId(), raw, encoder);
   }
 
   private currentStatus(): DeviceConnectionStatus {
     return {
       connected: this.state.connected,
-      deviceName: this.state.device?.name?.trim() || "",
+      deviceName: this.state.device?.name?.trim() || getLastBleDeviceName(),
       authState: this.state.authState,
     };
   }
@@ -474,7 +434,7 @@ export class DeviceConnectionBle implements DeviceConnectionBleLike {
   }
 
   private async refreshAuthState(): Promise<void> {
-    if (!this.state.connected || !this.state.auth) {
+    if (!this.state.auth) {
       this.state.authState = null;
       return;
     }
@@ -489,105 +449,104 @@ export class DeviceConnectionBle implements DeviceConnectionBleLike {
     }
   }
 
-  private handleCommandAck(payload: JsonRecord): void {
-    resolvePendingAckFromPayload(this.state.pendingAcks, payload);
-  }
-
-  private handleIncomingEnvelope(envelope: Envelope, source: InboundSource, rawEnvelope: string | null = null): void {
-    const msgType = typeof envelope.msgType === "string" && envelope.msgType ? envelope.msgType : "unknown";
-    this.debugTraffic("incoming", msgType, rawEnvelope ?? envelope);
-
-    if (envelope.msgType === "command.ack") {
-      const payload = isObject(envelope.payload) ? envelope.payload : {};
-      this.handleCommandAck(payload);
-      return;
-    }
-    if (envelope.msgType === "onboarding.wifi.scan_result") {
-      const payload = isObject(envelope.payload) ? envelope.payload : {};
-      this.handleWifiScanResult(payload);
-      return;
-    }
-    const event = this.toDeviceEvent(envelope, source);
-    if (!event) {
+  private handleProtocolReply(
+    envelope: { req_id?: string; command?: string; state?: string; data?: JsonRecord },
+    source: InboundSource,
+  ): void {
+    const reqId = typeof envelope.req_id === "string" ? envelope.req_id : "";
+    const command = typeof envelope.command === "string" ? envelope.command : "";
+    const state = envelope.state === "ONGOING" || envelope.state === "CLOSED_OK" || envelope.state === "CLOSED_FAILED"
+      ? envelope.state
+      : null;
+    const data = isObject(envelope.data) ? envelope.data : {};
+    if (!reqId || !command || !state) {
       return;
     }
 
-    if (event.type === "state.snapshot" && isObject(event.snapshot)) {
-      const pending = this.pendingSnapshots.shift();
-      if (pending) {
-        clearTimeout(pending.timeout);
-        pending.resolve(event.snapshot);
+    if (command === "get-data") {
+      const snapshot = readProtocolSnapshotParts(data);
+      if (snapshot) {
+        applyPartVersions(this.knownPartVersions, snapshot);
+        this.cachedSnapshot = mapProtocolPartsToLegacyState(snapshot);
+        this.cachedTrack = snapshot.trackPoints.slice(-TRACK_MAX_POINTS);
+        this.emitEvent({
+          type: "state.snapshot",
+          source,
+          snapshot: this.cachedSnapshot,
+        });
+        if (this.cachedTrack.length > 0) {
+          this.emitEvent({
+            type: "track.snapshot",
+            source,
+            points: this.cachedTrack,
+          });
+        }
+        if (this.pendingDataStart && this.activeDataRequestId === reqId) {
+          const pending = this.pendingDataStart;
+          this.pendingDataStart = null;
+          clearTimeout(pending.timeout);
+          pending.resolve();
+        }
       }
-    }
 
-    if (event.type === "track.snapshot") {
-      const pending = this.pendingTracks.shift();
-      if (pending) {
-        clearTimeout(pending.timeout);
-        pending.resolve(event.points);
+      const update = readProtocolPartUpdate(data);
+      if (update) {
+        applyUpdateVersion(this.knownPartVersions, update);
+        const patch = mapProtocolPartToLegacyPatch(update.group, update.name, update.value);
+        if (Object.keys(patch).length > 0) {
+          this.cachedSnapshot = deepMerge(this.cachedSnapshot ?? {}, patch);
+          this.emitEvent({
+            type: "state.patch",
+            source,
+            patch,
+          });
+        }
       }
+
+      const appendedTrack = readProtocolTrackAppend(data);
+      if (appendedTrack.length > 0) {
+        this.cachedTrack = [...this.cachedTrack, ...appendedTrack].slice(-TRACK_MAX_POINTS);
+        this.emitEvent({
+          type: "track.snapshot",
+          source,
+          points: this.cachedTrack,
+        });
+      }
+
+      if (state !== "ONGOING" && this.activeDataRequestId === reqId) {
+        this.activeDataRequestId = null;
+        if (this.pendingDataStart) {
+          const pending = this.pendingDataStart;
+          this.pendingDataStart = null;
+          clearTimeout(pending.timeout);
+          if (state === "CLOSED_OK") {
+            pending.resolve();
+          } else {
+            const protocolError = extractProtocolError(data);
+            pending.reject(new Error(`${protocolError.code}: ${protocolError.message}`));
+          }
+        }
+      }
+      return;
     }
 
-    this.emitEvent(event);
-  }
+    if (state === "ONGOING") {
+      return;
+    }
 
-  private toDeviceEvent(envelope: Envelope, source: InboundSource): DeviceEvent | null {
-    const boatId = typeof envelope.boatId === "string" && envelope.boatId ? envelope.boatId : undefined;
-    const payload: JsonRecord = isObject(envelope.payload) ? envelope.payload : {};
-    const msgType = typeof envelope.msgType === "string" && envelope.msgType ? envelope.msgType : "unknown";
+    const pending = this.state.pendingReplies.get(reqId);
+    if (!pending) {
+      return;
+    }
+    clearTimeout(pending.timeout);
+    this.state.pendingReplies.delete(reqId);
+    if (state === "CLOSED_OK") {
+      pending.resolve(data);
+      return;
+    }
 
-    if (msgType === "command.ack") {
-      return null;
-    }
-    if (msgType === "status.patch") {
-      return {
-        type: "state.patch",
-        source,
-        boatId,
-        patch: payload.statePatch,
-      };
-    }
-    if (msgType === "status.snapshot") {
-      return {
-        type: "state.snapshot",
-        source,
-        boatId,
-        snapshot: payload.snapshot,
-      };
-    }
-    if (msgType === "onboarding.boat_secret") {
-      return {
-        type: "onboarding.boatSecret",
-        source,
-        boatId,
-        onboardingBoatId: typeof payload.boatId === "string" ? payload.boatId : undefined,
-        boatSecret: typeof payload.boatSecret === "string" ? payload.boatSecret : undefined,
-      };
-    }
-    if (msgType === "track.snapshot") {
-      return {
-        type: "track.snapshot",
-        source,
-        boatId,
-        points: parseTrackSnapshot(payload),
-      };
-    }
-    if (msgType === "alerts.state" || msgType === "alarm.state") {
-      const alertsPayload = isObject(payload.alerts) ? payload.alerts : payload;
-      return {
-        type: "alerts.state",
-        source,
-        boatId,
-        alerts: readAlertRuntimeEntries({ alerts: alertsPayload }),
-      };
-    }
-    return {
-      type: "unknown",
-      source,
-      boatId,
-      msgType,
-      payload,
-    };
+    const protocolError = extractProtocolError(data);
+    pending.reject(new Error(`${protocolError.code}: ${protocolError.message}`));
   }
 
   private onBleNotification = (event: Event): void => {
@@ -602,31 +561,35 @@ export class DeviceConnectionBle implements DeviceConnectionBleLike {
       return;
     }
 
+    let raw = "";
     if (bytes[0] === 0x7b) {
-      const raw = decoder.decode(bytes);
-      const parsed = safeParseJson(raw);
-      if (!parsed || !isObject(parsed)) {
+      raw = decoder.decode(bytes);
+    } else {
+      const frame = consumeChunkedBleFrame(
+        this.state.chunkAssemblies,
+        bytes,
+        (chunk) => decoder.decode(chunk),
+        BLE_CHUNK_TIMEOUT_MS,
+      );
+      if (frame.kind !== "complete" || !frame.raw) {
         return;
       }
-      this.handleIncomingEnvelope(parsed as Envelope, "ble/eventRx", raw);
-      return;
+      raw = frame.raw;
     }
 
-    const frame = consumeChunkedBleFrame(
-      this.state.chunkAssemblies,
-      bytes,
-      (chunk) => decoder.decode(chunk),
-      BLE_CHUNK_TIMEOUT_MS,
-    );
-    if (frame.kind !== "complete" || !frame.raw) {
-      return;
-    }
-
-    const parsed = safeParseJson(frame.raw);
+    const parsed = safeParseJson(raw);
     if (!parsed || !isObject(parsed)) {
       return;
     }
-    this.handleIncomingEnvelope(parsed as Envelope, "ble/eventRx", frame.raw);
+
+    const command = typeof parsed.command === "string" ? parsed.command : "";
+    const replyState = typeof parsed.state === "string" ? parsed.state : "";
+    this.debugTraffic("incoming", command || "unknown", raw);
+    if (!command || !replyState) {
+      return;
+    }
+
+    this.handleProtocolReply(parsed as { req_id?: string; command?: string; state?: string; data?: JsonRecord }, "ble/eventRx");
   };
 
   private onBleDisconnected = (): void => {
@@ -655,22 +618,18 @@ export class DeviceConnectionBle implements DeviceConnectionBleLike {
     this.state.authState = null;
     this.state.chunkAssemblies.clear();
 
-    clearPendingAcks(this.state.pendingAcks, "BLE disconnected");
-    for (const pending of this.pendingSnapshots) {
+    for (const pending of this.state.pendingReplies.values()) {
       clearTimeout(pending.timeout);
       pending.reject(new Error("BLE disconnected"));
     }
-    this.pendingSnapshots = [];
-    for (const pending of this.pendingTracks) {
-      clearTimeout(pending.timeout);
-      pending.reject(new Error("BLE disconnected"));
+    this.state.pendingReplies.clear();
+
+    if (this.pendingDataStart) {
+      clearTimeout(this.pendingDataStart.timeout);
+      this.pendingDataStart.reject(new Error("BLE disconnected"));
+      this.pendingDataStart = null;
     }
-    this.pendingTracks = [];
-    for (const pending of this.pendingWifiScans.values()) {
-      clearTimeout(pending.timeout);
-      pending.reject(new Error("BLE disconnected"));
-    }
-    this.pendingWifiScans.clear();
+    this.activeDataRequestId = null;
     this.emitStatus();
   }
 

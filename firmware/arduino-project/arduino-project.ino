@@ -17,8 +17,7 @@
 static const int SIREN_PIN = 4;
 static const int STATUS_LED_PIN = LED_BUILTIN;
 
-// Protocol and identity defaults.
-static const char *PROTOCOL_VERSION = "am.v1";
+// Identity defaults.
 #ifndef ANQORI_BUILD_VERSION
 #define ANQORI_BUILD_VERSION "run-unknown"
 #endif
@@ -28,7 +27,7 @@ static const char *DEFAULT_BOAT_ID_PREFIX = "boat_";
 static const char *DEFAULT_DEVICE_ID_PREFIX = "dev_";
 static const char *BOAT_SECRET_PREFIX = "am_bs_";
 
-// BLE GATT UUIDs from protocol-v1.
+// Shared BLE GATT UUIDs.
 static const char *BLE_SERVICE_UUID = "9f2d0000-87aa-4f4a-a0ea-4d5d4f415354";
 static const char *BLE_CONTROL_TX_UUID = "9f2d0001-87aa-4f4a-a0ea-4d5d4f415354";
 static const char *BLE_EVENT_RX_UUID = "9f2d0002-87aa-4f4a-a0ea-4d5d4f415354";
@@ -37,11 +36,11 @@ static const char *BLE_AUTH_UUID = "9f2d0004-87aa-4f4a-a0ea-4d5d4f415354";
 
 // Timing constants.
 static const unsigned long MAIN_TICK_MS = 1000UL;
-static const unsigned long BLE_STATUS_CADENCE_MS = 3000UL;
 static const unsigned long BLE_CHUNK_TIMEOUT_MS = 2000UL;
 static const unsigned long PAIR_MODE_TTL_MS = 10UL * 60UL * 1000UL;
 static const unsigned long PRIV_SESSION_TTL_MS = 10UL * 60UL * 1000UL;
 static const unsigned long WIFI_RETRY_MAX_MS = 30UL * 1000UL;
+static const unsigned long WIFI_CONNECT_TIMEOUT_MS = 20UL * 1000UL;
 static const size_t BLE_CHUNK_MAX_PAYLOAD = 120U;
 static const unsigned long BLE_NOTIFY_INTER_CHUNK_DELAY_MS = 40UL;
 static const unsigned long BLE_NOTIFY_RETRY_DELAY_MS = 150UL;
@@ -96,17 +95,17 @@ struct WiFiConfig {
 };
 
 struct ParsedEnvelope {
-  String msgType;
-  String msgId;
-  bool requiresAck;
+  String reqId;
+  String command;
 };
 
-struct CommandResult {
-  String status;
-  String errorCode;
-  String errorDetail;
-  String ackExtraFields;
-  bool skipAutoAck;
+struct TrackPointSample {
+  unsigned long tsMs;
+  float latDeg;
+  float lonDeg;
+  float cogDeg;
+  float headingDeg;
+  float sogKnots;
 };
 
 struct BleChunkAssembler {
@@ -133,10 +132,9 @@ bool debugProtocol = true;
 bool bleConnected = false;
 bool wifiConnectPending = false;
 bool pairModeWasActive = false;
-bool secretSentInCurrentPairWindow = false;
 bool anchorPositionValid = false;
+bool activeConnectWifiInFlight = false;
 
-uint32_t txSeq = 1;
 uint32_t txMsgCounter = 1;
 
 String boatId;
@@ -154,6 +152,26 @@ float simOffsetEastM = 0.0f;
 float simOffsetNorthM = 0.0f;
 float simCogDeg = 0.0f;
 float simSogKnots = 0.0f;
+unsigned long lastAnchorDownAtMs = 0;
+unsigned long activeConnectWifiStartedAtMs = 0;
+unsigned long lastStreamedSampleAtMs = 0;
+uint32_t versionPosition = 1;
+uint32_t versionNavData = 1;
+uint32_t versionAlarmState = 1;
+uint32_t versionAnchorPosition = 1;
+uint32_t versionAlarmConfig = 1;
+uint32_t versionAnchorSettings = 1;
+uint32_t versionProfiles = 1;
+uint32_t versionWlanConfig = 1;
+String activeGetDataReqId = "";
+String activeConnectWifiReqId = "";
+String storedAlarmConfigJson = "{}";
+String storedAnchorSettingsJson = "{}";
+String storedProfilesJson = "{}";
+static const size_t TRACK_HISTORY_CAPACITY = 2048U;
+TrackPointSample trackHistory[TRACK_HISTORY_CAPACITY];
+size_t trackHistoryCount = 0;
+size_t trackHistoryNextIndex = 0;
 
 BLEServer *bleServer = nullptr;
 BLEService *bleService = nullptr;
@@ -503,6 +521,93 @@ bool extractJsonFloatValue(const String &json, const String &key, float &out) {
   return true;
 }
 
+bool extractJsonRawValue(const String &json, const String &key, String &out) {
+  const int colon = findKeyColon(json, key);
+  if (colon < 0) {
+    return false;
+  }
+  int index = skipWs(json, colon + 1);
+  if (index >= (int)json.length()) {
+    return false;
+  }
+
+  const char first = json[index];
+  if (first == '{' || first == '[') {
+    const char openChar = first;
+    const char closeChar = first == '{' ? '}' : ']';
+    int depth = 0;
+    bool inString = false;
+    bool escaped = false;
+    for (int cursor = index; cursor < (int)json.length(); cursor++) {
+      const char c = json[cursor];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (c == '\\') {
+          escaped = true;
+        } else if (c == '"') {
+          inString = false;
+        }
+        continue;
+      }
+      if (c == '"') {
+        inString = true;
+        continue;
+      }
+      if (c == openChar) {
+        depth++;
+      } else if (c == closeChar) {
+        depth--;
+        if (depth == 0) {
+          out = json.substring(index, cursor + 1);
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  if (first == '"') {
+    bool escaped = false;
+    for (int cursor = index + 1; cursor < (int)json.length(); cursor++) {
+      const char c = json[cursor];
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (c == '\\') {
+        escaped = true;
+        continue;
+      }
+      if (c == '"') {
+        out = json.substring(index, cursor + 1);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  int cursor = index;
+  while (cursor < (int)json.length()) {
+    const char c = json[cursor];
+    if (c == ',' || c == '}' || c == ']') {
+      break;
+    }
+    cursor++;
+  }
+  out = json.substring(index, cursor);
+  out.trim();
+  return out.length() > 0;
+}
+
+bool extractJsonIntFromObjectKey(const String &json, const String &objectKey, const String &itemKey, int &out) {
+  String objectRaw = "";
+  if (!extractJsonRawValue(json, objectKey, objectRaw)) {
+    return false;
+  }
+  return extractJsonIntValue(objectRaw, itemKey, out);
+}
+
 bool extractJsonStringByAnyKey(const String &json, const String &primary, const String &fallback, String &out) {
   if (extractJsonStringValue(json, primary, out)) {
     return true;
@@ -523,38 +628,12 @@ bool extractJsonBoolByAnyKey(const String &json, const String &primary, const St
   return false;
 }
 
-String buildMsgId() {
+String buildBleTransferId() {
   const unsigned long now = millis();
   String out = "";
   out.reserve(24);
   out += toHex((uint64_t)now, 8);
   out += toHex((uint64_t)txMsgCounter++, 8);
-  return out;
-}
-
-struct OutboundEnvelope {
-  String msgId;
-  String json;
-};
-
-OutboundEnvelope makeEnvelope(const String &msgType, const String &payloadJson, bool requiresAck = false) {
-  OutboundEnvelope out;
-  out.msgId = buildMsgId();
-
-  String json = "{";
-  bool first = true;
-  appendJsonField(json, first, "ver", jsonString(PROTOCOL_VERSION));
-  appendJsonField(json, first, "msgType", jsonString(msgType));
-  appendJsonField(json, first, "msgId", jsonString(out.msgId));
-  appendJsonField(json, first, "boatId", jsonString(boatId));
-  appendJsonField(json, first, "deviceId", jsonString(deviceId));
-  appendJsonField(json, first, "seq", String(txSeq++));
-  appendJsonField(json, first, "ts", String((unsigned long)millis()));
-  appendJsonField(json, first, "requiresAck", jsonBool(requiresAck));
-  appendJsonField(json, first, "payload", payloadJson);
-  json += "}";
-
-  out.json = json;
   return out;
 }
 
@@ -574,6 +653,90 @@ String bytesToString(const uint8_t *data, size_t len) {
     out += (char)data[i];
   }
   return out;
+}
+
+void appendTrackHistoryPoint(const TelemetrySample &in, unsigned long nowMs) {
+  if (!in.gpsValid) {
+    return;
+  }
+  TrackPointSample point = {};
+  point.tsMs = nowMs;
+  point.latDeg = in.latDeg;
+  point.lonDeg = in.lonDeg;
+  point.cogDeg = in.cogDeg;
+  point.headingDeg = in.cogDeg;
+  point.sogKnots = in.sogKnots;
+  trackHistory[trackHistoryNextIndex] = point;
+  trackHistoryNextIndex = (trackHistoryNextIndex + 1U) % TRACK_HISTORY_CAPACITY;
+  if (trackHistoryCount < TRACK_HISTORY_CAPACITY) {
+    trackHistoryCount++;
+  }
+}
+
+size_t trackHistoryIndexFromOldest(size_t offset) {
+  if (trackHistoryCount == 0) {
+    return 0;
+  }
+  const size_t oldestIndex = trackHistoryCount == TRACK_HISTORY_CAPACITY ? trackHistoryNextIndex : 0U;
+  return (oldestIndex + offset) % TRACK_HISTORY_CAPACITY;
+}
+
+String buildTrackPointsJson(unsigned long sinceMs) {
+  String json = "[";
+  bool first = true;
+  for (size_t i = 0; i < trackHistoryCount; i++) {
+    const TrackPointSample &point = trackHistory[trackHistoryIndexFromOldest(i)];
+    if (point.tsMs < sinceMs) {
+      continue;
+    }
+    if (!first) {
+      json += ",";
+    }
+    first = false;
+    json += "{";
+    bool firstField = true;
+    appendJsonField(json, firstField, "ts", String(point.tsMs));
+    appendJsonField(json, firstField, "lat", String(point.latDeg, 6));
+    appendJsonField(json, firstField, "lon", String(point.lonDeg, 6));
+    appendJsonField(json, firstField, "cogDeg", String(point.cogDeg, 1));
+    appendJsonField(json, firstField, "headingDeg", String(point.headingDeg, 1));
+    appendJsonField(json, firstField, "sogKn", String(point.sogKnots, 2));
+    json += "}";
+  }
+  json += "]";
+  return json;
+}
+
+bool notifyBleChunked(const String &msgId, const String &json, bool retryOnEnomem);
+size_t resolveBleChunkPayloadLimit();
+void sendBleJsonMessage(const String &label, const String &json, bool retryOnEnomem = true);
+
+void sendBleJsonMessage(const String &label, const String &json, bool retryOnEnomem) {
+  const String transferId = buildBleTransferId();
+  const bool sent = notifyBleChunked(transferId, json, retryOnEnomem);
+  if (debugProtocol) {
+    Serial.print("[proto] tx ");
+    Serial.print(label);
+    Serial.print(" bytes=");
+    Serial.print(json.length());
+    Serial.print(" chunkMax=");
+    Serial.print(resolveBleChunkPayloadLimit());
+    Serial.print(" retryOnEnomem=");
+    Serial.print(retryOnEnomem ? "true" : "false");
+    Serial.print(" sent=");
+    Serial.println(sent ? "true" : "false");
+  }
+}
+
+void sendProtocolReplyOverBle(const String &reqId, const String &command, const String &state, const String &dataJson) {
+  String json = "{";
+  bool first = true;
+  appendJsonField(json, first, "req_id", jsonString(reqId));
+  appendJsonField(json, first, "state", jsonString(state));
+  appendJsonField(json, first, "command", jsonString(command));
+  appendJsonField(json, first, "data", dataJson);
+  json += "}";
+  sendBleJsonMessage(command + ":" + state, json, command != "get-data");
 }
 
 bool tryAssembleBleMessage(const uint8_t *data, size_t len, String &completedJson) {
@@ -653,7 +816,7 @@ size_t resolveBleChunkPayloadLimit() {
   return min(limit, mtuLimited);
 }
 
-bool notifyBleChunked(const String &msgId, const String &json, bool retryOnEnomem = true) {
+bool notifyBleChunked(const String &msgId, const String &json, bool retryOnEnomem) {
   if (!bleConnected || eventRxCharacteristic == nullptr) {
     if (debugProtocol) {
       Serial.print("[proto] tx drop msgId=");
@@ -749,207 +912,219 @@ bool notifyBleChunked(const String &msgId, const String &json, bool retryOnEnome
   return true;
 }
 
-void sendEnvelopeOverBle(const String &msgType, const String &payloadJson, bool requiresAck = false) {
-  OutboundEnvelope envelope = makeEnvelope(msgType, payloadJson, requiresAck);
-  const bool retryOnEnomem = msgType != "status.patch";
-  const bool sent = notifyBleChunked(envelope.msgId, envelope.json, retryOnEnomem);
-  if (debugProtocol) {
-    Serial.print("[proto] tx ");
-    Serial.print(msgType);
-    Serial.print(" bytes=");
-    Serial.print(envelope.json.length());
-    Serial.print(" chunkMax=");
-    Serial.print(resolveBleChunkPayloadLimit());
-    Serial.print(" retryOnEnomem=");
-    Serial.print(retryOnEnomem ? "true" : "false");
-    Serial.print(" sent=");
-    Serial.println(sent ? "true" : "false");
-  }
-}
-
-void sendCommandAck(const String &ackForMsgId, const String &status, const String &errorCode, const String &errorDetail, const String &extraFields = "") {
-  String payload = "{";
+String buildResultDataJson(const String &status, const String &errorCode = "", const String &errorMessage = "", const String &extraFields = "") {
+  String json = "{";
   bool first = true;
-  appendJsonField(payload, first, "ackForMsgId", jsonString(ackForMsgId));
-  appendJsonField(payload, first, "status", jsonString(status));
-  appendJsonField(payload, first, "errorCode", errorCode.length() ? jsonString(errorCode) : "null");
-  appendJsonField(payload, first, "errorDetail", errorDetail.length() ? jsonString(errorDetail) : "null");
+  appendJsonField(json, first, "status", jsonString(status));
+  if (errorCode.length() > 0 || errorMessage.length() > 0) {
+    String error = "{";
+    bool firstError = true;
+    appendJsonField(error, firstError, "code", jsonString(errorCode.length() > 0 ? errorCode : "COMMAND_FAILED"));
+    appendJsonField(error, firstError, "message", jsonString(errorMessage.length() > 0 ? errorMessage : "command failed"));
+    error += "}";
+    appendJsonField(json, first, "error", error);
+    appendJsonField(json, first, "errorCode", jsonString(errorCode.length() > 0 ? errorCode : "COMMAND_FAILED"));
+    appendJsonField(json, first, "errorDetail", jsonString(errorMessage.length() > 0 ? errorMessage : "command failed"));
+  }
   if (extraFields.length() > 0) {
-    payload += ",";
-    payload += extraFields;
+    json += ",";
+    json += extraFields;
   }
-  payload += "}";
-  sendEnvelopeOverBle("command.ack", payload, false);
+  json += "}";
+  return json;
 }
 
-void sendOnboardingBoatSecret() {
-  String payload = "{";
+void sendClosedOk(const String &reqId, const String &command, const String &extraFields = "") {
+  sendProtocolReplyOverBle(reqId, command, "CLOSED_OK", buildResultDataJson("ok", "", "", extraFields));
+}
+
+void sendClosedFailed(const String &reqId, const String &command, const String &errorCode, const String &errorMessage, const String &status = "failed") {
+  sendProtocolReplyOverBle(reqId, command, "CLOSED_FAILED", buildResultDataJson(status, errorCode, errorMessage));
+}
+
+String buildPositionPartValue() {
+  String value = "{";
   bool first = true;
-  appendJsonField(payload, first, "boatId", jsonString(boatId));
-  appendJsonField(payload, first, "boatSecret", jsonString(boatSecret));
-  appendJsonField(payload, first, "issuedAt", String((unsigned long)millis()));
-  payload += "}";
-  sendEnvelopeOverBle("onboarding.boat_secret", payload, false);
+  appendJsonField(value, first, "lat", String(sample.latDeg, 6));
+  appendJsonField(value, first, "lon", String(sample.lonDeg, 6));
+  appendJsonField(value, first, "gps_age_ms", String(sample.gpsAgeMs));
+  appendJsonField(value, first, "valid", jsonBool(sample.gpsValid));
+  appendJsonField(value, first, "sog_kn", String(sample.sogKnots, 2));
+  appendJsonField(value, first, "cog_deg", String(sample.cogDeg, 1));
+  appendJsonField(value, first, "heading_deg", String(sample.cogDeg, 1));
+  value += "}";
+  return value;
 }
 
-String buildStatusSnapshotPayload() {
+String buildNavDataPartValue() {
   const bool wifiConnected = WiFi.status() == WL_CONNECTED;
-  String payload = "{";
-  bool firstPayload = true;
+  String value = "{";
+  bool first = true;
+  appendJsonField(value, first, "depth_m", String(sample.depthM, 2));
+  appendJsonField(value, first, "wind_kn", String(sample.windKnots, 1));
+  appendJsonField(value, first, "wind_dir_deg", String(sample.windDirDeg, 1));
+  appendJsonField(value, first, "data_age_ms", String(sample.dataAgeMs));
+  appendJsonField(value, first, "wifi_connected", jsonBool(wifiConnected));
+  appendJsonField(value, first, "wifi_ssid", jsonString(wifiConnected ? WiFi.SSID() : wifiConfig.ssid));
+  appendJsonField(value, first, "wifi_rssi", String(wifiConnected ? WiFi.RSSI() : 0));
+  appendJsonField(value, first, "wifi_error", jsonString(wifiLastError));
+  appendJsonField(value, first, "cloud_reachable", jsonBool(wifiConnected));
+  appendJsonField(value, first, "firmware_version", jsonString(FW_VERSION));
+  appendJsonField(value, first, "pair_mode_active", jsonBool(isPairModeActive(millis())));
+  appendJsonField(value, first, "pair_mode_remaining_ms", String(isPairModeActive(millis()) ? (pairModeUntilMs - millis()) : 0));
+  appendJsonField(value, first, "session_paired", jsonBool(isPrivilegedSessionActive(millis())));
+  value += "}";
+  return value;
+}
 
-  String snapshot = "{";
-  bool firstSnapshot = true;
-
-  String telemetry = "{";
-  bool firstTelemetry = true;
-  String gps = "{";
-  bool firstGps = true;
-  appendJsonField(gps, firstGps, "lat", String(sample.latDeg, 6));
-  appendJsonField(gps, firstGps, "lon", String(sample.lonDeg, 6));
-  appendJsonField(gps, firstGps, "ageMs", String(sample.gpsAgeMs));
-  appendJsonField(gps, firstGps, "valid", jsonBool(sample.gpsValid));
-  gps += "}";
-  appendJsonField(telemetry, firstTelemetry, "gps", gps);
+String buildAlarmStatePartValue() {
+  String alerts = "{";
+  bool firstAlerts = true;
+  String wind = "{";
+  bool firstWind = true;
+  const String windState = triggerWindAbove(sample) ? "ALERT" : "WATCHING";
+  appendJsonField(wind, firstWind, "state", jsonString(windState));
+  appendJsonField(wind, firstWind, "severity", jsonString("WARNING"));
+  appendJsonField(wind, firstWind, "above_threshold_since_ts", triggerWindAbove(sample) ? String((unsigned long)millis()) : "null");
+  appendJsonField(wind, firstWind, "alert_since_ts", triggerWindAbove(sample) ? String((unsigned long)millis()) : "null");
+  appendJsonField(wind, firstWind, "alert_silenced_until_ts", "null");
+  wind += "}";
+  appendJsonField(alerts, firstAlerts, "wind_strength", wind);
 
   String depth = "{";
   bool firstDepth = true;
-  appendJsonField(depth, firstDepth, "meters", String(sample.depthM, 2));
-  appendJsonField(depth, firstDepth, "ageMs", String(sample.dataAgeMs));
+  const String depthState = triggerDepthLow(sample) ? "ALERT" : "WATCHING";
+  appendJsonField(depth, firstDepth, "state", jsonString(depthState));
+  appendJsonField(depth, firstDepth, "severity", jsonString("ALARM"));
+  appendJsonField(depth, firstDepth, "above_threshold_since_ts", triggerDepthLow(sample) ? String((unsigned long)millis()) : "null");
+  appendJsonField(depth, firstDepth, "alert_since_ts", triggerDepthLow(sample) ? String((unsigned long)millis()) : "null");
+  appendJsonField(depth, firstDepth, "alert_silenced_until_ts", "null");
   depth += "}";
-  appendJsonField(telemetry, firstTelemetry, "depth", depth);
+  appendJsonField(alerts, firstAlerts, "depth", depth);
+  alerts += "}";
 
-  String wind = "{";
-  bool firstWind = true;
-  appendJsonField(wind, firstWind, "knots", String(sample.windKnots, 1));
-  appendJsonField(wind, firstWind, "dirDeg", String(sample.windDirDeg, 1));
-  appendJsonField(wind, firstWind, "ageMs", String(sample.dataAgeMs));
-  wind += "}";
-  appendJsonField(telemetry, firstTelemetry, "wind", wind);
-  telemetry += "}";
-  appendJsonField(snapshot, firstSnapshot, "telemetry", telemetry);
+  String value = "{";
+  bool first = true;
+  const String level =
+    alarmLevel == ALARM_FULL ? "alarm"
+    : alarmLevel == ALARM_WARNING ? "warning"
+    : "none";
+  appendJsonField(value, first, "level", jsonString(level));
+  appendJsonField(value, first, "alerts", alerts);
+  value += "}";
+  return value;
+}
 
-  String system = "{";
-  bool firstSystem = true;
-  String wifi = "{";
-  bool firstWifi = true;
-  appendJsonField(wifi, firstWifi, "connected", jsonBool(wifiConnected));
-  appendJsonField(wifi, firstWifi, "ssid", jsonString(wifiConnected ? WiFi.SSID() : wifiConfig.ssid));
-  appendJsonField(wifi, firstWifi, "rssi", String(wifiConnected ? WiFi.RSSI() : 0));
-  appendJsonField(wifi, firstWifi, "lastError", jsonString(wifiLastError));
-  wifi += "}";
-  appendJsonField(system, firstSystem, "wifi", wifi);
-
-  String cloud = "{";
-  bool firstCloud = true;
-  appendJsonField(cloud, firstCloud, "reachable", jsonBool(wifiConnected));
-  cloud += "}";
-  appendJsonField(system, firstSystem, "cloud", cloud);
-
-  String firmware = "{";
-  bool firstFirmware = true;
-  appendJsonField(firmware, firstFirmware, "version", jsonString(FW_VERSION));
-  firmware += "}";
-  appendJsonField(system, firstSystem, "firmware", firmware);
-
-  String pairMode = "{";
-  bool firstPair = true;
-  appendJsonField(pairMode, firstPair, "active", jsonBool(isPairModeActive(millis())));
-  appendJsonField(pairMode, firstPair, "remainingMs", String(isPairModeActive(millis()) ? (pairModeUntilMs - millis()) : 0));
-  appendJsonField(pairMode, firstPair, "sessionPaired", jsonBool(isPrivilegedSessionActive(millis())));
-  pairMode += "}";
-  appendJsonField(system, firstSystem, "pairMode", pairMode);
-
-  system += "}";
-  appendJsonField(snapshot, firstSnapshot, "system", system);
-
-  String anchor = "{";
-  bool firstAnchor = true;
-  appendJsonField(anchor, firstAnchor, "state", jsonString(anchorState));
+String buildAnchorPositionConfigValue() {
+  String value = "{";
+  bool first = true;
+  appendJsonField(value, first, "state", jsonString(anchorState));
   if (anchorPositionValid) {
     String position = "{";
     bool firstPosition = true;
     appendJsonField(position, firstPosition, "lat", String(anchorLat, 6));
     appendJsonField(position, firstPosition, "lon", String(anchorLon, 6));
     position += "}";
-    appendJsonField(anchor, firstAnchor, "position", position);
+    appendJsonField(value, first, "position", position);
   } else {
-    appendJsonField(anchor, firstAnchor, "position", "null");
+    appendJsonField(value, first, "position", "null");
   }
-  anchor += "}";
-  appendJsonField(snapshot, firstSnapshot, "anchor", anchor);
-  snapshot += "}";
-
-  appendJsonField(payload, firstPayload, "snapshot", snapshot);
-  appendJsonField(payload, firstPayload, "updatedAt", String((unsigned long)millis()));
-  payload += "}";
-  return payload;
+  value += "}";
+  return value;
 }
 
-void sendStatusSnapshot() {
-  sendEnvelopeOverBle("status.snapshot", buildStatusSnapshotPayload(), false);
+String buildWlanConfigValue() {
+  String value = "{";
+  bool first = true;
+  appendJsonField(value, first, "ssid", jsonString(wifiConfig.ssid));
+  appendJsonField(value, first, "passphrase", jsonString(wifiConfig.passphrase));
+  appendJsonField(value, first, "security", jsonString(wifiConfig.security));
+  appendJsonField(value, first, "country", jsonString(wifiConfig.country.length() > 0 ? wifiConfig.country : "DE"));
+  appendJsonField(value, first, "hidden", jsonBool(wifiConfig.hidden));
+  value += "}";
+  return value;
 }
 
-void sendTrackSnapshot() {
-  String payload = "{";
-  bool firstPayload = true;
+String wrapVersionedPart(uint32_t version, const String &valueJson) {
+  String json = "{";
+  bool first = true;
+  appendJsonField(json, first, "version", String(version));
+  appendJsonField(json, first, "value", valueJson);
+  json += "}";
+  return json;
+}
 
-  String points = "[";
-  points += "{";
+String buildGetDataSnapshotDataJson() {
+  const unsigned long nowMs = millis();
+  const unsigned long backfillWindowStartMs = nowMs > (30UL * 60UL * 1000UL) ? nowMs - (30UL * 60UL * 1000UL) : 0UL;
+  const unsigned long sinceMs = lastAnchorDownAtMs > 0 ? min(lastAnchorDownAtMs, backfillWindowStartMs) : backfillWindowStartMs;
+
+  String data = "{";
+  bool first = true;
+
+  String stateParts = "{";
+  bool firstState = true;
+  appendJsonField(stateParts, firstState, "position", wrapVersionedPart(versionPosition, buildPositionPartValue()));
+  appendJsonField(stateParts, firstState, "nav_data", wrapVersionedPart(versionNavData, buildNavDataPartValue()));
+  appendJsonField(stateParts, firstState, "alarm_state", wrapVersionedPart(versionAlarmState, buildAlarmStatePartValue()));
+  stateParts += "}";
+  appendJsonField(data, first, "state_parts", stateParts);
+
+  String configParts = "{";
+  bool firstConfig = true;
+  appendJsonField(configParts, firstConfig, "anchor_position", wrapVersionedPart(versionAnchorPosition, buildAnchorPositionConfigValue()));
+  appendJsonField(configParts, firstConfig, "alarm_config", wrapVersionedPart(versionAlarmConfig, storedAlarmConfigJson));
+  appendJsonField(configParts, firstConfig, "anchor_settings", wrapVersionedPart(versionAnchorSettings, storedAnchorSettingsJson));
+  appendJsonField(configParts, firstConfig, "profiles", wrapVersionedPart(versionProfiles, storedProfilesJson));
+  appendJsonField(configParts, firstConfig, "wlan_config", wrapVersionedPart(versionWlanConfig, buildWlanConfigValue()));
+  configParts += "}";
+  appendJsonField(data, first, "config_parts", configParts);
+  appendJsonField(data, first, "track_points", buildTrackPointsJson(sinceMs));
+  data += "}";
+  return data;
+}
+
+void sendGetDataSnapshotReply(const String &reqId) {
+  sendProtocolReplyOverBle(reqId, "get-data", "ONGOING", buildGetDataSnapshotDataJson());
+}
+
+void sendGetDataPartReply(const String &group, const String &name, uint32_t version, const String &valueJson) {
+  if (activeGetDataReqId.length() == 0) {
+    return;
+  }
+  String data = "{";
+  bool first = true;
+  String part = "{";
+  bool firstPart = true;
+  appendJsonField(part, firstPart, "group", jsonString(group));
+  appendJsonField(part, firstPart, "name", jsonString(name));
+  appendJsonField(part, firstPart, "version", String(version));
+  appendJsonField(part, firstPart, "value", valueJson);
+  part += "}";
+  appendJsonField(data, first, "part", part);
+  data += "}";
+  sendProtocolReplyOverBle(activeGetDataReqId, "get-data", "ONGOING", data);
+}
+
+void sendGetDataTrackAppendReply(const TrackPointSample &point) {
+  if (activeGetDataReqId.length() == 0) {
+    return;
+  }
+  String trackPoints = "[{";
   bool firstPoint = true;
-  appendJsonField(points, firstPoint, "ts", String((unsigned long)millis()));
-  appendJsonField(points, firstPoint, "lat", String(sample.latDeg, 6));
-  appendJsonField(points, firstPoint, "lon", String(sample.lonDeg, 6));
-  appendJsonField(points, firstPoint, "cogDeg", String(sample.cogDeg, 1));
-  appendJsonField(points, firstPoint, "headingDeg", String(sample.cogDeg, 1));
-  appendJsonField(points, firstPoint, "sogKn", String(sample.sogKnots, 2));
-  points += "}";
-  points += "]";
+  appendJsonField(trackPoints, firstPoint, "ts", String(point.tsMs));
+  appendJsonField(trackPoints, firstPoint, "lat", String(point.latDeg, 6));
+  appendJsonField(trackPoints, firstPoint, "lon", String(point.lonDeg, 6));
+  appendJsonField(trackPoints, firstPoint, "cogDeg", String(point.cogDeg, 1));
+  appendJsonField(trackPoints, firstPoint, "headingDeg", String(point.headingDeg, 1));
+  appendJsonField(trackPoints, firstPoint, "sogKn", String(point.sogKnots, 2));
+  trackPoints += "}]";
 
-  appendJsonField(payload, firstPayload, "points", points);
-  appendJsonField(payload, firstPayload, "totalPoints", "1");
-  appendJsonField(payload, firstPayload, "returnedPoints", "1");
-  payload += "}";
-
-  sendEnvelopeOverBle("track.snapshot", payload, false);
-}
-
-void sendStatusPatch() {
-  const bool wifiConnected = WiFi.status() == WL_CONNECTED;
-  String payload = "{";
-  bool firstPayload = true;
-  String statePatch = "{";
-  bool firstPatch = true;
-
-  appendJsonField(statePatch, firstPatch, "telemetry.gps.lat", String(sample.latDeg, 6));
-  appendJsonField(statePatch, firstPatch, "telemetry.gps.lon", String(sample.lonDeg, 6));
-  appendJsonField(statePatch, firstPatch, "telemetry.gps.ageMs", String(sample.gpsAgeMs));
-  appendJsonField(statePatch, firstPatch, "telemetry.gps.valid", jsonBool(sample.gpsValid));
-  appendJsonField(statePatch, firstPatch, "telemetry.motion.sogKn", String(sample.sogKnots, 2));
-  appendJsonField(statePatch, firstPatch, "telemetry.motion.cogDeg", String(sample.cogDeg, 1));
-  appendJsonField(statePatch, firstPatch, "telemetry.depth.meters", String(sample.depthM, 2));
-  appendJsonField(statePatch, firstPatch, "telemetry.wind.knots", String(sample.windKnots, 1));
-  appendJsonField(statePatch, firstPatch, "telemetry.wind.dirDeg", String(sample.windDirDeg, 1));
-  appendJsonField(statePatch, firstPatch, "system.wifi.connected", jsonBool(wifiConnected));
-  appendJsonField(statePatch, firstPatch, "system.wifi.ssid", jsonString(wifiConnected ? WiFi.SSID() : wifiConfig.ssid));
-  appendJsonField(statePatch, firstPatch, "system.wifi.rssi", String(wifiConnected ? WiFi.RSSI() : 0));
-  appendJsonField(statePatch, firstPatch, "system.wifi.lastError", jsonString(wifiLastError));
-  appendJsonField(statePatch, firstPatch, "system.cloud.reachable", jsonBool(wifiConnected));
-  appendJsonField(statePatch, firstPatch, "system.firmware.version", jsonString(FW_VERSION));
-  appendJsonField(statePatch, firstPatch, "system.pairMode.active", jsonBool(isPairModeActive(millis())));
-  appendJsonField(statePatch, firstPatch, "system.pairMode.remainingMs", String(isPairModeActive(millis()) ? (pairModeUntilMs - millis()) : 0));
-  appendJsonField(statePatch, firstPatch, "system.pairMode.sessionPaired", jsonBool(isPrivilegedSessionActive(millis())));
-  appendJsonField(statePatch, firstPatch, "anchor.state", jsonString(anchorState));
-  if (anchorPositionValid) {
-    appendJsonField(statePatch, firstPatch, "anchor.position.lat", String(anchorLat, 6));
-    appendJsonField(statePatch, firstPatch, "anchor.position.lon", String(anchorLon, 6));
-  } else {
-    appendJsonField(statePatch, firstPatch, "anchor.position", "null");
-  }
-  statePatch += "}";
-
-  appendJsonField(payload, firstPayload, "statePatch", statePatch);
-  payload += "}";
-  sendEnvelopeOverBle("status.patch", payload, false);
+  String data = "{";
+  bool first = true;
+  appendJsonField(data, first, "track_append", trackPoints);
+  data += "}";
+  sendProtocolReplyOverBle(activeGetDataReqId, "get-data", "ONGOING", data);
 }
 
 void applyAlarmLevel(AlarmLevel next) {
@@ -1074,17 +1249,59 @@ void updateWifiManager(unsigned long nowMs) {
   WiFi.begin(wifiConfig.ssid.c_str(), wifiConfig.passphrase.c_str());
 }
 
+void finalizeActiveWifiConnect(unsigned long nowMs) {
+  if (!activeConnectWifiInFlight || activeConnectWifiReqId.length() == 0) {
+    return;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    activeConnectWifiInFlight = false;
+    sendProtocolReplyOverBle(activeConnectWifiReqId, "connect-wlan", "CLOSED_OK", buildResultDataJson("ok", "", "", "\"attempt\":{\"phase\":\"connected\",\"ssid\":" + jsonString(wifiConfig.ssid) + "}"));
+    activeConnectWifiReqId = "";
+    sendGetDataPartReply("state", "nav_data", ++versionNavData, buildNavDataPartValue());
+    return;
+  }
+
+  if (nowMs - activeConnectWifiStartedAtMs >= WIFI_CONNECT_TIMEOUT_MS) {
+    activeConnectWifiInFlight = false;
+    wifiLastError = "timeout";
+    sendClosedFailed(activeConnectWifiReqId, "connect-wlan", "WIFI_CONNECT_FAILED", "connection timed out");
+    activeConnectWifiReqId = "";
+    sendGetDataPartReply("state", "nav_data", ++versionNavData, buildNavDataPartValue());
+  }
+}
+
+void maybeEmitActiveDataStream(unsigned long nowMs) {
+  if (!bleConnected || activeGetDataReqId.length() == 0) {
+    return;
+  }
+  if (lastStreamedSampleAtMs == nowMs) {
+    return;
+  }
+  lastStreamedSampleAtMs = nowMs;
+
+  versionPosition++;
+  versionNavData++;
+  versionAlarmState++;
+  sendGetDataPartReply("state", "position", versionPosition, buildPositionPartValue());
+  sendGetDataPartReply("state", "nav_data", versionNavData, buildNavDataPartValue());
+  sendGetDataPartReply("state", "alarm_state", versionAlarmState, buildAlarmStatePartValue());
+
+  if (trackHistoryCount > 0) {
+    const TrackPointSample &lastPoint = trackHistory[trackHistoryIndexFromOldest(trackHistoryCount - 1)];
+    sendGetDataTrackAppendReply(lastPoint);
+  }
+}
+
 void enterPairMode(unsigned long nowMs, unsigned long ttlMs = PAIR_MODE_TTL_MS) {
   pairModeUntilMs = nowMs + ttlMs;
   privSessionUntilMs = 0;
-  secretSentInCurrentPairWindow = false;
   Serial.println("[pair] pair mode enabled");
 }
 
 void exitPairMode() {
   pairModeUntilMs = 0;
   privSessionUntilMs = 0;
-  secretSentInCurrentPairWindow = false;
   Serial.println("[pair] pair mode disabled");
 }
 
@@ -1105,35 +1322,21 @@ void refreshAuthCharacteristic() {
 }
 
 bool parseEnvelope(const String &raw, ParsedEnvelope &parsed, String &errorDetail) {
-  String ver = "";
-  if (!extractJsonStringValue(raw, "ver", ver)) {
-    errorDetail = "missing ver";
+  if (!extractJsonStringValue(raw, "req_id", parsed.reqId)) {
+    errorDetail = "missing req_id";
     return false;
   }
-  if (ver != PROTOCOL_VERSION) {
-    errorDetail = "unsupported ver";
+  if (!extractJsonStringValue(raw, "command", parsed.command)) {
+    errorDetail = "missing command";
     return false;
   }
-  if (!extractJsonStringValue(raw, "msgType", parsed.msgType)) {
-    errorDetail = "missing msgType";
+  parsed.reqId.trim();
+  parsed.command.trim();
+  if (parsed.reqId.length() == 0 || parsed.command.length() == 0) {
+    errorDetail = "empty req_id or command";
     return false;
   }
-  if (!extractJsonStringValue(raw, "msgId", parsed.msgId)) {
-    parsed.msgId = buildMsgId();
-  }
-  parsed.requiresAck = false;
-  extractJsonBoolValue(raw, "requiresAck", parsed.requiresAck);
   return true;
-}
-
-CommandResult makeResult(const String &status, const String &errorCode = "", const String &errorDetail = "") {
-  CommandResult result;
-  result.status = status;
-  result.errorCode = errorCode;
-  result.errorDetail = errorDetail;
-  result.ackExtraFields = "";
-  result.skipAutoAck = false;
-  return result;
 }
 
 String wifiSecurityLabel(wifi_auth_mode_t auth) {
@@ -1219,185 +1422,46 @@ bool buildWifiScanNetworksJson(int maxResults, bool includeHidden, String &netwo
   return true;
 }
 
-void sendOnboardingWifiScanResult(const String &requestId, const String &networksJson, const String &errorCode = "", const String &errorDetail = "") {
-  String payload = "{";
-  bool first = true;
-  appendJsonField(payload, first, "requestId", jsonString(requestId));
-  appendJsonField(payload, first, "completedAt", String((unsigned long)millis()));
-  appendJsonField(payload, first, "networks", networksJson);
-  if (errorCode.length() > 0) {
-    appendJsonField(payload, first, "errorCode", jsonString(errorCode));
+bool checkIfVersion(const String &raw, const String &partName, uint32_t currentVersion, String &errorCode, String &errorDetail) {
+  int requestedVersion = 0;
+  if (!extractJsonIntFromObjectKey(raw, "if_versions", partName, requestedVersion)) {
+    return true;
   }
-  if (errorDetail.length() > 0) {
-    appendJsonField(payload, first, "errorDetail", jsonString(errorDetail));
-  }
-  payload += "}";
-  sendEnvelopeOverBle("onboarding.wifi.scan_result", payload, false);
-}
-
-bool applyWiFiConfigPatch(const String &raw, String &errorCode, String &errorDetail) {
-  int version = 0;
-  if (!extractJsonIntValue(raw, "version", version) || version < 0) {
-    errorCode = "INVALID_PAYLOAD";
-    errorDetail = "config.patch requires integer version>=0";
-    return false;
-  }
-  if (version <= wifiConfig.version) {
+  if ((uint32_t)requestedVersion != currentVersion) {
     errorCode = "VERSION_CONFLICT";
-    errorDetail = "version must increase";
+    errorDetail = String(partName) + " version mismatch";
     return false;
   }
-
-  String ssid = "";
-  String passphrase = "";
-  String security = "";
-  String country = "";
-  bool hidden = wifiConfig.hidden;
-  bool hasSsid = extractJsonStringByAnyKey(raw, "network.wifi.ssid", "ssid", ssid);
-  bool hasPass = extractJsonStringByAnyKey(raw, "network.wifi.passphrase", "passphrase", passphrase);
-  bool hasSecurity = extractJsonStringByAnyKey(raw, "network.wifi.security", "security", security);
-  bool hasCountry = extractJsonStringByAnyKey(raw, "network.wifi.country", "country", country);
-  bool hasHidden = extractJsonBoolByAnyKey(raw, "network.wifi.hidden", "hidden", hidden);
-
-  if (!hasSsid && !hasPass && !hasSecurity && !hasCountry && !hasHidden) {
-    errorCode = "INVALID_PAYLOAD";
-    errorDetail = "no supported network.wifi.* fields in patch";
-    return false;
-  }
-
-  if (hasSsid) {
-    wifiConfig.ssid = ssid;
-  }
-  if (hasPass) {
-    wifiConfig.passphrase = passphrase;
-  }
-  if (hasSecurity) {
-    wifiConfig.security = security;
-  }
-  if (hasCountry) {
-    wifiConfig.country = country;
-  }
-  if (hasHidden) {
-    wifiConfig.hidden = hidden;
-  }
-  wifiConfig.version = version;
-  persistWiFiConfig();
-  scheduleWifiConnectNow();
   return true;
 }
 
-CommandResult handleConfigPatch(const ParsedEnvelope &envelope, const String &raw) {
-  const unsigned long nowMs = millis();
-  if (!isPrivilegedSessionActive(nowMs)) {
-    return makeResult("rejected", "AUTH_FAILED", "pair mode and paired session required");
+bool requirePrivilegedSessionOrReply(const ParsedEnvelope &envelope) {
+  if (isPrivilegedSessionActive(millis())) {
+    return true;
   }
-
-  String errorCode = "";
-  String errorDetail = "";
-  if (!applyWiFiConfigPatch(raw, errorCode, errorDetail)) {
-    return makeResult("rejected", errorCode, errorDetail);
-  }
-
-  if (debugProtocol) {
-    Serial.println("[proto] applied config.patch network.wifi.*");
-  }
-  sendStatusPatch();
-  return makeResult("ok");
+  sendClosedFailed(envelope.reqId, envelope.command, "AUTH_FAILED", "pair mode and paired session required", "rejected");
+  return false;
 }
 
-CommandResult handleOnboardingRequestSecret() {
-  const unsigned long nowMs = millis();
-  if (!isPrivilegedSessionActive(nowMs)) {
-    return makeResult("rejected", "AUTH_FAILED", "pair mode and paired session required");
-  }
-  sendOnboardingBoatSecret();
-  secretSentInCurrentPairWindow = true;
-  return makeResult("ok");
-}
-
-CommandResult handleOnboardingWifiScan(const ParsedEnvelope &envelope, const String &raw) {
-  const unsigned long scanStartedAtMs = millis();
-  String requestId = envelope.msgId;
-  extractJsonStringValue(raw, "requestId", requestId);
-  requestId.trim();
-  if (requestId.length() == 0) {
-    requestId = envelope.msgId;
-  }
-
-  int maxResults = 20;
-  extractJsonIntValue(raw, "maxResults", maxResults);
-  bool includeHidden = false;
-  extractJsonBoolValue(raw, "includeHidden", includeHidden);
-
-  if (debugProtocol) {
-    Serial.print("[scan] requestId=");
-    Serial.print(requestId);
-    Serial.print(" msgId=");
-    Serial.print(envelope.msgId);
-    Serial.print(" maxResults=");
-    Serial.print(maxResults);
-    Serial.print(" includeHidden=");
-    Serial.print(includeHidden ? "true" : "false");
-    Serial.print(" bleConnected=");
-    Serial.println(bleConnected ? "true" : "false");
-  }
-
-  sendCommandAck(envelope.msgId, "ok", "", "", "\"requestId\":" + jsonString(requestId));
-
-  String networksJson = "[]";
-  String scanError = "";
-  if (!buildWifiScanNetworksJson(maxResults, includeHidden, networksJson, scanError)) {
-    if (debugProtocol) {
-      Serial.print("[scan] failed requestId=");
-      Serial.print(requestId);
-      Serial.print(" elapsedMs=");
-      Serial.print(millis() - scanStartedAtMs);
-      Serial.print(" error=");
-      Serial.println(scanError);
-    }
-    sendOnboardingWifiScanResult(requestId, "[]", "DEVICE_FAILED", scanError);
-    CommandResult result = makeResult("ok");
-    result.skipAutoAck = true;
-    return result;
-  }
-
-  if (debugProtocol) {
-    Serial.print("[scan] success requestId=");
-    Serial.print(requestId);
-    Serial.print(" elapsedMs=");
-    Serial.print(millis() - scanStartedAtMs);
-    Serial.print(" networksBytes=");
-    Serial.print(networksJson.length());
-    Serial.print(" bleConnected=");
-    Serial.println(bleConnected ? "true" : "false");
-  }
-  sendOnboardingWifiScanResult(requestId, networksJson);
-  CommandResult result = makeResult("ok");
-  result.skipAutoAck = true;
-  return result;
-}
-
-CommandResult handleOnboardingWifiConnect(const String &raw) {
-  const unsigned long nowMs = millis();
-  if (!isPrivilegedSessionActive(nowMs)) {
-    return makeResult("rejected", "AUTH_FAILED", "pair mode and paired session required");
-  }
-
+bool applyWlanConfigFromRaw(const String &raw, String &errorCode, String &errorDetail) {
   String ssid = "";
   String passphrase = "";
   String security = wifiConfig.security.length() ? wifiConfig.security : "wpa2";
   String country = wifiConfig.country.length() ? wifiConfig.country : "DE";
   bool hidden = wifiConfig.hidden;
 
-  const bool hasSsid = extractJsonStringByAnyKey(raw, "network.wifi.ssid", "ssid", ssid);
-  extractJsonStringByAnyKey(raw, "network.wifi.passphrase", "passphrase", passphrase);
-  extractJsonStringByAnyKey(raw, "network.wifi.security", "security", security);
-  extractJsonStringByAnyKey(raw, "network.wifi.country", "country", country);
-  extractJsonBoolByAnyKey(raw, "network.wifi.hidden", "hidden", hidden);
+  const bool hasSsid = extractJsonStringByAnyKey(raw, "ssid", "network.wifi.ssid", ssid);
+  extractJsonStringByAnyKey(raw, "passphrase", "network.wifi.passphrase", passphrase);
+  extractJsonStringByAnyKey(raw, "security", "network.wifi.security", security);
+  extractJsonStringByAnyKey(raw, "country", "network.wifi.country", country);
+  extractJsonBoolByAnyKey(raw, "hidden", "network.wifi.hidden", hidden);
 
   if (!hasSsid || ssid.length() == 0) {
-    return makeResult("rejected", "INVALID_PAYLOAD", "ssid is required");
+    errorCode = "INVALID_PAYLOAD";
+    errorDetail = "ssid is required";
+    return false;
   }
+
   if (security.length() == 0) {
     security = "wpa2";
   }
@@ -1413,18 +1477,95 @@ CommandResult handleOnboardingWifiConnect(const String &raw) {
   wifiConfig.version = max(wifiConfig.version + 1, 1);
   persistWiFiConfig();
   scheduleWifiConnectNow();
-  sendStatusPatch();
-  return makeResult("ok");
+  versionWlanConfig++;
+  return true;
 }
 
-CommandResult handleAnchorRise() {
+void sendWifiConnectProgress(const String &reqId, const String &phase, const String &detail = "") {
+  String data = "{";
+  bool first = true;
+  String attempt = "{";
+  bool firstAttempt = true;
+  appendJsonField(attempt, firstAttempt, "phase", jsonString(phase));
+  appendJsonField(attempt, firstAttempt, "ssid", jsonString(wifiConfig.ssid));
+  if (detail.length() > 0) {
+    appendJsonField(attempt, firstAttempt, "detail", jsonString(detail));
+  }
+  attempt += "}";
+  appendJsonField(data, first, "attempt", attempt);
+  data += "}";
+  sendProtocolReplyOverBle(reqId, "connect-wlan", "ONGOING", data);
+}
+
+void handleScanWlan(const ParsedEnvelope &envelope, const String &raw) {
+  if (!requirePrivilegedSessionOrReply(envelope)) {
+    return;
+  }
+  int maxResults = 20;
+  extractJsonIntValue(raw, "max_results", maxResults);
+  bool includeHidden = false;
+  extractJsonBoolValue(raw, "include_hidden", includeHidden);
+
+  String networksJson = "[]";
+  String scanError = "";
+  if (!buildWifiScanNetworksJson(maxResults, includeHidden, networksJson, scanError)) {
+    sendClosedFailed(envelope.reqId, envelope.command, "DEVICE_FAILED", scanError);
+    return;
+  }
+  sendProtocolReplyOverBle(envelope.reqId, envelope.command, "CLOSED_OK", buildResultDataJson("ok", "", "", "\"networks\":" + networksJson));
+}
+
+void handleConnectWlan(const ParsedEnvelope &envelope, const String &raw) {
+  if (!requirePrivilegedSessionOrReply(envelope)) {
+    return;
+  }
+  String errorCode = "";
+  String errorDetail = "";
+  if (!checkIfVersion(raw, "wlan_config", versionWlanConfig, errorCode, errorDetail)) {
+    sendClosedFailed(envelope.reqId, envelope.command, errorCode, errorDetail, "rejected");
+    return;
+  }
+  if (!applyWlanConfigFromRaw(raw, errorCode, errorDetail)) {
+    sendClosedFailed(envelope.reqId, envelope.command, errorCode, errorDetail, "rejected");
+    return;
+  }
+
+  activeConnectWifiReqId = envelope.reqId;
+  activeConnectWifiInFlight = true;
+  activeConnectWifiStartedAtMs = millis();
+  sendWifiConnectProgress(envelope.reqId, "connecting");
+  sendGetDataPartReply("config", "wlan_config", versionWlanConfig, buildWlanConfigValue());
+  sendGetDataPartReply("state", "nav_data", ++versionNavData, buildNavDataPartValue());
+}
+
+void handleGetData(const ParsedEnvelope &envelope) {
+  activeGetDataReqId = envelope.reqId;
+  sendGetDataSnapshotReply(envelope.reqId);
+}
+
+void handleRaiseAnchor(const ParsedEnvelope &envelope, const String &raw) {
+  String errorCode = "";
+  String errorDetail = "";
+  if (!checkIfVersion(raw, "anchor_position", versionAnchorPosition, errorCode, errorDetail)) {
+    sendClosedFailed(envelope.reqId, envelope.command, errorCode, errorDetail, "rejected");
+    return;
+  }
+
   anchorState = "up";
   anchorPositionValid = false;
-  sendStatusPatch();
-  return makeResult("ok");
+  versionAnchorPosition++;
+  sendClosedOk(envelope.reqId, envelope.command);
+  sendGetDataPartReply("config", "anchor_position", versionAnchorPosition, buildAnchorPositionConfigValue());
 }
 
-CommandResult handleAnchorDown(const String &raw) {
+void handleMoveAnchor(const ParsedEnvelope &envelope, const String &raw, bool allowCurrentGps) {
+  String errorCode = "";
+  String errorDetail = "";
+  if (!checkIfVersion(raw, "anchor_position", versionAnchorPosition, errorCode, errorDetail)) {
+    sendClosedFailed(envelope.reqId, envelope.command, errorCode, errorDetail, "rejected");
+    return;
+  }
+
   float requestedLat = 0.0f;
   float requestedLon = 0.0f;
   const bool hasLat = extractJsonFloatValue(raw, "lat", requestedLat);
@@ -1433,55 +1574,133 @@ CommandResult handleAnchorDown(const String &raw) {
   if (hasLat && hasLon) {
     anchorLat = requestedLat;
     anchorLon = requestedLon;
-  } else if (sample.gpsValid) {
+  } else if (allowCurrentGps && sample.gpsValid) {
     anchorLat = sample.latDeg;
     anchorLon = sample.lonDeg;
   } else {
-    return makeResult("rejected", "INVALID_PAYLOAD", "anchor.down requires lat/lon or valid GPS");
+    sendClosedFailed(envelope.reqId, envelope.command, "INVALID_PAYLOAD", "lat/lon required");
+    return;
   }
 
   anchorPositionValid = true;
   anchorState = "down";
-  sendStatusPatch();
-  return makeResult("ok");
+  lastAnchorDownAtMs = millis();
+  versionAnchorPosition++;
+  sendClosedOk(envelope.reqId, envelope.command);
+  sendGetDataPartReply("config", "anchor_position", versionAnchorPosition, buildAnchorPositionConfigValue());
 }
 
-CommandResult dispatchMessage(const ParsedEnvelope &envelope, const String &raw, InboundSource source) {
-  (void)source;
-  if (envelope.msgType == "config.patch") {
-    return handleConfigPatch(envelope, raw);
+void handleSilenceAlarm(const ParsedEnvelope &envelope, const String &raw) {
+  String errorCode = "";
+  String errorDetail = "";
+  if (!checkIfVersion(raw, "alarm_state", versionAlarmState, errorCode, errorDetail)) {
+    sendClosedFailed(envelope.reqId, envelope.command, errorCode, errorDetail, "rejected");
+    return;
   }
-  if (envelope.msgType == "onboarding.request_secret") {
-    return handleOnboardingRequestSecret();
+  versionAlarmState++;
+  sendClosedOk(envelope.reqId, envelope.command);
+  sendGetDataPartReply("state", "alarm_state", versionAlarmState, buildAlarmStatePartValue());
+}
+
+void handleUpdateConfig(const ParsedEnvelope &envelope, const String &raw) {
+  if (!requirePrivilegedSessionOrReply(envelope)) {
+    return;
   }
-  if (envelope.msgType == "onboarding.wifi.scan") {
-    return handleOnboardingWifiScan(envelope, raw);
+
+  String partsRaw = "";
+  if (!extractJsonRawValue(raw, "parts", partsRaw)) {
+    sendClosedFailed(envelope.reqId, envelope.command, "INVALID_PAYLOAD", "parts object required", "rejected");
+    return;
   }
-  if (envelope.msgType == "onboarding.wifi.connect") {
-    return handleOnboardingWifiConnect(raw);
+
+  bool changed = false;
+  String partRaw = "";
+  String errorCode = "";
+  String errorDetail = "";
+
+  if (extractJsonRawValue(partsRaw, "alarm_config", partRaw)) {
+    if (!checkIfVersion(raw, "alarm_config", versionAlarmConfig, errorCode, errorDetail)) {
+      sendClosedFailed(envelope.reqId, envelope.command, errorCode, errorDetail, "rejected");
+      return;
+    }
+    storedAlarmConfigJson = partRaw;
+    versionAlarmConfig++;
+    changed = true;
   }
-  if (envelope.msgType == "status.snapshot.request") {
-    sendStatusSnapshot();
-    return makeResult("ok");
+
+  if (extractJsonRawValue(partsRaw, "anchor_settings", partRaw)) {
+    if (!checkIfVersion(raw, "anchor_settings", versionAnchorSettings, errorCode, errorDetail)) {
+      sendClosedFailed(envelope.reqId, envelope.command, errorCode, errorDetail, "rejected");
+      return;
+    }
+    storedAnchorSettingsJson = partRaw;
+    versionAnchorSettings++;
+    changed = true;
   }
-  if (envelope.msgType == "track.snapshot.request") {
-    sendTrackSnapshot();
-    return makeResult("ok");
+
+  if (extractJsonRawValue(partsRaw, "profiles", partRaw)) {
+    if (!checkIfVersion(raw, "profiles", versionProfiles, errorCode, errorDetail)) {
+      sendClosedFailed(envelope.reqId, envelope.command, errorCode, errorDetail, "rejected");
+      return;
+    }
+    storedProfilesJson = partRaw;
+    versionProfiles++;
+    changed = true;
   }
-  if (envelope.msgType == "anchor.rise") {
-    return handleAnchorRise();
+
+  if (extractJsonRawValue(partsRaw, "wlan_config", partRaw)) {
+    if (!checkIfVersion(raw, "wlan_config", versionWlanConfig, errorCode, errorDetail)) {
+      sendClosedFailed(envelope.reqId, envelope.command, errorCode, errorDetail, "rejected");
+      return;
+    }
+    if (!applyWlanConfigFromRaw(partRaw, errorCode, errorDetail)) {
+      sendClosedFailed(envelope.reqId, envelope.command, errorCode, errorDetail, "rejected");
+      return;
+    }
+    changed = true;
   }
-  if (envelope.msgType == "anchor.down") {
-    return handleAnchorDown(raw);
+
+  if (!changed) {
+    sendClosedFailed(envelope.reqId, envelope.command, "INVALID_PAYLOAD", "no supported config parts", "rejected");
+    return;
   }
-  return makeResult("rejected", "UNSUPPORTED_MSG_TYPE", "unsupported msgType");
+
+  sendClosedOk(envelope.reqId, envelope.command);
+  sendGetDataPartReply("config", "alarm_config", versionAlarmConfig, storedAlarmConfigJson);
+  sendGetDataPartReply("config", "anchor_settings", versionAnchorSettings, storedAnchorSettingsJson);
+  sendGetDataPartReply("config", "profiles", versionProfiles, storedProfilesJson);
+  sendGetDataPartReply("config", "wlan_config", versionWlanConfig, buildWlanConfigValue());
+}
+
+void handleCancel(const ParsedEnvelope &envelope, const String &raw) {
+  String originalReqId = "";
+  extractJsonStringValue(raw, "original_req_id", originalReqId);
+  if (originalReqId.length() == 0) {
+    sendClosedFailed(envelope.reqId, envelope.command, "INVALID_PAYLOAD", "original_req_id required", "rejected");
+    return;
+  }
+
+  if (activeGetDataReqId == originalReqId) {
+    sendClosedFailed(activeGetDataReqId, "get-data", "CANCELED", "request canceled");
+    activeGetDataReqId = "";
+    sendClosedOk(envelope.reqId, envelope.command);
+    return;
+  }
+
+  if (activeConnectWifiReqId == originalReqId) {
+    sendClosedFailed(activeConnectWifiReqId, "connect-wlan", "CANCELED", "request canceled");
+    activeConnectWifiReqId = "";
+    activeConnectWifiInFlight = false;
+    sendClosedOk(envelope.reqId, envelope.command);
+    return;
+  }
+
+  sendClosedFailed(envelope.reqId, envelope.command, "NOT_FOUND", "original request not active", "rejected");
 }
 
 void processInboundMessage(const String &raw, InboundSource source) {
   ParsedEnvelope envelope = {};
   String parseError = "";
-  String fallbackMsgId = "";
-  extractJsonStringValue(raw, "msgId", fallbackMsgId);
 
   if (!parseEnvelope(raw, envelope, parseError)) {
     if (debugProtocol) {
@@ -1490,28 +1709,54 @@ void processInboundMessage(const String &raw, InboundSource source) {
       Serial.print(": ");
       Serial.println(parseError);
     }
-    if (fallbackMsgId.length() > 0) {
-      sendCommandAck(fallbackMsgId, "rejected", "INVALID_PAYLOAD", parseError);
-    }
     return;
   }
 
   if (debugProtocol) {
     Serial.print("[proto] rx ");
-    Serial.print(envelope.msgType);
+    Serial.print(envelope.command);
     Serial.print(" via ");
     Serial.println(sourceName(source));
   }
 
-  const CommandResult result = dispatchMessage(envelope, raw, source);
-  const bool shouldAck =
-    envelope.requiresAck ||
-    envelope.msgType.endsWith(".request") ||
-    envelope.msgType == "config.patch" ||
-    envelope.msgType.startsWith("onboarding.");
-  if (shouldAck && !result.skipAutoAck) {
-    sendCommandAck(envelope.msgId, result.status, result.errorCode, result.errorDetail, result.ackExtraFields);
+  if (envelope.command == "scan-wlan") {
+    handleScanWlan(envelope, raw);
+    return;
   }
+  if (envelope.command == "connect-wlan") {
+    handleConnectWlan(envelope, raw);
+    return;
+  }
+  if (envelope.command == "get-data") {
+    handleGetData(envelope);
+    return;
+  }
+  if (envelope.command == "update-config") {
+    handleUpdateConfig(envelope, raw);
+    return;
+  }
+  if (envelope.command == "move-anchor") {
+    handleMoveAnchor(envelope, raw, false);
+    return;
+  }
+  if (envelope.command == "set-anchor") {
+    handleMoveAnchor(envelope, raw, true);
+    return;
+  }
+  if (envelope.command == "raise-anchor") {
+    handleRaiseAnchor(envelope, raw);
+    return;
+  }
+  if (envelope.command == "silence-alarm") {
+    handleSilenceAlarm(envelope, raw);
+    return;
+  }
+  if (envelope.command == "cancel") {
+    handleCancel(envelope, raw);
+    return;
+  }
+
+  sendClosedFailed(envelope.reqId, envelope.command, "UNSUPPORTED_COMMAND", "unsupported command", "rejected");
 }
 
 void processControlTxWrite(const uint8_t *data, size_t len) {
@@ -1541,11 +1786,6 @@ void processAuthWrite(const String &raw) {
   } else if (action == "pair.clear") {
     privSessionUntilMs = 0;
     Serial.println("[pair] privileged session cleared");
-  } else if (action == "request_secret") {
-    if (isPrivilegedSessionActive(nowMs)) {
-      sendOnboardingBoatSecret();
-      secretSentInCurrentPairWindow = true;
-    }
   }
   refreshAuthCharacteristic();
 }
@@ -1560,6 +1800,7 @@ class AnchorServerCallbacks : public BLEServerCallbacks {
     bleLastEventNotifyValid = false;
     bleLastEventNotifyCode = 0;
     lastBleStatusAtMs = 0;
+    activeGetDataReqId = "";
     resetBleAssembler();
     refreshAuthCharacteristic();
     Serial.println("[ble] client connected");
@@ -1573,6 +1814,9 @@ class AnchorServerCallbacks : public BLEServerCallbacks {
     bleLastEventNotifyValid = false;
     bleLastEventNotifyCode = 0;
     privSessionUntilMs = 0;
+    activeGetDataReqId = "";
+    activeConnectWifiReqId = "";
+    activeConnectWifiInFlight = false;
     resetBleAssembler();
     BLEDevice::startAdvertising();
     Serial.println("[ble] client disconnected");
@@ -1635,8 +1879,7 @@ class EventRxCallbacks : public BLECharacteristicCallbacks {
 class SnapshotCallbacks : public BLECharacteristicCallbacks {
  public:
   void onRead(BLECharacteristic *characteristic) override {
-    OutboundEnvelope envelope = makeEnvelope("status.snapshot", buildStatusSnapshotPayload(), false);
-    characteristic->setValue(envelope.json.c_str());
+    characteristic->setValue(buildGetDataSnapshotDataJson().c_str());
   }
 };
 
@@ -1717,12 +1960,6 @@ void initBle() {
   Serial.println(deviceName);
 }
 
-void emitBlePeriodicMessages(unsigned long nowMs) {
-  (void)nowMs;
-  // Disabled: periodic status.patch pushes have caused repeated NimBLE ENOMEM on some clients.
-  // State still updates via command responses, snapshots, and explicit status.patch emits on config/anchor changes.
-}
-
 void runSerialCommand(const String &lineRaw) {
   String line = lineRaw;
   line.trim();
@@ -1760,7 +1997,14 @@ void runSerialCommand(const String &lineRaw) {
     return;
   }
   if (line == "request secret") {
-    processAuthWrite("request_secret");
+    if (!isPrivilegedSessionActive(millis())) {
+      Serial.println("[pair] request secret denied (pair mode and paired session required)");
+      return;
+    }
+    Serial.print("[pair] boatId=");
+    Serial.print(boatId);
+    Serial.print(" boatSecret=");
+    Serial.println(boatSecret);
     return;
   }
   if (line == "debug on") {
@@ -1808,19 +2052,9 @@ void updatePairModeState(unsigned long nowMs) {
   const bool active = isPairModeActive(nowMs);
   if (pairModeWasActive && !active) {
     privSessionUntilMs = 0;
-    secretSentInCurrentPairWindow = false;
     Serial.println("[pair] pair mode expired");
   }
   pairModeWasActive = active;
-}
-
-void maybeEmitOnboardingSecret() {
-  const unsigned long nowMs = millis();
-  if (!bleConnected || !isPrivilegedSessionActive(nowMs) || secretSentInCurrentPairWindow) {
-    return;
-  }
-  sendOnboardingBoatSecret();
-  secretSentInCurrentPairWindow = true;
 }
 
 void setup() {
@@ -1851,8 +2085,6 @@ void loop() {
   updatePairModeState(nowMs);
   updateWifiManager(nowMs);
   refreshAuthCharacteristic();
-  maybeEmitOnboardingSecret();
-  emitBlePeriodicMessages(nowMs);
 
   if (nowMs - lastTickMs < MAIN_TICK_MS) {
     return;
@@ -1861,5 +2093,8 @@ void loop() {
 
   readTelemetry(sample, nowMs);
   applyAlarmLevel(evaluateAlarm(sample));
+  appendTrackHistoryPoint(sample, nowMs);
+  finalizeActiveWifiConnect(nowMs);
+  maybeEmitActiveDataStream(nowMs);
   printSample(sample, alarmLevel);
 }

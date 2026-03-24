@@ -1,6 +1,3 @@
-const PROTOCOL_VERSION = "am.v1";
-const BUILD_VERSION_DEFAULT = "run-unknown";
-
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -68,7 +65,6 @@ export class BoatPipeDurableObject {
   constructor(_state, env) {
     this.env = env;
     this.clients = new Map();
-    this.seq = 1;
   }
 
   async fetch(request) {
@@ -137,86 +133,7 @@ export class BoatPipeDurableObject {
       return;
     }
 
-    let envelope;
-    try {
-      envelope = JSON.parse(raw);
-    } catch {
-      return;
-    }
-
-    if (!isObject(envelope)) {
-      return;
-    }
-
-    const msgType = typeof envelope.msgType === "string" ? envelope.msgType : "";
-    if (!msgType) {
-      return;
-    }
-
-    if (msgType === "relay.probe") {
-      this.replyRelayProbe(sender, envelope);
-      return;
-    }
-
-    if (msgType.startsWith("relay.")) {
-      this.replyRelayError(sender, envelope, "UNSUPPORTED_MSG_TYPE", `unsupported relay control msgType: ${msgType}`);
-      return;
-    }
-
     this.forwardToPeers(sender, raw);
-  }
-
-  replyRelayProbe(socket, requestEnvelope) {
-    const senderMeta = this.clients.get(socket);
-    if (!senderMeta) {
-      return;
-    }
-
-    const payload = {
-      ok: true,
-      resultText: `Relay active (${this.clients.size} sockets)` ,
-      buildVersion: String(this.env.BUILD_VERSION || BUILD_VERSION_DEFAULT),
-      connectedSockets: this.clients.size,
-      connectedApps: this.countRole("app"),
-      connectedDevices: this.countRole("device"),
-      inReplyToMsgId: typeof requestEnvelope.msgId === "string" ? requestEnvelope.msgId : null,
-    };
-
-    this.sendEnvelope(socket, {
-      ver: PROTOCOL_VERSION,
-      msgType: "relay.probe.result",
-      msgId: buildMsgId(),
-      boatId: senderMeta.boatId,
-      deviceId: "relay",
-      seq: this.seq++,
-      ts: Date.now(),
-      requiresAck: false,
-      payload,
-    });
-  }
-
-  replyRelayError(socket, requestEnvelope, code, detail) {
-    const senderMeta = this.clients.get(socket);
-    if (!senderMeta) {
-      return;
-    }
-
-    this.sendEnvelope(socket, {
-      ver: PROTOCOL_VERSION,
-      msgType: "relay.error",
-      msgId: buildMsgId(),
-      boatId: senderMeta.boatId,
-      deviceId: "relay",
-      seq: this.seq++,
-      ts: Date.now(),
-      requiresAck: false,
-      payload: {
-        ok: false,
-        code,
-        detail,
-        inReplyToMsgId: typeof requestEnvelope.msgId === "string" ? requestEnvelope.msgId : null,
-      },
-    });
   }
 
   forwardToPeers(sender, rawEnvelope) {
@@ -243,27 +160,6 @@ export class BoatPipeDurableObject {
       }
     } catch {
       // no-op
-    }
-  }
-
-  countRole(role) {
-    let count = 0;
-    for (const meta of this.clients.values()) {
-      if (meta.role === role) {
-        count += 1;
-      }
-    }
-    return count;
-  }
-
-  sendEnvelope(socket, envelope) {
-    if (socket.readyState !== 1) {
-      return;
-    }
-    try {
-      socket.send(JSON.stringify(envelope));
-    } catch {
-      this.dropClient(socket);
     }
   }
 }
@@ -330,15 +226,4 @@ function enforceBoatScope(boatId, env, cors) {
 
 function normalizeRole(rawRole) {
   return rawRole === "device" ? "device" : "app";
-}
-
-function buildMsgId() {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return crypto.randomUUID();
-  }
-  return `${Date.now().toString(16)}${Math.random().toString(16).slice(2, 10)}`;
-}
-
-function isObject(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

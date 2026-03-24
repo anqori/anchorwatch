@@ -1,170 +1,70 @@
-# Anqori AnchorWatch - Implementation Plan (Checklist)
+# Anqori AnchorWatch Backend/API Cleanup Plan
 
-Status date: 2026-02-12  
-Legend: `[x] done`, `[ ] open`
+Status date: 2026-03-24
 
-## 1. Purpose
+## Goal
 
-Build an MVP for:
+Keep the existing component topology and UI architecture, but replace the accumulated backend/API drift with one transport-agnostic protocol:
 
-1. On-boat ESP32-S3 device (NMEA2000 read-only, alarm logic, siren output)
-2. Phone PWA control/monitoring
-3. Cloudflare relay path for remote alerts
-4. Grove-friendly build and printable case workflow
+`server (hardware or mini-android app) <-> BLE or WLAN->cloud relay <-> AnchorWatch PWA`
 
-## 2. Progress Snapshot
+The cloud worker is a dumb authenticated proxy. BLE and cloud carry the same request/reply messages. State and config are updated as whole values, never patches.
 
-- [x] Repository scaffold created (`firmware/`, `app/`, `cloud/`, `cad/`, `docs/`)
-- [x] PRD and protocol draft created (`PRD.md`, `docs/protocol-v1.md`)
-- [x] Cloudflare Pages + Worker scaffolds created
-- [x] Cloud latest-config API scaffold created (`/v1/config`)
-- [x] Cloud latest-state API scaffold created (`/v1/state`)
-- [x] PWA fake mode implemented (works without device connection)
-- [x] Firmware scaffold compiles with `just firmware-build`
-- [x] Phase 2 firmware connectivity scaffold implemented (BLE + pair gate + onboarding + Wi-Fi config/status)
-- [x] Phase 3 app control-plane scaffold implemented (BLE onboarding UI + boatSecret persistence + cloud verify)
-- [x] App migrated to `Vite + Svelte + TypeScript` build-step workflow
-- [x] Local validation automation added (lint + test + firmware build commands)
-- [x] Execution order reprioritized to connectivity-first firmware bring-up
-- [ ] Real device/cloud end-to-end alarm flow
+## Core Decisions
 
-## 3. Phase Checklist
+1. One wire contract for BLE and cloud:
+   - client -> server: `{ req_id, type, data }`
+   - server -> client: `{ req_id, state, type, data }`
+   - reply states: `ONGOING`, `CLOSED_OK`, `CLOSED_FAILED`
+2. `GET_DATA` is the single runtime stream:
+   - bootstrap is a sequence of replies on the same `req_id`, not a special snapshot object
+   - reply `type` changes across that sequence and names the payload, for example `STATE_POSITION`, `STATE_DEPTH`, `STATE_ANCHOR_POSITION`, or `TRACK_BACKFILL`
+   - bootstrap includes current state/config values plus anchor-track backfill from `min(last_anchor_down_ts, now - 30 minutes)`
+   - later replies continue streaming whole-value replacements and track backfill messages
+3. Runtime state is server-authoritative and includes `anchor_position`.
+   - app-writable config is limited to `alarm_config`, `anchor_settings`, `profiles`, and `wlan_config`
+4. Config writes use separate single-payload commands and compare-and-swap on the config DTO's own `version` field.
+   - `UPDATE_CONFIG_ALARM`
+   - `UPDATE_CONFIG_ANCHOR_SETTINGS`
+   - `UPDATE_CONFIG_PROFILES`
+   - `UPDATE_CONFIG_WLAN`
+   - server-to-app replies are always authoritative overrides
+5. Client cancellation is explicit with `type: "CANCEL"` and `data.original_req_id`.
+6. Onboarding WLAN flows use the same protocol:
+   - `SCAN_WLAN` is a streamed request that emits one `WLAN_NETWORK` entry at a time and closes with `ACK`
+   - there is no `CONNECT_WLAN`; the app updates `wlan_config` with `UPDATE_CONFIG_WLAN` and observes WLAN behavior through streamed state/config replies, especially WLAN phase/error data in `STATE_WLAN_STATUS`
+7. Every request, including `CANCEL`, must receive a reply unless the transport disconnects first.
 
-## Phase 0 - Project Bootstrap
+## Current Refactor Status
 
-- [x] Create module folders (`firmware/`, `app/`, `cloud/`, `cad/`, `docs/`)
-- [x] Add baseline docs (`PRD.md`, `BOM.md`, `docs/cloudflare-setup.md`)
-- [x] Define initial message envelope and message catalog (`docs/protocol-v1.md`)
-- [x] Define local transport approach (Wi-Fi HTTP + BLE GATT draft)
-- [x] Add local lint/build/test validation commands
-- [x] Freeze protocol contract for MVP
+- App BLE, cloud-relay, and fake transports now use the v2 command/state protocol.
+- Firmware BLE command handling now uses v2 request/reply envelopes, whole-value updates, cancellation, and `GET_DATA` streaming.
+- Relay worker now forwards opaque WebSocket payloads unchanged instead of understanding protocol message types.
+- Active docs are being switched to v2; v1 plan/protocol material is archived under [`docs/history/v1/`](/home/pm/dev/anchormaster/docs/history/v1).
 
-## Phase 1 - Hardware EVT
+## Remaining Work
 
-- [x] Select baseline hardware modules and alternatives (`BOM.md`)
-- [x] Draft Berrybase-first BOM with direct links
-- [ ] Create connector and pin map doc (CAN, power, siren, Grove)
-- [ ] Bench-test power stability and siren switching
-- [ ] Bench-test CAN RX on real NMEA2000 network
-- [ ] Finalize first wiring guide
+- Finish device/cloud end-to-end validation on real hardware.
+- Add the device-side WLAN/cloud uplink runtime that publishes the same v2 envelopes over the relay.
+- Decide the long-term greenfield onboarding secret exchange that replaces the old ad-hoc BLE event flow. The current code keeps pair/session state on the auth characteristic and exposes manual secret retrieval over serial while the v2 transport cleanup lands.
+- Add the long-term cloud control plane:
+  - users authenticate with OAuth
+  - logged-in users explicitly create boats
+  - only explicitly created boats are allowed on the relay
+  - one durable object per `boat_id`
+  - app and server both obtain short-lived WebSocket tickets before cloud socket establishment
+  - app tickets are authorized from user access to the boat
+  - server tickets are authorized from a boat-scoped server credential such as `boat_secret`
 
-## Phase 2 - Firmware Connectivity Bring-up (Priority)
+## Validation Rules
 
-- [x] Firmware scaffold with 1 Hz loop and placeholder telemetry
-- [x] Compile target working (`esp32:esp32:esp32s3`)
-- [x] Implement BLE GATT profile on firmware (`controlTx`, `eventRx`, `snapshot`, `auth`)
-- [x] Implement physical pair mode and BLE pairing gate (serial pair mode + auth session confirm)
-- [x] Implement message processing framework (BLE first, WLAN later): JSON envelope parsing, validation, patch application, command routing, and ACK generation
-- [x] Implement onboarding messages (`onboarding.boat_secret`, onboarding status fields, and secret-request handler)
-- [x] Implement `config.patch` handling for `network.wifi.*` fields
-- [x] Implement Wi-Fi station manager (connect/reconnect/backoff)
-- [x] Implement cloud uplink status in `status.patch` (`system.wifi.*`, `system.cloud.*`)
-- [x] Add serial debug logging/toggles for onboarding and connectivity traces
+- App changes: `cd app && npm run check`
+- Firmware changes: `just firmware-build`
+- Cloud worker changes: `node --check cloud/worker/src/index.js`
+- Markdown changes: `npx --yes markdownlint-cli2 <files...>`
 
-## Phase 3 - App/Device Control Plane
+## Archive
 
-- [x] PWA mode framework exists (fake mode + device mode toggle)
-- [x] Implement app BLE client path
-- [x] Implement onboarding wizard (pair -> receive boat secret -> set Wi-Fi -> verify cloud)
-- [x] Persist/use `boatSecret` in app for cloud `Authorization` header
-- [x] Connect PWA device mode to real device endpoint (replace placeholder)
-- [ ] Implement multi-phone sync conflict handling
-
-## Phase 4 - Firmware Data Plane (NMEA + Tracking)
-
-- [ ] Implement NMEA2000 PGN ingestion (position, direction, depth, wind)
-- [ ] Implement data-age tracking and staleness flags
-- [ ] Implement anchor modes (current, offset/angle, auto-detect, manual move)
-- [ ] Persist sessions, tracks, and alarm history
-- [ ] Publish normalized telemetry/state for app and cloud consumers
-
-## Phase 5 - Alarm Engine
-
-- [x] Placeholder trigger evaluation path exists in scaffold
-- [ ] Implement all trigger types from PRD
-- [ ] Implement hold-time and warning/full severity model
-- [ ] Implement alarm output routing and delays
-- [ ] Implement slider-based silence/snooze logic
-- [ ] Add transition/audit log events
-
-## Phase 6 - Cloudflare Relay + Push
-
-- [x] Worker scaffold with `/health` and `/v1/events`
-- [x] Worker scaffold with `/v1/config` latest-config API
-- [x] Worker scaffold with `/v1/state` latest-state API
-- [x] Worker scaffold with `/v1/tracks` derived track API
-- [x] Align `status.patch` and `config.patch` merge logic via shared merge engine
-- [x] Add KISS auth validation (shared `boatSecret`, optional `BOAT_ID` scope lock)
-- [x] Replace in-memory latest-state map with durable storage
-- [x] Persist cloud-derived track points with durable storage
-- [x] Implement field-level last-write-wins merge rules in persistent layer
-- [ ] Add push fan-out pipeline for alarm events
-- [ ] Add acknowledge/silence sync via cloud
-- [ ] Add delivery telemetry and operational metrics
-
-## Phase 7 - PWA UX
-
-- [x] Installable PWA shell (manifest + service worker)
-- [x] Summary screen scaffold with simulated telemetry
-- [x] Fake mode works without device connection
-- [x] Shell to switch between different views / config
-- [x] Onboarding Flow (bt-connect, key-exchange, wlan-config)
-- [x] Satellite view screen
-- [x] Map view screen
-- [x] Radar view screen
-- [ ] Anchor set flows (current/offset/auto/manual drag)
-- [x] Trigger config UI + day/night profiles
-- [x] Notification handling and reliability UX
-
-## Phase 8 - Mechanical / STL
-
-- [x] CAD workspace scaffold (`cad/`, `cad/out/`)
-- [ ] Build enclosure CAD for selected stack
-- [ ] Print and fit iteration #1
-- [ ] Print and fit iteration #2
-- [ ] Publish final `cad/out/*.stl`
-- [ ] Add assembly and mounting notes
-
-## Phase 9 - Verification
-
-- [ ] Replay tests for anchor and trigger edge cases
-- [ ] Hardware-in-loop CAN + siren tests
-- [ ] On-water trial (calm anchorage)
-- [ ] On-water trial (gusty/tidal anchorage)
-- [ ] Soak test and reboot recovery verification
-- [ ] MVP acceptance checklist sign-off
-
-## 4. MVP Deliverables Checklist
-
-- [x] `PRD.md`
-- [x] `PLAN.md` (tickable execution plan)
-- [x] `BOM.md`
-- [x] Firmware scaffold buildable via `just firmware-build`
-- [x] PWA scaffold deployable via Cloudflare Pages workflow
-- [x] Worker scaffold deployable via Cloudflare Workers workflow
-- [ ] Firmware NMEA2000 parser + full alarm engine
-- [x] Full app screens (summary + satellite + map + radar)
-- [ ] Remote push alert pipeline
-- [ ] Grove wiring guide
-- [ ] Final STL case files
-- [ ] Bench + sea-trial test report
-
-## 5. Next Steps (Now)
-
-- [x] Review and freeze `docs/protocol-v1.md` for MVP
-- [x] Implement firmware BLE GATT profile (`controlTx`, `eventRx`)
-- [x] Implement firmware onboarding (`onboarding.boat_secret`) and config command ACKs
-- [x] Implement firmware Wi-Fi apply/status via `config.patch` + `status.patch` (`system.wifi.*`, `system.cloud.*`)
-- [x] Implement app BLE onboarding wizard and store/use `boatSecret`
-- [x] Connect PWA device mode to real device endpoint (replace placeholder)
-- [ ] Run first end-to-end control-plane test (BLE onboarding -> Wi-Fi -> cloud `GET /v1/state`)
-- [x] Implement durable latest-state and track stores before push fan-out (KISS auth scaffold is in place)
-- [ ] Start NMEA2000 ingestion after control-plane path is stable
-- [ ] Write `docs/pin-map-v1.md` for exact hardware wiring
-- [ ] Run first bench test: power + relay + siren + CAN listener
-- [ ] Generate first enclosure draft STL around chosen modules
-
-## 6. Known Blockers
-
-- [x] Cloud deploy in this shell requires `CLOUDFLARE_API_TOKEN` set.
-- [ ] Hardware not yet available for real device/cloud end-to-end test execution.
+- Previous active plan: [`docs/history/v1/PLAN.md`](/home/pm/dev/anchormaster/docs/history/v1/PLAN.md)
+- Previous Android helper plan: [`docs/history/v1/PLAN_ANDROID_HELPER.md`](/home/pm/dev/anchormaster/docs/history/v1/PLAN_ANDROID_HELPER.md)
+- Previous protocol: [`docs/history/v1/protocol-v1.md`](/home/pm/dev/anchormaster/docs/history/v1/protocol-v1.md)
