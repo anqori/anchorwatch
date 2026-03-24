@@ -22,8 +22,6 @@
     MAPTILER_MAX_VISIBLE_AREA_M2,
     MAPTILER_STYLE_MAP,
     MAPTILER_STYLE_SATELLITE,
-    MODE_DEVICE,
-    MODE_FAKE,
     TABBAR_LINK_COLORS,
     VIEW_TABS,
   } from "./core/constants";
@@ -54,11 +52,17 @@
   } from "./services/maptiler-controller";
   import { isBleSupported } from "./connections/ble/ble-connection";
   import {
+    activateBoatSetup,
     reconnectLastKnownBleDevice,
+    authorizeCurrentSession,
     applyAnchorConfig,
     applyAlertConfig,
+    applyObstaclesConfig,
     applyProfilesConfig,
+    applySystemConfig,
+    cancelWifiScan,
     connectToWifiNetwork,
+    dropAnchorAtCurrentPosition,
     fetchTrackSnapshot,
     moveAnchorToPosition,
     raiseAnchor,
@@ -71,10 +75,10 @@
     stopDeviceRuntime,
     switchToOnboardMode,
     switchToRemoteMode,
-    useFakeMode,
+    rotateBleConnectionPin,
   } from "./actions/device-actions";
   import { geoDeltaMeters, type GeoPoint } from "./services/geo-nav";
-  import { appState, initAppStateEnvironment, logLine, replaceTrackPoints } from "./state/app-state.svelte";
+  import { appState, closeErrorToast, initAppStateEnvironment, logLine, replaceTrackPoints, setDebugMessageLimit, showErrorToast } from "./state/app-state.svelte";
   import {
     Actions,
     ActionsButton,
@@ -85,16 +89,19 @@
     Page as KonstaPage,
     Tabbar,
     TabbarLink,
+    Toast,
   } from "konsta/svelte";
   import SummaryPage from "./features/summary/SummaryPage.svelte";
   import SettingsHomePage from "./features/config/SettingsHomePage.svelte";
   import DeviceBluetoothPage from "./features/config/DeviceBluetoothPage.svelte";
+  import DeviceOnboardingPage from "./features/config/DeviceOnboardingPage.svelte";
   import DeviceManualConnectionPage from "./features/config/DeviceManualConnectionPage.svelte";
   import InternetWlanPage from "./features/config/InternetWlanPage.svelte";
   import ConnectionPage from "./features/config/ConnectionPage.svelte";
   import InfoVersionPage from "./features/config/InfoVersionPage.svelte";
   import AnchorConfigPage from "./features/config/AnchorConfigPage.svelte";
   import AlertsConfigPage from "./features/config/AlertsConfigPage.svelte";
+  import ObstaclesConfigPage from "./features/config/ObstaclesConfigPage.svelte";
   import ProfilesConfigPage from "./features/config/ProfilesConfigPage.svelte";
   import DebuggingPage from "./features/config/DebuggingPage.svelte";
   import SatellitePage from "./features/map/SatellitePage.svelte";
@@ -150,6 +157,7 @@
   let runtimeModeEnforceInFlight = false;
   let warningBeepTimer: ReturnType<typeof setInterval> | null = null;
   let warningAutoFallbackTimer: ReturnType<typeof setTimeout> | null = null;
+  let errorToastTimer: ReturnType<typeof setTimeout> | null = null;
 
   let maptilerMapContainer = $state<HTMLDivElement | null>(null);
   let maptilerSatelliteContainer = $state<HTMLDivElement | null>(null);
@@ -158,23 +166,42 @@
   let internetWifiNetworks = $state<WifiScanNetwork[]>([]);
   let internetRescanTimer: ReturnType<typeof setTimeout> | null = null;
   let internetWasOpen = false;
-  type ConfigAutoPatchSection = "anchor" | "alerts" | "profiles";
+  let pendingSystemRuntimeMode: "LIVE" | "SIMULATION" | null = null;
+  type ConfigAutoPatchSection = "anchor" | "alerts" | "obstacles" | "profiles";
   const CONFIG_AUTO_PATCH_DELAY_MS = 250;
   const configAutoPatchTimers: Record<ConfigAutoPatchSection, ReturnType<typeof setTimeout> | null> = {
     anchor: null,
     alerts: null,
+    obstacles: null,
     profiles: null,
   };
   const configAutoPatchPrimed: Record<ConfigAutoPatchSection, boolean> = {
     anchor: false,
     alerts: false,
+    obstacles: false,
     profiles: false,
   };
   const configAutoPatchHashes: Record<ConfigAutoPatchSection, string> = {
     anchor: "",
     alerts: "",
+    obstacles: "",
     profiles: "",
   };
+
+  $effect(() => {
+    const pendingMode = pendingSystemRuntimeMode;
+    const systemConfig = appState.deviceData.systemConfig;
+    const active = navigation.activeView === "config" && navigation.activeConfigView === "device";
+    if (!pendingMode || !active || !systemConfig) {
+      return;
+    }
+    if (systemConfig.runtime_mode === pendingMode) {
+      pendingSystemRuntimeMode = null;
+      return;
+    }
+    pendingSystemRuntimeMode = null;
+    void runAction(`set server runtime ${pendingMode.toLowerCase()}`, applySystemConfig);
+  });
 
   $effect(() => {
     gpsAgeText = appState.summary.gpsAgeText;
@@ -198,26 +225,30 @@
   });
 
   $effect(() => {
-    connection.bleStatusText = deriveBleStatusText(ble.connected, ble.authState);
-    if (connection.mode === MODE_FAKE && connection.activeConnection === "fake" && connection.activeConnectionConnected) {
-      connection.connectedDeviceName = "demo-device";
-      return;
-    }
+    connection.bleStatusText = deriveBleStatusText(ble.connected, ble.authState, ble.phase);
     connection.connectedDeviceName = ble.connected ? (ble.deviceName.trim() || "device") : "";
   });
 
   $effect(() => {
     connection.appState = deriveAppConnectivityState(connection.hasConfiguredDevice, connection.activeConnectionConnected);
 
+    if (isBleSetupRequired()) {
+      connectionSelectionStatusText = "Connected via BT, setup required";
+      return;
+    }
+    if (connection.activeConnection === "bluetooth" && ble.phase === "connecting") {
+      connectionSelectionStatusText = "Connecting via BT...";
+      return;
+    }
     if (!connection.activeConnectionConnected) {
       connectionSelectionStatusText = "Not connected";
       return;
     }
-    if (connection.activeConnection === "fake") {
-      connectionSelectionStatusText = "Connected to Fake data";
-      return;
-    }
     if (connection.activeConnection === "bluetooth") {
+      if (appState.latestSource === "--") {
+        connectionSelectionStatusText = "Connected via BT, waiting for data";
+        return;
+      }
       connectionSelectionStatusText = "Connected via BT";
       return;
     }
@@ -231,13 +262,11 @@
       ignoredDisconnectWarningMode = null;
       return;
     }
-    if (connection.mode !== MODE_FAKE) {
-      void refreshReconnectCandidateState();
-    }
+    void refreshReconnectCandidateState();
   });
 
   $effect(() => {
-    if (connection.mode !== MODE_DEVICE || !connection.hasConfiguredDevice) {
+    if (!connection.hasConfiguredDevice) {
       return;
     }
     void enforceRuntimeModeSelection();
@@ -263,8 +292,8 @@
   $effect(() => {
     if (!connection.activeConnectionConnected) {
       navigation.settingsDeviceStatusText = "No Device connected yet";
-    } else if (connection.activeConnection === "fake") {
-      navigation.settingsDeviceStatusText = "Connected to demo-device";
+    } else if (isBleSetupRequired()) {
+      navigation.settingsDeviceStatusText = "Boat setup required";
     } else if (connection.activeConnection === "cloud-relay") {
       navigation.settingsDeviceStatusText = "Connected via Relay";
     } else {
@@ -281,7 +310,8 @@
     navigation.configSectionsWithStatus = CONFIG_SECTIONS
       .map((section) => ({
       ...section,
-      disabled: (!connection.hasConfiguredDevice && section.id !== "device" && section.id !== "debugging")
+      disabled: (isBleSetupRequired() && section.id !== "device" && section.id !== "connection" && section.id !== "debugging" && section.id !== "information")
+        || (!isBleSetupRequired() && !connection.hasConfiguredDevice && section.id !== "device" && section.id !== "debugging")
         || (section.id === "internet" && !connection.activeConnectionConnected),
       status: section.id === "device"
         ? navigation.settingsDeviceStatusText
@@ -293,6 +323,18 @@
               ? `${appState.debugMessages.length} messages`
           : undefined,
     }));
+  });
+
+  $effect(() => {
+    if (!isBleSetupRequired()) {
+      return;
+    }
+    clearInternetRescanTimer();
+    void cancelWifiScan();
+    if (navigation.activeView !== "config" || navigation.activeConfigView !== "device_onboarding") {
+      navigation.activeView = "config";
+      navigation.activeConfigView = "device_onboarding";
+    }
   });
 
   $effect(() => {
@@ -311,10 +353,10 @@
   });
 
   $effect(() => {
-    const wifiStatus = readOnboardingWifiStatus(appState.latestState);
-    const currentGps = readCurrentGpsPosition(appState.latestState);
+    const wifiStatus = readOnboardingWifiStatus(appState.deviceData.wlanStatus);
+    const currentGps = readCurrentGpsPosition(appState.deviceData.position);
     boatPosition = currentGps ? { lat: currentGps.lat, lon: currentGps.lon } : null;
-    const anchorStatus = readAnchorStatus(appState.latestState);
+    const anchorStatus = readAnchorStatus(appState.deviceData.anchorPosition);
     anchorState = anchorStatus.state;
     anchorPosition = anchorStatus.position;
     if (anchorStatus.state !== "up" && anchorStatus.position) {
@@ -344,8 +386,8 @@
       network.onboardingWifiStateText = "Connecting or waiting for Wi-Fi telemetry...";
     }
     network.selectedWifiNetwork = network.availableWifiNetworks.find((wifiNetwork) => wifiNetwork.ssid === network.selectedWifiSsid) ?? null;
-    versions.firmware = readFirmwareVersionFromState(appState.latestState);
-    activeAlerts = readAlertRuntimeEntries(appState.latestState)
+    versions.firmware = readFirmwareVersionFromState(appState.deviceData);
+    activeAlerts = readAlertRuntimeEntries(appState.deviceData.alarmState)
       .filter((alert) => alert.state !== "DISABLED" && alert.state !== "WATCHING");
   });
 
@@ -390,10 +432,15 @@
       if (!network.wifiCountry.trim()) {
         network.wifiCountry = "DE";
       }
-      void runAction("scan wlan networks", scanWifiNetworks);
+      const boatAccessState = currentBleBoatAccessState();
+      const sessionState = currentBleSessionState();
+      if (connection.activeConnection === "bluetooth" && boatAccessState !== "SETUP_REQUIRED" && sessionState === "AUTHORIZED") {
+        void runAction("scan wlan networks", scanWifiNetworks);
+      }
     }
     if (!internetOpen) {
       clearInternetRescanTimer();
+      void cancelWifiScan();
     }
     internetWasOpen = internetOpen;
   });
@@ -402,6 +449,11 @@
     const internetOpen = isInternetViewActive();
     const updatedAtMs = network.wifiScanUpdatedAtMs;
     if (!internetOpen || updatedAtMs <= 0) {
+      return;
+    }
+    const boatAccessState = currentBleBoatAccessState();
+    const sessionState = currentBleSessionState();
+    if (connection.activeConnection !== "bluetooth" || boatAccessState === "SETUP_REQUIRED" || sessionState !== "AUTHORIZED") {
       return;
     }
     clearInternetRescanTimer();
@@ -462,6 +514,23 @@
       return;
     }
     queueConfigAutoPatch("profiles", currentHash, "apply profile config", applyProfilesConfig);
+  });
+
+  $effect(() => {
+    const currentHash = JSON.stringify(configDrafts.obstacles);
+    if (!isConfigSectionActive("obstacles")) {
+      resetConfigAutoPatch("obstacles", currentHash);
+      return;
+    }
+    if (!configAutoPatchPrimed.obstacles) {
+      configAutoPatchPrimed.obstacles = true;
+      configAutoPatchHashes.obstacles = currentHash;
+      return;
+    }
+    if (currentHash === configAutoPatchHashes.obstacles) {
+      return;
+    }
+    queueConfigAutoPatch("obstacles", currentHash, "apply obstacles config", applyObstaclesConfig);
   });
 
   $effect(() => {
@@ -547,6 +616,20 @@
     return navigation.activeView === "config" && navigation.activeConfigView === "internet";
   }
 
+  function currentBleBoatAccessState(): string {
+    return typeof ble.authState?.boat_access_state === "string" ? ble.authState.boat_access_state : "";
+  }
+
+  function currentBleSessionState(): string {
+    return typeof ble.authState?.session_state === "string" ? ble.authState.session_state : "";
+  }
+
+  function isBleSetupRequired(): boolean {
+    return connection.activeConnection === "bluetooth"
+      && ble.connected
+      && currentBleBoatAccessState() === "SETUP_REQUIRED";
+  }
+
   function clearInternetRescanTimer(): void {
     if (!internetRescanTimer) {
       return;
@@ -591,7 +674,22 @@
   function clearAllConfigAutoPatchTimers(): void {
     clearConfigAutoPatchTimer("anchor");
     clearConfigAutoPatchTimer("alerts");
+    clearConfigAutoPatchTimer("obstacles");
     clearConfigAutoPatchTimer("profiles");
+  }
+
+  async function selectSystemRuntimeMode(mode: "LIVE" | "SIMULATION"): Promise<void> {
+    if (appState.deviceData.systemConfig?.runtime_mode === mode) {
+      return;
+    }
+    configDrafts.system.runtimeMode = mode;
+    if (typeof appState.deviceData.systemConfig?.version === "number") {
+      pendingSystemRuntimeMode = null;
+      await applySystemConfig();
+      return;
+    }
+    pendingSystemRuntimeMode = mode;
+    logLine(`queued system runtime change to ${mode} until CONFIG_SYSTEM arrives`);
   }
 
   function runtimeModeText(mode = connection.runtimeMode): string {
@@ -606,7 +704,7 @@
   }
 
   async function enforceRuntimeModeSelection(): Promise<void> {
-    if (runtimeModeEnforceInFlight || connection.mode !== MODE_DEVICE || !connection.hasConfiguredDevice) {
+    if (runtimeModeEnforceInFlight || !connection.hasConfiguredDevice) {
       return;
     }
     if (connection.runtimeMode === CONNECTION_RUNTIME_MODE_ONBOARD && connection.activeConnection === "bluetooth") {
@@ -629,7 +727,7 @@
   }
 
   function currentDisconnectWarningMode(): ConnectionRuntimeMode | null {
-    if (connection.mode !== MODE_DEVICE || !connection.hasConfiguredDevice) {
+    if (!connection.hasConfiguredDevice) {
       return null;
     }
     if (connection.runtimeMode === CONNECTION_RUNTIME_MODE_ONBOARD) {
@@ -781,7 +879,7 @@
       requestAnimationFrame(() => ensureMapTilerView("satellite"));
     }
 
-    if ((nextView === "satellite" || nextView === "map" || nextView === "radar") && connection.mode === MODE_DEVICE && trackPoints.length < 3) {
+    if ((nextView === "satellite" || nextView === "map" || nextView === "radar") && trackPoints.length < 3) {
       void runAction("track snapshot", fetchTrackSnapshot);
     }
   }
@@ -806,8 +904,8 @@
     navigation.activeConfigView = "device";
   }
 
-  async function saveManualConnectionAndReturn(boatId: string, boatSecret: string): Promise<void> {
-    await saveManualConnectionCredentials(boatId, boatSecret);
+  async function saveManualConnectionAndReturn(boatId: string, cloudSecret: string): Promise<void> {
+    await saveManualConnectionCredentials(boatId, cloudSecret);
     returnToDeviceView();
   }
 
@@ -839,11 +937,6 @@
     }
   }
 
-  async function useFakeModeAndReturnHome(): Promise<void> {
-    await useFakeMode();
-    setView("summary");
-  }
-
   async function registerServiceWorker(): Promise<void> {
     if (!("serviceWorker" in navigator)) {
       return;
@@ -865,11 +958,22 @@
     }
   }
 
+  function formatErrorMessage(error: unknown): string {
+    if (error instanceof Error) {
+      return error.message.trim() || "Something failed.";
+    }
+    if (typeof error === "string") {
+      return error.trim() || "Something failed.";
+    }
+    return "Something failed.";
+  }
+
   async function runAction(name: string, action: () => Promise<void>): Promise<void> {
     try {
       await action();
     } catch (error) {
       logLine(`${name} failed: ${String(error)}`);
+      showErrorToast(`${name}: ${formatErrorMessage(error)}`);
     }
   }
 
@@ -935,8 +1039,12 @@
   async function executeAnchorDownAt(lat: number, lon: number, actionName: string, resetTrack = true): Promise<boolean> {
     const previousTrack = cloneTrackPoints(trackPoints);
     try {
-      await moveAnchorToPosition(lat, lon, resetTrack);
+      await moveAnchorToPosition(lat, lon);
       trackBeforeLastAnchorMove = previousTrack;
+      if (resetTrack) {
+        replaceTrackPoints([]);
+        logLine("track reset after anchor move");
+      }
       lastDroppedAnchorPosition = { lat, lon };
       return true;
     } catch (error) {
@@ -954,13 +1062,20 @@
 
   async function triggerAnchorDown(): Promise<void> {
     anchorActionInFlight = true;
-    const currentGps = readCurrentGpsPosition(appState.latestState);
-    if (!currentGps) {
-      logLine("anchor down failed: Current GPS position unavailable.");
-      anchorActionInFlight = false;
-      return;
+    const previousTrack = cloneTrackPoints(trackPoints);
+    try {
+      await dropAnchorAtCurrentPosition();
+      replaceTrackPoints([]);
+      trackBeforeLastAnchorMove = previousTrack;
+      if (appState.deviceData.position) {
+        lastDroppedAnchorPosition = {
+          lat: appState.deviceData.position.lat,
+          lon: appState.deviceData.position.lon,
+        };
+      }
+    } catch (error) {
+      logLine(`anchor down failed: ${String(error)}`);
     }
-    await executeAnchorDownAt(currentGps.lat, currentGps.lon, "anchor down");
     anchorActionInFlight = false;
   }
 
@@ -984,7 +1099,7 @@
       return;
     }
     vizMenuOpen = false;
-    const currentGps = readCurrentGpsPosition(appState.latestState);
+    const currentGps = readCurrentGpsPosition(appState.deviceData.position);
     anchorMoveMode = true;
     anchorMoveStartPosition = anchorPosition;
     anchorMoveDraftPosition = anchorPosition;
@@ -1073,7 +1188,7 @@
     void refreshReconnectCandidateState();
     void registerServiceWorker();
 
-    if (connection.mode === MODE_FAKE || !connection.hasConfiguredDevice) {
+    if (!connection.hasConfiguredDevice) {
       setView("config");
       logLine("startup route: connection setup required");
     }
@@ -1088,9 +1203,31 @@
     clearAllConfigAutoPatchTimers();
     stopWarningBeep();
     clearWarningAutoFallbackTimer();
+    if (errorToastTimer) {
+      clearTimeout(errorToastTimer);
+      errorToastTimer = null;
+    }
     destroyMapTilerView("map");
     destroyMapTilerView("satellite");
     void stopDeviceRuntime();
+  });
+
+  $effect(() => {
+    if (!appState.toast.opened) {
+      if (errorToastTimer) {
+        clearTimeout(errorToastTimer);
+        errorToastTimer = null;
+      }
+      return;
+    }
+    appState.toast.serial;
+    if (errorToastTimer) {
+      clearTimeout(errorToastTimer);
+    }
+    errorToastTimer = setTimeout(() => {
+      closeErrorToast();
+      errorToastTimer = null;
+    }, 4200);
   });
 </script>
 <KonstaApp theme="material" safeAreas>
@@ -1125,20 +1262,48 @@
       boatIdText={connection.boatIdText}
       secretStatusText={connection.secretStatusText}
       connectedDeviceName={connection.connectedDeviceName}
+      bind:systemRuntimeMode={configDrafts.system.runtimeMode}
+      runtimeConfigDisabled={typeof appState.deviceData.systemConfig?.version !== "number"}
+      runtimeConfigDisabledReason="Waiting for CONFIG_SYSTEM from server..."
       onBack={() => goToSettingsView()}
       onSearchDevice={() => void runAction("search device via bluetooth", searchForDeviceViaBluetooth)}
       onOpenManualConnection={openManualConnectionView}
-      onUseDemoData={() => void runAction("use fake mode", useFakeModeAndReturnHome)}
+      onSelectSystemRuntimeMode={(mode) => void runAction(
+        `set server runtime ${mode.toLowerCase()}`,
+        () => selectSystemRuntimeMode(mode),
+      )}
     />
   {/if}
 
   {#if navigation.activeView === "config" && navigation.activeConfigView === "device_manual"}
     <DeviceManualConnectionPage
       boatIdText={connection.boatIdText}
+      bleConnected={ble.connected}
+      boatAccessState={typeof ble.authState?.boat_access_state === "string" ? ble.authState.boat_access_state : ""}
+      sessionState={typeof ble.authState?.session_state === "string" ? ble.authState.session_state : ""}
       onBack={returnToDeviceView}
-      onSave={(boatId, boatSecret) => void runAction(
+      onSave={(boatId, cloudSecret) => void runAction(
         "save manual connection",
-        () => saveManualConnectionAndReturn(boatId, boatSecret),
+        () => saveManualConnectionAndReturn(boatId, cloudSecret),
+      )}
+      onAuthorizeSession={(boatId, bleConnectionPin) => void runAction(
+        "authorize current session",
+        () => authorizeCurrentSession(boatId, bleConnectionPin),
+      )}
+      onRotateBlePin={(newBleConnectionPin) => void runAction(
+        "rotate BLE connection pin",
+        () => rotateBleConnectionPin(newBleConnectionPin),
+      )}
+    />
+  {/if}
+
+  {#if navigation.activeView === "config" && navigation.activeConfigView === "device_onboarding"}
+    <DeviceOnboardingPage
+      boatIdText={connection.boatIdText}
+      onBack={returnToDeviceView}
+      onActivateBoat={(factorySetupPin, bleConnectionPin) => void runAction(
+        "complete BLE onboarding",
+        () => activateBoatSetup(factorySetupPin, bleConnectionPin),
       )}
     />
   {/if}
@@ -1150,11 +1315,14 @@
       availableWifiNetworks={internetWifiNetworks}
       configuredWifiSsid={network.wifiSsid}
       configuredWifiPass={network.wifiPass}
+      configuredCloudSecret={network.cloudSecret}
       configuredWifiStatusText={configuredWifiStatusText}
       formatWifiSecurity={(security) => formatWifiSecurity(security as WifiSecurity)}
-      onConnectWifiNetwork={(ssid, security, passphrase) => void runAction(
+      disabled={typeof appState.deviceData.wlanConfig?.version !== "number"}
+      disabledReason="Waiting for CONFIG_WLAN from server..."
+      onConnectWifiNetwork={(ssid, security, passphrase, cloudSecret) => void runAction(
         "connect wlan network",
-        () => connectToWifiNetwork(ssid, security as WifiSecurity, passphrase),
+        () => connectToWifiNetwork(ssid, security as WifiSecurity, passphrase, cloudSecret),
       )}
       onBack={() => goToSettingsView()}
     />
@@ -1164,11 +1332,9 @@
     <ConnectionPage
       isConfigured={connection.hasConfiguredDevice}
       connectionStatusText={connectionSelectionStatusText}
-      mode={connection.mode}
       activeConnection={connection.activeConnection}
       onSelectBluetooth={() => void runAction("switch connection to bluetooth", selectBluetoothConnection)}
       onSelectRelay={() => void runAction("switch connection to relay", selectRelayConnection)}
-      onSelectFake={() => void runAction("switch connection to fake", useFakeMode)}
       onBack={() => goToSettingsView()}
     />
   {/if}
@@ -1209,34 +1375,46 @@
 
   {#if navigation.activeView === "config" && navigation.activeConfigView === "anchor"}
     <AnchorConfigPage
-      bind:autoModeMinForwardSogKn={configDrafts.anchor.autoModeMinForwardSogKn}
-      bind:autoModeStallMaxSogKn={configDrafts.anchor.autoModeStallMaxSogKn}
-      bind:autoModeReverseMinSogKn={configDrafts.anchor.autoModeReverseMinSogKn}
-      bind:autoModeConfirmSeconds={configDrafts.anchor.autoModeConfirmSeconds}
+      bind:allowedRangeM={configDrafts.anchor.allowedRangeM}
+      disabled={typeof appState.deviceData.anchorSettingsConfig?.version !== "number"}
+      disabledReason="Waiting for CONFIG_ANCHOR_SETTINGS from server..."
       onBack={() => goToSettingsView()}
     />
   {/if}
 
   {#if navigation.activeView === "config" && navigation.activeConfigView === "alerts"}
     <AlertsConfigPage
-      bind:anchorDistanceIsEnabled={configDrafts.alerts.anchor_distance.isEnabled}
+      bind:anchorDistanceIsEnabled={configDrafts.alerts.anchor_distance.enabled}
+      bind:anchorDistanceMaxDistanceM={configDrafts.alerts.anchor_distance.maxDistanceM}
       bind:anchorDistanceMinTimeMs={configDrafts.alerts.anchor_distance.minTimeMs}
       bind:anchorDistanceSeverity={configDrafts.alerts.anchor_distance.severity}
-      bind:boatingAreaIsEnabled={configDrafts.alerts.boating_area.isEnabled}
-      bind:boatingAreaMinTimeMs={configDrafts.alerts.boating_area.minTimeMs}
-      bind:boatingAreaSeverity={configDrafts.alerts.boating_area.severity}
-      bind:windStrengthIsEnabled={configDrafts.alerts.wind_strength.isEnabled}
-      bind:windStrengthMaxTwsKn={configDrafts.alerts.wind_strength.maxTwsKn}
-      bind:windStrengthMinTimeMs={configDrafts.alerts.wind_strength.minTimeMs}
-      bind:windStrengthSeverity={configDrafts.alerts.wind_strength.severity}
-      bind:depthIsEnabled={configDrafts.alerts.depth.isEnabled}
-      bind:depthMinDepthM={configDrafts.alerts.depth.minDepthM}
-      bind:depthMinTimeMs={configDrafts.alerts.depth.minTimeMs}
-      bind:depthSeverity={configDrafts.alerts.depth.severity}
-      bind:dataOutdatedIsEnabled={configDrafts.alerts.data_outdated.isEnabled}
-      bind:dataOutdatedMinAgeMs={configDrafts.alerts.data_outdated.minAgeMs}
+      bind:obstacleCloseIsEnabled={configDrafts.alerts.obstacle_close.enabled}
+      bind:obstacleCloseMinDistanceM={configDrafts.alerts.obstacle_close.minDistanceM}
+      bind:obstacleCloseMinTimeMs={configDrafts.alerts.obstacle_close.minTimeMs}
+      bind:obstacleCloseSeverity={configDrafts.alerts.obstacle_close.severity}
+      bind:windAboveIsEnabled={configDrafts.alerts.wind_above.enabled}
+      bind:windAboveMaxWindKn={configDrafts.alerts.wind_above.maxWindKn}
+      bind:windAboveMinTimeMs={configDrafts.alerts.wind_above.minTimeMs}
+      bind:windAboveSeverity={configDrafts.alerts.wind_above.severity}
+      bind:depthBelowIsEnabled={configDrafts.alerts.depth_below.enabled}
+      bind:depthBelowMinDepthM={configDrafts.alerts.depth_below.minDepthM}
+      bind:depthBelowMinTimeMs={configDrafts.alerts.depth_below.minTimeMs}
+      bind:depthBelowSeverity={configDrafts.alerts.depth_below.severity}
+      bind:dataOutdatedIsEnabled={configDrafts.alerts.data_outdated.enabled}
+      bind:dataOutdatedMaxAgeMs={configDrafts.alerts.data_outdated.maxAgeMs}
       bind:dataOutdatedMinTimeMs={configDrafts.alerts.data_outdated.minTimeMs}
       bind:dataOutdatedSeverity={configDrafts.alerts.data_outdated.severity}
+      disabled={typeof appState.deviceData.alarmConfig?.version !== "number"}
+      disabledReason="Waiting for CONFIG_ALARM from server..."
+      onBack={() => goToSettingsView()}
+    />
+  {/if}
+
+  {#if navigation.activeView === "config" && navigation.activeConfigView === "obstacles"}
+    <ObstaclesConfigPage
+      bind:obstacleItems={configDrafts.obstacles.items}
+      disabled={typeof appState.deviceData.obstaclesConfig?.version !== "number"}
+      disabledReason="Waiting for CONFIG_OBSTACLES from server..."
       onBack={() => goToSettingsView()}
     />
   {/if}
@@ -1255,6 +1433,8 @@
       bind:profileNightOutputProfile={configDrafts.profiles.nightOutputProfile}
       notificationPermissionText={notifications.permissionText}
       notificationStatusText={notifications.statusText}
+      disabled={typeof appState.deviceData.profilesConfig?.version !== "number"}
+      disabledReason="Waiting for CONFIG_PROFILES from server..."
       onBack={() => goToSettingsView()}
       onRequestPermission={() => void runAction("request notification permission", () => requestNotificationPermission(notifications))}
       onSendTestNotification={() => void runAction("send test notification", () => sendTestNotification(notifications))}
@@ -1264,6 +1444,8 @@
   {#if navigation.activeView === "config" && navigation.activeConfigView === "debugging"}
     <DebuggingPage
       messages={appState.debugMessages}
+      messageLimit={appState.debugMessageLimit}
+      onMessageLimitChange={setDebugMessageLimit}
       onBack={() => goToSettingsView()}
     />
   {/if}
@@ -1338,6 +1520,18 @@
         <div>BEAR {anchorBearingText === "--" ? "--" : anchorBearingText.replace(" deg", "")}</div>
       </div>
     {/if}
+    <Toast
+      opened={appState.toast.opened}
+      position="center"
+      colors={{
+        bgMaterial: "bg-red-700",
+        textMaterial: "text-white",
+        bgIos: "bg-red-700",
+        textIos: "text-white",
+      }}
+    >
+      {appState.toast.message}
+    </Toast>
     {#if shouldShowAnchorActionButton()}
       {#if canShowVizMenu() && vizMenuOpen}
         <button type="button" class="viz-menu-backdrop" aria-label="Close view actions" onclick={closeVizMenu}></button>

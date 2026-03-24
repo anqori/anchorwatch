@@ -6,34 +6,37 @@
     NavbarBackLink,
   } from "konsta/svelte";
 
-  export let autoModeMinForwardSogKn = "0.8";
-  export let autoModeStallMaxSogKn = "0.3";
-  export let autoModeReverseMinSogKn = "0.4";
-  export let autoModeConfirmSeconds = "20";
+  export let allowedRangeM = "35";
+  export let disabled = false;
+  export let disabledReason = "Waiting for server config...";
   export let onBack: () => void = () => {};
 </script>
 
-<Navbar title="Anchor Automatic Placement">
+<Navbar title="Anchor Settings">
   {#snippet left()}
     <NavbarBackLink onclick={onBack} text="Settings" />
   {/snippet}
 </Navbar>
 
 <div class="space-y-3">
+  {#if disabled}
+    <div class="hint">{disabledReason}</div>
+  {/if}
+  <div class:config-disabled={disabled}>
   <List strong inset>
     <ListInput
-      label="How this works"
-      type="textarea"
-      value="Automatic placement does not drop the anchor by itself. When the user triggers an anchor-down command in automatic placement mode, the device computes the drop position from boat movement using the parameters below."
-      readonly
-      inputClass="!h-28 resize-none"
+      label="Allowed range (m)"
+      type="number"
+      bind:value={allowedRangeM}
+      placeholder="35"
     />
   </List>
-
-  <List strong inset>
-    <ListInput label="Min forward SOG (kn)" type="number" bind:value={autoModeMinForwardSogKn} />
-    <ListInput label="Stall max SOG (kn)" type="number" bind:value={autoModeStallMaxSogKn} />
-    <ListInput label="Reverse min SOG (kn)" type="number" bind:value={autoModeReverseMinSogKn} />
-    <ListInput label="Confirm seconds" type="number" bind:value={autoModeConfirmSeconds} />
-  </List>
+  </div>
 </div>
+
+<style>
+  .config-disabled {
+    opacity: 0.45;
+    pointer-events: none;
+  }
+</style>

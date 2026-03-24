@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+venv_dir="${repo_root}/.tools/esptool-venv"
+
+if [[ ! -x "${venv_dir}/bin/python" ]]; then
+  mkdir -p "${repo_root}/.tools"
+  python3 -m venv "${venv_dir}"
+  "${venv_dir}/bin/python" -m pip install --upgrade pip >/dev/null
+  "${venv_dir}/bin/python" -m pip install esptool >/dev/null
+fi
+
+exec "${venv_dir}/bin/python" -m esptool "$@"

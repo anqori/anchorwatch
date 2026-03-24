@@ -15,7 +15,11 @@ bool parseObstaclesConfigValue(const String& raw, ObstaclesConfigValue& value, E
 bool parseRawConfigValue(const String& raw, RawConfigValue& value, ErrorValue& error);
 bool parseSystemConfigValue(const String& raw, SystemConfigValue& value, ErrorValue& error);
 bool parseWlanConfigValue(const String& raw, WlanConfigValue& value, ErrorValue& error);
-bool parseCloudCredentialUpdate(const String& raw, uint32_t& version, String& boat_id, String& boat_secret, ErrorValue& error);
+bool parseAuthorizeSetupRequest(const String& raw, String& factory_setup_pin, ErrorValue& error);
+bool parseAuthorizeBleSessionRequest(const String& raw, String& ble_connection_pin, ErrorValue& error);
+bool parseSetInitialBlePinRequest(const String& raw, String& ble_connection_pin, ErrorValue& error);
+bool parseCloudCredentialUpdate(const String& raw, uint32_t& version, String& boat_id, String& cloud_secret, ErrorValue& error);
+bool parseUpdateBlePinRequest(const String& raw, String& old_ble_connection_pin, String& new_ble_connection_pin, ErrorValue& error);
 
 const char* toProtocolString(RuntimeMode value);
 const char* toProtocolString(WlanConnectionState value);
@@ -53,7 +57,15 @@ String buildWlanConfigReply(const String& req_id, const char* state, const WlanC
 String buildCloudConfigReply(const String& req_id, const char* state, const CloudConfigValue& value);
 String buildTrackBackfillReply(const String& req_id, const char* state, const std::vector<TrackPoint>& points);
 String buildWlanNetworkReply(const String& req_id, const char* state, const WlanNetworkValue& value);
-String buildAuthStatusJson(bool pair_mode_active, uint64_t pair_mode_until_ts, bool privileged_active, uint64_t privileged_until_ts, const String& boat_id);
+String buildAuthStatusJson(
+  bool pair_mode_active,
+  uint64_t pair_mode_until_ts,
+  const String& boat_id,
+  bool secret_configured,
+  uint32_t cloud_config_version,
+  const char* boat_access_state,
+  const char* session_state
+);
 String buildSnapshotJson(
   const PositionState& position,
   const DepthState& depth,

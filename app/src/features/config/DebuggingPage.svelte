@@ -1,9 +1,48 @@
 <script lang="ts">
   import { Navbar, NavbarBackLink } from "konsta/svelte";
-  import type { DebugMessageEntry } from "../../core/types";
+  import type { DebugMessageEntry, DebugMessageLimit } from "../../core/types";
 
-  export let messages: DebugMessageEntry[] = [];
-  export let onBack: () => void = () => {};
+  let {
+    messages = [],
+    messageLimit = 1000,
+    onMessageLimitChange = () => {},
+    onBack = () => {},
+  }: {
+    messages?: DebugMessageEntry[];
+    messageLimit?: DebugMessageLimit;
+    onMessageLimitChange?: (limit: DebugMessageLimit) => void;
+    onBack?: () => void;
+  } = $props();
+
+  let selectedTypes = $state<string[]>([]);
+
+  const limitOptions: Array<{ value: DebugMessageLimit; label: string }> = [
+    { value: 1000, label: "1000" },
+    { value: 5000, label: "5000" },
+    { value: 10000, label: "10000" },
+    { value: "unlimited", label: "unlimited" },
+  ];
+
+  let availableTypes = $derived(
+    Array.from(new Set(messages.map((message) => message.msgType))).sort((left, right) => left.localeCompare(right)),
+  );
+
+  let visibleMessages = $derived(
+    selectedTypes.length === 0
+      ? messages
+      : messages.filter((message) => selectedTypes.includes(message.msgType)),
+  );
+
+  $effect(() => {
+    const available = new Set(availableTypes);
+    const nextSelectedTypes = selectedTypes.filter((type) => available.has(type));
+    const changed =
+      nextSelectedTypes.length !== selectedTypes.length
+      || nextSelectedTypes.some((type, index) => type !== selectedTypes[index]);
+    if (changed) {
+      selectedTypes = nextSelectedTypes;
+    }
+  });
 
   function formatTime(ts: number): string {
     const d = new Date(ts);
@@ -12,6 +51,11 @@
     const ss = String(d.getSeconds()).padStart(2, "0");
     const ms = String(d.getMilliseconds()).padStart(3, "0");
     return `${hh}:${mm}:${ss}.${ms}`;
+  }
+
+  function readSelectedTypes(event: Event): void {
+    const select = event.currentTarget as HTMLSelectElement;
+    selectedTypes = Array.from(select.selectedOptions).map((option) => option.value);
   }
 </script>
 
@@ -23,11 +67,46 @@
 
 <div class="debugging-page">
   <div class="hint">Live transport log (incoming/outgoing). Starts blank on each app launch.</div>
+  <div class="debug-controls">
+    <label class="debug-control">
+      <span class="debug-control-label">Max kept</span>
+      <select
+        class="debug-select mono"
+        value={String(messageLimit)}
+        onchange={(event) => {
+          const raw = (event.currentTarget as HTMLSelectElement).value;
+          const nextLimit = raw === "unlimited" ? "unlimited" : Number(raw);
+          if (nextLimit === 1000 || nextLimit === 5000 || nextLimit === 10000 || nextLimit === "unlimited") {
+            onMessageLimitChange(nextLimit);
+          }
+        }}
+      >
+        {#each limitOptions as option}
+          <option value={String(option.value)}>{option.label}</option>
+        {/each}
+      </select>
+    </label>
+
+    <label class="debug-control debug-control-types">
+      <span class="debug-control-label">Message types</span>
+      <select
+        class="debug-select debug-select-multi mono"
+        multiple
+        size={Math.min(Math.max(availableTypes.length, 4), 10)}
+        onchange={readSelectedTypes}
+      >
+        {#each availableTypes as type}
+          <option value={type} selected={selectedTypes.includes(type)}>{type}</option>
+        {/each}
+      </select>
+      <span class="debug-control-hint">No selection means all types.</span>
+    </label>
+  </div>
   <div class="debugging-list" aria-live="polite">
-    {#if messages.length === 0}
+    {#if visibleMessages.length === 0}
       <div class="debugging-empty">No messages yet.</div>
     {:else}
-      {#each messages as message (message.id)}
+      {#each visibleMessages as message (message.id)}
         <article class="debug-message">
           <header class="debug-message-header">
             <span class={`debug-chip direction ${message.direction}`}>{message.direction === "incoming" ? "IN" : "OUT"}</span>
@@ -62,6 +141,43 @@
     color: rgba(236, 244, 248, 0.96);
     overflow-y: auto;
     overflow-x: hidden;
+  }
+
+  .debug-controls {
+    display: grid;
+    gap: 0.65rem;
+  }
+
+  .debug-control {
+    display: grid;
+    gap: 0.35rem;
+  }
+
+  .debug-control-types {
+    align-items: start;
+  }
+
+  .debug-control-label {
+    font-size: 0.82rem;
+    opacity: 0.78;
+  }
+
+  .debug-control-hint {
+    font-size: 0.75rem;
+    opacity: 0.68;
+  }
+
+  .debug-select {
+    width: 100%;
+    border: 1px solid rgba(125, 125, 125, 0.25);
+    border-radius: 0.7rem;
+    padding: 0.55rem 0.65rem;
+    background: rgba(0, 0, 0, 0.16);
+    color: rgba(236, 244, 248, 0.96);
+  }
+
+  .debug-select-multi {
+    min-height: 7.8rem;
   }
 
   .debugging-empty {

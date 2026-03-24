@@ -578,15 +578,69 @@ bool parseWlanConfigValue(const String& raw, WlanConfigValue& value, ErrorValue&
   return true;
 }
 
-bool parseCloudCredentialUpdate(const String& raw, uint32_t& version, String& boat_id, String& boat_secret, ErrorValue& error) {
-  if (!parseRequiredUint32(raw, "version", version, error) ||
-      !parseRequiredString(raw, "boat_id", boat_id, error) ||
-      !parseRequiredString(raw, "boat_secret", boat_secret, error)) {
+bool parseAuthorizeSetupRequest(const String& raw, String& factory_setup_pin, ErrorValue& error) {
+  if (!parseRequiredString(raw, "factory_setup_pin", factory_setup_pin, error)) {
     return false;
   }
-  if (boat_id.isEmpty() || boat_secret.isEmpty()) {
+  if (factory_setup_pin.isEmpty()) {
     error.code = "INVALID_REQUEST";
-    error.message = "boat_id and boat_secret must be non-empty";
+    error.message = "factory_setup_pin must be non-empty";
+    return false;
+  }
+  return true;
+}
+
+bool parseAuthorizeBleSessionRequest(const String& raw, String& ble_connection_pin, ErrorValue& error) {
+  if (!parseRequiredString(raw, "ble_connection_pin", ble_connection_pin, error)) {
+    return false;
+  }
+  if (ble_connection_pin.isEmpty()) {
+    error.code = "INVALID_REQUEST";
+    error.message = "ble_connection_pin must be non-empty";
+    return false;
+  }
+  return true;
+}
+
+bool parseSetInitialBlePinRequest(const String& raw, String& ble_connection_pin, ErrorValue& error) {
+  if (!parseRequiredString(raw, "ble_connection_pin", ble_connection_pin, error)) {
+    return false;
+  }
+  if (ble_connection_pin.isEmpty()) {
+    error.code = "INVALID_REQUEST";
+    error.message = "ble_connection_pin must be non-empty";
+    return false;
+  }
+  return true;
+}
+
+bool parseCloudCredentialUpdate(const String& raw, uint32_t& version, String& boat_id, String& cloud_secret, ErrorValue& error) {
+  if (!parseRequiredUint32(raw, "version", version, error) ||
+      !parseRequiredString(raw, "boat_id", boat_id, error) ||
+      !parseRequiredString(raw, "cloud_secret", cloud_secret, error)) {
+    return false;
+  }
+  if (boat_id.isEmpty() || cloud_secret.isEmpty()) {
+    error.code = "INVALID_REQUEST";
+    error.message = "boat_id and cloud_secret must be non-empty";
+    return false;
+  }
+  return true;
+}
+
+bool parseUpdateBlePinRequest(
+  const String& raw,
+  String& old_ble_connection_pin,
+  String& new_ble_connection_pin,
+  ErrorValue& error
+) {
+  if (!parseRequiredString(raw, "old_ble_connection_pin", old_ble_connection_pin, error) ||
+      !parseRequiredString(raw, "new_ble_connection_pin", new_ble_connection_pin, error)) {
+    return false;
+  }
+  if (old_ble_connection_pin.isEmpty() || new_ble_connection_pin.isEmpty()) {
+    error.code = "INVALID_REQUEST";
+    error.message = "old_ble_connection_pin and new_ble_connection_pin must be non-empty";
     return false;
   }
   return true;
@@ -789,6 +843,7 @@ String buildCloudConfigReply(const String& req_id, const char* state, const Clou
   bool first = true;
   appendFieldRaw(data, first, "version", String(value.version));
   appendFieldRaw(data, first, "boat_id", jsonQuote(value.boat_id));
+  appendFieldRaw(data, first, "cloud_secret", jsonQuote(value.cloud_secret));
   appendFieldRaw(data, first, "secret_configured", jsonBool(value.secret_configured));
   data += "}";
   return wrapStateReply(req_id, state, "CONFIG_CLOUD", data);
@@ -831,14 +886,24 @@ String buildWlanNetworkReply(const String& req_id, const char* state, const Wlan
   return wrapStateReply(req_id, state, "WLAN_NETWORK", data);
 }
 
-String buildAuthStatusJson(bool pair_mode_active, uint64_t pair_mode_until_ts, bool privileged_active, uint64_t privileged_until_ts, const String& boat_id) {
+String buildAuthStatusJson(
+  bool pair_mode_active,
+  uint64_t pair_mode_until_ts,
+  const String& boat_id,
+  bool secret_configured,
+  uint32_t cloud_config_version,
+  const char* boat_access_state,
+  const char* session_state
+) {
   String data = "{";
   bool first = true;
   appendFieldRaw(data, first, "pair_mode_active", jsonBool(pair_mode_active));
   appendFieldRaw(data, first, "pair_mode_until_ts", pair_mode_active ? jsonU64(pair_mode_until_ts) : jsonNull());
-  appendFieldRaw(data, first, "privileged_session_active", jsonBool(privileged_active));
-  appendFieldRaw(data, first, "privileged_session_until_ts", privileged_active ? jsonU64(privileged_until_ts) : jsonNull());
   appendFieldRaw(data, first, "boat_id", jsonQuote(boat_id));
+  appendFieldRaw(data, first, "secret_configured", jsonBool(secret_configured));
+  appendFieldRaw(data, first, "cloud_config_version", String(cloud_config_version));
+  appendFieldRaw(data, first, "boat_access_state", jsonQuote(boat_access_state));
+  appendFieldRaw(data, first, "session_state", jsonQuote(session_state));
   data += "}";
   return data;
 }

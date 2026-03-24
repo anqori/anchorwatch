@@ -4,6 +4,7 @@
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
+#include <esp_bt.h>
 
 #include <vector>
 
@@ -79,6 +80,7 @@ struct BleTransport::Impl {
   BLECharacteristic* auth = nullptr;
   BleTransportListener* listener = nullptr;
   bool connected = false;
+  bool ready = false;
   String auth_value = "{}";
   String snapshot_value = "{}";
   std::vector<ChunkAssembly> assemblies;
@@ -144,6 +146,7 @@ struct BleTransport::Impl {
 void ServerCallbacks::onConnect(BLEServer* server) {
   (void)server;
   if (impl_ != nullptr) {
+    Serial.println("[ble] client connected");
     impl_->connected = true;
     if (impl_->listener != nullptr) {
       impl_->listener->onBleConnectionChanged(true);
@@ -154,6 +157,7 @@ void ServerCallbacks::onConnect(BLEServer* server) {
 void ServerCallbacks::onDisconnect(BLEServer* server) {
   (void)server;
   if (impl_ != nullptr) {
+    Serial.println("[ble] client disconnected");
     impl_->connected = false;
     if (impl_->listener != nullptr) {
       impl_->listener->onBleConnectionChanged(false);
@@ -167,6 +171,7 @@ void ControlCallbacks::onWrite(BLECharacteristic* characteristic) {
     return;
   }
   String raw = characteristic->getValue();
+  Serial.printf("[ble] control write len=%u\n", static_cast<unsigned>(raw.length()));
   impl_->handleControlWrite(reinterpret_cast<const uint8_t*>(raw.c_str()), raw.length());
 }
 
@@ -174,6 +179,7 @@ void SnapshotCallbacks::onRead(BLECharacteristic* characteristic) {
   if (impl_ == nullptr || characteristic == nullptr) {
     return;
   }
+  Serial.printf("[ble] snapshot read len=%u\n", static_cast<unsigned>(impl_->snapshot_value.length()));
   characteristic->setValue(impl_->snapshot_value.c_str());
 }
 
@@ -181,6 +187,7 @@ void AuthCallbacks::onRead(BLECharacteristic* characteristic) {
   if (impl_ == nullptr || characteristic == nullptr) {
     return;
   }
+  Serial.printf("[ble] auth read len=%u value=%s\n", static_cast<unsigned>(impl_->auth_value.length()), impl_->auth_value.c_str());
   characteristic->setValue(impl_->auth_value.c_str());
 }
 
@@ -191,19 +198,36 @@ void AuthCallbacks::onWrite(BLECharacteristic* characteristic) {
   String action = characteristic->getValue();
   action.trim();
   if (!action.isEmpty()) {
+    Serial.printf("[ble] auth write action=%s\n", action.c_str());
     impl_->handleAuthWrite(action);
   }
 }
 
 BleTransport::BleTransport() : impl_(new Impl()) {}
 
-void BleTransport::begin(const String& device_name, BleTransportListener* listener) {
+bool BleTransport::begin(const String& device_name, BleTransportListener* listener) {
   impl_->listener = listener;
-  BLEDevice::init(device_name.c_str());
+  impl_->ready = false;
+
+  esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT);
+
+  if (!BLEDevice::init(device_name.c_str()) || !BLEDevice::getInitialized()) {
+    log_e("BLE init failed for device '%s'", device_name.c_str());
+    return false;
+  }
+
   BLEDevice::setMTU(185);
   impl_->server = BLEDevice::createServer();
+  if (impl_->server == nullptr) {
+    log_e("BLE createServer failed");
+    return false;
+  }
   impl_->server->setCallbacks(new ServerCallbacks(impl_));
   impl_->service = impl_->server->createService(BLE_SERVICE_UUID);
+  if (impl_->service == nullptr) {
+    log_e("BLE createService failed");
+    return false;
+  }
 
   impl_->control_tx = impl_->service->createCharacteristic(
     BLE_CONTROL_TX_UUID,
@@ -227,9 +251,15 @@ void BleTransport::begin(const String& device_name, BleTransportListener* listen
 
   impl_->service->start();
   BLEAdvertising* advertising = BLEDevice::getAdvertising();
+  if (advertising == nullptr) {
+    log_e("BLE getAdvertising failed");
+    return false;
+  }
   advertising->addServiceUUID(BLE_SERVICE_UUID);
   advertising->setScanResponse(true);
   BLEDevice::startAdvertising();
+  impl_->ready = true;
+  return true;
 }
 
 void BleTransport::loop(unsigned long now_ms) {
@@ -243,7 +273,7 @@ void BleTransport::loop(unsigned long now_ms) {
 }
 
 bool BleTransport::sendJson(const String& json) {
-  if (impl_->event_rx == nullptr) {
+  if (!impl_->ready || !impl_->connected || impl_->event_rx == nullptr) {
     return false;
   }
   const uint32_t msg_id = fnv1a32(String(millis()) + ":" + String(esp_random()));
@@ -282,6 +312,10 @@ void BleTransport::setSnapshotValue(const String& value) {
 
 bool BleTransport::isConnected() const {
   return impl_->connected;
+}
+
+bool BleTransport::isReady() const {
+  return impl_->ready;
 }
 
 }  // namespace aw

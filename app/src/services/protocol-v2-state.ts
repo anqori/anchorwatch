@@ -1,218 +1,294 @@
-import type { JsonRecord, TrackPoint } from "../core/types";
-import { isObject, toTrackPoint } from "./data-utils";
+import type {
+  AlarmConfigValue,
+  AlarmStateValue,
+  AlertRuntimeEntry,
+  AlertType,
+  AnchorPositionValue,
+  AnchorSettingsValue,
+  CloudConfigValue,
+  DepthValue,
+  JsonRecord,
+  ObstaclesConfigValue,
+  PositionValue,
+  ProfilesConfigValue,
+  SystemConfigValue,
+  SystemStatusValue,
+  TrackPoint,
+  WlanConfigValue,
+  WlanStatusValue,
+  WindValue,
+} from "../core/types";
+import { isObject, toFiniteNumber, toTrackPoint } from "./data-utils";
 
-export interface ProtocolPartValue {
-  version: number;
-  value: unknown;
-}
+const ALERT_LABELS: Record<AlertType, string> = {
+  ANCHOR_DISTANCE: "Anchor Distance",
+  OBSTACLE_CLOSE: "Obstacle Close",
+  WIND_ABOVE: "Wind Above",
+  DEPTH_BELOW: "Depth Below",
+  DATA_OUTDATED: "Data Outdated",
+};
 
-export interface ProtocolSnapshotParts {
-  stateParts: Record<string, ProtocolPartValue>;
-  configParts: Record<string, ProtocolPartValue>;
-  trackPoints: TrackPoint[];
-}
-
-export interface ProtocolPartUpdate {
-  group: "state" | "config";
-  name: string;
-  version: number;
-  value: unknown;
-}
-
-function readPartMap(value: unknown): Record<string, ProtocolPartValue> {
-  if (!isObject(value)) {
-    return {};
-  }
-
-  const out: Record<string, ProtocolPartValue> = {};
-  for (const [name, raw] of Object.entries(value)) {
-    if (!isObject(raw)) {
-      continue;
-    }
-    const version = Number.isFinite(Number(raw.version)) ? Math.max(0, Math.floor(Number(raw.version))) : 0;
-    out[name] = {
-      version,
-      value: raw.value,
-    };
-  }
-  return out;
-}
-
-export function readProtocolSnapshotParts(data: JsonRecord): ProtocolSnapshotParts | null {
-  const stateParts = readPartMap(data.state_parts);
-  const configParts = readPartMap(data.config_parts);
-  const rawTrackPoints = Array.isArray(data.track_points) ? data.track_points : [];
-  const trackPoints: TrackPoint[] = [];
-  for (const rawTrackPoint of rawTrackPoints) {
-    const trackPoint = toTrackPoint(rawTrackPoint);
-    if (trackPoint) {
-      trackPoints.push(trackPoint);
-    }
-  }
-
-  if (!Object.keys(stateParts).length && !Object.keys(configParts).length && !trackPoints.length) {
+export function readPositionValue(data: unknown): PositionValue | null {
+  if (!isObject(data)) {
     return null;
   }
-
+  const lat = toFiniteNumber(data.lat);
+  const lon = toFiniteNumber(data.lon);
+  if (lat === null || lon === null) {
+    return null;
+  }
   return {
-    stateParts,
-    configParts,
-    trackPoints,
+    lat,
+    lon,
+    gps_age_ms: Math.max(0, Math.floor(toFiniteNumber(data.gps_age_ms) ?? 0)),
+    valid: data.valid === true,
+    sog_kn: toFiniteNumber(data.sog_kn) ?? 0,
+    cog_deg: normalizeDegrees(toFiniteNumber(data.cog_deg) ?? 0),
+    heading_deg: normalizeDegrees(toFiniteNumber(data.heading_deg) ?? toFiniteNumber(data.cog_deg) ?? 0),
   };
 }
 
-export function readProtocolPartUpdate(data: JsonRecord): ProtocolPartUpdate | null {
-  const rawPart = data.part;
-  if (!isObject(rawPart)) {
+export function readDepthValue(data: unknown): DepthValue | null {
+  if (!isObject(data)) {
     return null;
   }
-
-  const group = rawPart.group === "config" ? "config" : rawPart.group === "state" ? "state" : null;
-  const name = typeof rawPart.name === "string" ? rawPart.name.trim() : "";
-  if (!group || !name) {
+  const depth = toFiniteNumber(data.depth_m);
+  const ts = toFiniteNumber(data.ts);
+  if (depth === null || ts === null) {
     return null;
   }
-
-  const version = Number.isFinite(Number(rawPart.version)) ? Math.max(0, Math.floor(Number(rawPart.version))) : 0;
   return {
-    group,
-    name,
-    version,
-    value: rawPart.value,
+    depth_m: depth,
+    ts: Math.floor(ts),
   };
 }
 
-export function readProtocolTrackAppend(data: JsonRecord): TrackPoint[] {
-  const rawTrackPoints = Array.isArray(data.track_append) ? data.track_append : [];
-  const trackPoints: TrackPoint[] = [];
-  for (const rawTrackPoint of rawTrackPoints) {
-    const trackPoint = toTrackPoint(rawTrackPoint);
-    if (trackPoint) {
-      trackPoints.push(trackPoint);
-    }
+export function readWindValue(data: unknown): WindValue | null {
+  if (!isObject(data)) {
+    return null;
   }
-  return trackPoints;
+  const wind = toFiniteNumber(data.wind_kn);
+  const dir = toFiniteNumber(data.wind_dir_deg);
+  const ts = toFiniteNumber(data.ts);
+  if (wind === null || dir === null || ts === null) {
+    return null;
+  }
+  return {
+    wind_kn: wind,
+    wind_dir_deg: normalizeDegrees(dir),
+    ts: Math.floor(ts),
+  };
 }
 
-export function mapProtocolPartsToLegacyState(parts: ProtocolSnapshotParts): JsonRecord {
-  const out: JsonRecord = {};
-  for (const [name, part] of Object.entries(parts.stateParts)) {
-    const patch = mapProtocolPartToLegacyPatch("state", name, part.value);
-    mergeShallow(out, patch);
+export function readWlanStatusValue(data: unknown): WlanStatusValue | null {
+  if (!isObject(data)) {
+    return null;
   }
-  for (const [name, part] of Object.entries(parts.configParts)) {
-    const patch = mapProtocolPartToLegacyPatch("config", name, part.value);
-    mergeShallow(out, patch);
+  const wifiState = typeof data.wifi_state === "string" ? data.wifi_state : "";
+  if (
+    wifiState !== "DISCONNECTED"
+    && wifiState !== "CONNECTING"
+    && wifiState !== "AUTHENTICATING"
+    && wifiState !== "OBTAINING_IP"
+    && wifiState !== "CONNECTED"
+    && wifiState !== "FAILED"
+  ) {
+    return null;
   }
-  return out;
+  return {
+    wifi_state: wifiState,
+    wifi_connected: data.wifi_connected === true,
+    wifi_ssid: typeof data.wifi_ssid === "string" ? data.wifi_ssid : "",
+    wifi_rssi: toFiniteNumber(data.wifi_rssi),
+    wifi_error: typeof data.wifi_error === "string" ? data.wifi_error : "",
+  };
 }
 
-export function mapProtocolPartToLegacyPatch(
-  group: "state" | "config",
-  name: string,
-  value: unknown,
-): JsonRecord {
-  if (!isObject(value)) {
-    return {};
+export function readSystemStatusValue(data: unknown): SystemStatusValue | null {
+  if (!isObject(data)) {
+    return null;
   }
-
-  if (group === "state" && name === "position") {
-    return {
-      telemetry: {
-        gps: {
-          lat: Number(value.lat ?? 0),
-          lon: Number(value.lon ?? 0),
-          ageMs: Number(value.gps_age_ms ?? 0),
-          valid: value.valid === true,
-          sogKn: Number(value.sog_kn ?? 0),
-          cogDeg: Number(value.cog_deg ?? 0),
-          headingDeg: Number(value.heading_deg ?? value.cog_deg ?? 0),
-        },
-        motion: {
-          sogKn: Number(value.sog_kn ?? 0),
-          cogDeg: Number(value.cog_deg ?? 0),
-          headingDeg: Number(value.heading_deg ?? value.cog_deg ?? 0),
-        },
-      },
-    };
-  }
-
-  if (group === "state" && name === "nav_data") {
-    return {
-      telemetry: {
-        depth: {
-          meters: Number(value.depth_m ?? 0),
-          ageMs: Number(value.data_age_ms ?? 0),
-        },
-        wind: {
-          knots: Number(value.wind_kn ?? 0),
-          dirDeg: Number(value.wind_dir_deg ?? 0),
-          ageMs: Number(value.data_age_ms ?? 0),
-        },
-      },
-      system: {
-        wifi: {
-          connected: value.wifi_connected === true,
-          ssid: typeof value.wifi_ssid === "string" ? value.wifi_ssid : "",
-          rssi: Number(value.wifi_rssi ?? 0),
-          lastError: typeof value.wifi_error === "string" ? value.wifi_error : "",
-        },
-        cloud: {
-          reachable: value.cloud_reachable === true,
-        },
-        firmware: {
-          version: typeof value.firmware_version === "string" ? value.firmware_version : "",
-        },
-        pairMode: {
-          active: value.pair_mode_active === true,
-          remainingMs: Number(value.pair_mode_remaining_ms ?? 0),
-          sessionPaired: value.session_paired === true,
-        },
-      },
-    };
-  }
-
-  if (group === "state" && name === "alarm_state") {
-    return {
-      alerts: isObject(value.alerts) ? value.alerts : {},
-      alarm: {
-        level: typeof value.level === "string" ? value.level : "none",
-        silenceUntilTs: Number(value.silence_until_ts ?? 0) || null,
-      },
-    };
-  }
-
-  if (group === "config" && name === "anchor_position") {
-    return {
-      anchor: {
-        state: typeof value.state === "string" ? value.state : "up",
-        position: isObject(value.position) ? value.position : null,
-      },
-    };
-  }
-
-  return {};
+  return {
+    cloud_reachable: data.cloud_reachable === true,
+    server_version: typeof data.server_version === "string" ? data.server_version : "",
+  };
 }
 
-export function applyPartVersions(target: Record<string, number>, snapshot: ProtocolSnapshotParts): void {
-  for (const [name, part] of Object.entries(snapshot.stateParts)) {
-    target[`state:${name}`] = part.version;
+export function readAnchorPositionValue(data: unknown): AnchorPositionValue | null {
+  if (!isObject(data)) {
+    return null;
   }
-  for (const [name, part] of Object.entries(snapshot.configParts)) {
-    target[`config:${name}`] = part.version;
-  }
+  const state = data.state === "down" || data.state === "auto-pending" ? data.state : "up";
+  const lat = toFiniteNumber(data.lat);
+  const lon = toFiniteNumber(data.lon);
+  return {
+    state,
+    lat,
+    lon,
+  };
 }
 
-export function applyUpdateVersion(target: Record<string, number>, update: ProtocolPartUpdate): void {
-  target[`${update.group}:${update.name}`] = update.version;
+export function readAlarmStateValue(data: unknown): AlarmStateValue | null {
+  if (!isObject(data) || !Array.isArray(data.alerts)) {
+    return null;
+  }
+  const alerts = data.alerts
+    .map((entry) => readAlertRuntime(entry))
+    .filter((entry): entry is AlarmStateValue["alerts"][number] => entry !== null);
+  return {
+    alerts,
+  };
 }
 
-function mergeShallow(target: JsonRecord, patch: JsonRecord): void {
-  for (const [key, value] of Object.entries(patch)) {
-    if (isObject(value) && isObject(target[key])) {
-      mergeShallow(target[key] as JsonRecord, value);
-      continue;
-    }
-    target[key] = value;
+export function readAlarmConfigValue(data: unknown): AlarmConfigValue | null {
+  if (!isObject(data) || !Array.isArray(data.alerts)) {
+    return null;
   }
+  const version = toFiniteNumber(data.version);
+  if (version === null) {
+    return null;
+  }
+  return data as unknown as AlarmConfigValue;
+}
+
+export function readObstaclesConfigValue(data: unknown): ObstaclesConfigValue | null {
+  if (!isObject(data) || !Array.isArray(data.obstacles)) {
+    return null;
+  }
+  const version = toFiniteNumber(data.version);
+  if (version === null) {
+    return null;
+  }
+  return data as unknown as ObstaclesConfigValue;
+}
+
+export function readAnchorSettingsValue(data: unknown): AnchorSettingsValue | null {
+  if (!isObject(data)) {
+    return null;
+  }
+  const version = toFiniteNumber(data.version);
+  if (version === null) {
+    return null;
+  }
+  return data as unknown as AnchorSettingsValue;
+}
+
+export function readProfilesConfigValue(data: unknown): ProfilesConfigValue | null {
+  if (!isObject(data)) {
+    return null;
+  }
+  const version = toFiniteNumber(data.version);
+  if (version === null) {
+    return null;
+  }
+  return data as unknown as ProfilesConfigValue;
+}
+
+export function readSystemConfigValue(data: unknown): SystemConfigValue | null {
+  if (!isObject(data)) {
+    return null;
+  }
+  const version = toFiniteNumber(data.version);
+  const runtimeMode = data.runtime_mode === "SIMULATION" ? "SIMULATION" : data.runtime_mode === "LIVE" ? "LIVE" : null;
+  if (version === null || !runtimeMode) {
+    return null;
+  }
+  return {
+    version: Math.floor(version),
+    runtime_mode: runtimeMode,
+  };
+}
+
+export function readWlanConfigValue(data: unknown): WlanConfigValue | null {
+  if (!isObject(data)) {
+    return null;
+  }
+  const version = toFiniteNumber(data.version);
+  if (version === null) {
+    return null;
+  }
+  return {
+    version: Math.floor(version),
+    ssid: typeof data.ssid === "string" ? data.ssid : "",
+    passphrase: typeof data.passphrase === "string" ? data.passphrase : "",
+    security: data.security === "open" || data.security === "wpa3" || data.security === "unknown" ? data.security : "wpa2",
+    country: typeof data.country === "string" ? data.country : "",
+    hidden: data.hidden === true,
+  };
+}
+
+export function readCloudConfigValue(data: unknown): CloudConfigValue | null {
+  if (!isObject(data)) {
+    return null;
+  }
+  const version = toFiniteNumber(data.version);
+  if (version === null) {
+    return null;
+  }
+  return {
+    version: Math.floor(version),
+    boat_id: typeof data.boat_id === "string" ? data.boat_id : "",
+    cloud_secret: typeof data.cloud_secret === "string" ? data.cloud_secret : "",
+    secret_configured: data.secret_configured === true,
+  };
+}
+
+export function readTrackBackfill(data: unknown): TrackPoint[] {
+  if (!Array.isArray(data)) {
+    return [];
+  }
+  return data.map((entry) => toTrackPoint(entry)).filter((entry): entry is TrackPoint => entry !== null);
+}
+
+export function readAlertRuntimeEntries(value: AlarmStateValue | null): AlertRuntimeEntry[] {
+  if (!value) {
+    return [];
+  }
+  return value.alerts.map((alert) => ({
+    alertType: alert.alert_type,
+    label: ALERT_LABELS[alert.alert_type],
+    severity: alert.severity,
+    state: alert.state,
+    aboveThresholdSinceTs: alert.above_threshold_since_ts,
+    alertSinceTs: alert.alert_since_ts,
+    alertSilencedUntilTs: alert.alert_silenced_until_ts,
+  }));
+}
+
+function readAlertRuntime(data: unknown): AlarmStateValue["alerts"][number] | null {
+  if (!isObject(data)) {
+    return null;
+  }
+  const alertType = typeof data.alert_type === "string" ? data.alert_type : "";
+  if (
+    alertType !== "ANCHOR_DISTANCE"
+    && alertType !== "OBSTACLE_CLOSE"
+    && alertType !== "WIND_ABOVE"
+    && alertType !== "DEPTH_BELOW"
+    && alertType !== "DATA_OUTDATED"
+  ) {
+    return null;
+  }
+  const state = data.state === "DISABLED" || data.state === "ALERT" ? data.state : "WATCHING";
+  const severity = data.severity === "ALARM" ? "ALARM" : "WARNING";
+  return {
+    alert_type: alertType,
+    state,
+    severity,
+    above_threshold_since_ts: readOptionalTimestamp(data.above_threshold_since_ts),
+    alert_since_ts: readOptionalTimestamp(data.alert_since_ts),
+    alert_silenced_until_ts: readOptionalTimestamp(data.alert_silenced_until_ts),
+  };
+}
+
+function readOptionalTimestamp(value: unknown): number | null {
+  const numeric = toFiniteNumber(value);
+  if (numeric === null || numeric <= 0) {
+    return null;
+  }
+  return Math.floor(numeric);
+}
+
+function normalizeDegrees(value: number): number {
+  return ((value % 360) + 360) % 360;
 }

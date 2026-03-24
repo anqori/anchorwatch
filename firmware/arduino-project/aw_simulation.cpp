@@ -72,9 +72,14 @@ void SimulationEngine::step(unsigned long now_ms, PositionState& position, Depth
   }
 
   const unsigned long elapsed_ms = now_ms - last_mono_ms_;
-  const float dt = elapsed_ms > 0 ? static_cast<float>(elapsed_ms) / 1000.0f : 1.0f;
+  const unsigned long step_ms = elapsed_ms > 0 ? TELEMETRY_TICK_MS : 0UL;
+  const float dt = step_ms > 0 ? static_cast<float>(step_ms) / 1000.0f : 0.0f;
   last_mono_ms_ = now_ms;
-  current_ts_ms_ += elapsed_ms;
+  current_ts_ms_ += step_ms;
+
+  if (step_ms == 0) {
+    return;
+  }
 
   cog_deg_ = normalizeDeg(cog_deg_ + randomRange(-18.0f, 18.0f) * dt);
   sog_kn_ += randomRange(-0.12f, 0.12f) * dt;

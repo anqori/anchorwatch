@@ -1,10 +1,15 @@
-import type { ConfigPartsCommand } from "../services/protocol-messages";
-import type { AlertRuntimeEntry, InboundSource, JsonRecord, TrackPoint, WifiScanNetwork } from "../core/types";
+import type { InboundSource, JsonRecord } from "../core/types";
+import type {
+  ProtocolReplyEnvelope,
+  ProtocolRequestType,
+} from "../services/protocol-messages";
 
-export type DeviceConnectionKind = "bluetooth" | "cloud-relay" | "fake";
+export type DeviceConnectionKind = "bluetooth" | "cloud-relay";
+export type DeviceConnectionPhase = "disconnected" | "connecting" | "connected";
 
 export interface DeviceConnectionStatus {
   connected: boolean;
+  phase?: DeviceConnectionPhase;
   deviceName?: string;
   authState?: JsonRecord | null;
 }
@@ -15,75 +20,29 @@ export interface DeviceConnectionProbeResult {
   buildVersion: string | null;
 }
 
-export type DeviceCommandStatus = "ok" | "rejected" | "failed" | "accepted";
-
-export interface DeviceCommandResult {
-  accepted: boolean;
-  status: DeviceCommandStatus;
-  errorCode: string | null;
-  errorDetail: string | null;
-}
-
-export interface DeviceWifiConnectInput {
-  ssid: string;
-  passphrase: string;
-  security: string;
-  country: string;
-  hidden: boolean;
-}
-
-export interface DeviceEventBase {
+export interface DeviceStreamMessage {
   source: InboundSource;
-  boatId?: string;
+  reply: ProtocolReplyEnvelope;
 }
 
-export interface DeviceStatePatchEvent extends DeviceEventBase {
-  type: "state.patch";
-  patch: unknown;
+export interface DeviceStreamHandle {
+  reqId: string;
+  done: Promise<ProtocolReplyEnvelope>;
+  cancel(): Promise<void>;
 }
-
-export interface DeviceStateSnapshotEvent extends DeviceEventBase {
-  type: "state.snapshot";
-  snapshot: unknown;
-}
-
-export interface DeviceTrackSnapshotEvent extends DeviceEventBase {
-  type: "track.snapshot";
-  points: TrackPoint[];
-}
-
-export interface DeviceAlertsStateEvent extends DeviceEventBase {
-  type: "alerts.state";
-  alerts: AlertRuntimeEntry[];
-}
-
-export interface DeviceUnknownEvent extends DeviceEventBase {
-  type: "unknown";
-  msgType: string;
-  payload: JsonRecord;
-}
-
-export type DeviceEvent =
-  | DeviceStatePatchEvent
-  | DeviceStateSnapshotEvent
-  | DeviceTrackSnapshotEvent
-  | DeviceAlertsStateEvent
-  | DeviceUnknownEvent;
 
 export interface DeviceConnection {
   readonly kind: DeviceConnectionKind;
   connect(): Promise<void>;
   disconnect(): Promise<void>;
   isConnected(): boolean;
-  subscribeEvents(callback: (event: DeviceEvent) => void): () => void;
   subscribeStatus(callback: (status: DeviceConnectionStatus) => void): () => void;
-  sendConfigParts(command: ConfigPartsCommand): Promise<void>;
-  commandWifiScan(maxResults: number, includeHidden: boolean): Promise<WifiScanNetwork[]>;
-  commandWifiConnect(input: DeviceWifiConnectInput): Promise<DeviceCommandResult>;
-  commandAnchorRise(): Promise<DeviceCommandResult>;
-  commandAnchorDown(lat: number, lon: number): Promise<DeviceCommandResult>;
-  commandAlarmSilence(seconds: number): Promise<DeviceCommandResult>;
-  requestStateSnapshot(): Promise<JsonRecord | null>;
-  requestTrackSnapshot(limit: number): Promise<TrackPoint[] | null>;
+  request(type: ProtocolRequestType, data?: unknown): Promise<ProtocolReplyEnvelope>;
+  openStream(
+    type: ProtocolRequestType,
+    data: unknown,
+    onReply: (message: DeviceStreamMessage) => void,
+  ): Promise<DeviceStreamHandle>;
+  cancelRequest(reqId: string): Promise<ProtocolReplyEnvelope>;
   probe(base?: string): Promise<DeviceConnectionProbeResult>;
 }

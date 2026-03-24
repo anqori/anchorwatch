@@ -1,54 +1,82 @@
-import { TRACK_SNAPSHOT_LIMIT } from "../core/constants";
-import type { PillClass } from "../core/types";
-import { isObject } from "../services/data-utils";
 import {
   appState,
-  applyStateSnapshot,
-  applyStatePatch,
   logLine,
   markBleMessageSeen,
+  refreshDerivedDeviceState,
   refreshIdentityUi,
   replaceTrackPoints,
   setActiveConnection,
   setActiveConnectionConnected,
+  setAlarmConfig,
+  setAnchorSettingsConfig,
   setBleAuthState,
   setBleConnectionState,
+  setCloudConfig,
+  setLatestInbound,
+  setObstaclesConfig,
+  setProfilesConfig,
   setSummarySource,
   setSummaryState,
+  setSystemConfig,
   setTelemetry,
+  setWlanConfig,
   setBoatId,
-  renderTelemetryFromLatestState,
+  setCloudSecret,
+  showErrorToast,
 } from "../state/app-state.svelte";
-import type { DeviceConnection, DeviceConnectionStatus, DeviceEvent } from "../connections/device-connection";
-import { defaultConnectionForMode } from "../connections/connection-factory";
-import { markConnectedViaBleOnce } from "../services/persistence-domain";
+import type {
+  DeviceConnection,
+  DeviceConnectionStatus,
+  DeviceStreamHandle,
+  DeviceStreamMessage,
+} from "../connections/device-connection";
+import type { DeviceConnectionBleLike } from "../connections/ble/device-connection-ble-like";
+import { defaultConnectionForRuntimeMode } from "../connections/connection-factory";
+import { getBleConnectionPin, markConnectedViaBleOnce } from "../services/persistence-domain";
+import {
+  readAlarmConfigValue,
+  readAlarmStateValue,
+  readAnchorPositionValue,
+  readAnchorSettingsValue,
+  readCloudConfigValue,
+  readDepthValue,
+  readObstaclesConfigValue,
+  readPositionValue,
+  readProfilesConfigValue,
+  readSystemConfigValue,
+  readSystemStatusValue,
+  readTrackBackfill,
+  readWlanConfigValue,
+  readWlanStatusValue,
+  readWindValue,
+} from "../services/protocol-v2-state";
 
 export class DeviceLinker {
-  private static readonly BLE_MESSAGE_STALE_MS = 12_000;
-
-  private static readonly BLE_RECOVERY_COOLDOWN_MS = 10_000;
-
   private activeConnection: DeviceConnection;
 
   private running = false;
 
   private interval: ReturnType<typeof setInterval> | null = null;
 
-  private lastTickMs = 0;
-
   private switchingConnection = false;
-
-  private unsubscribeEvents: (() => void) | null = null;
 
   private unsubscribeStatus: (() => void) | null = null;
 
   private boundConnection: DeviceConnection | null = null;
 
-  private subscriptionEpoch = 0;
+  private getDataHandle: DeviceStreamHandle | null = null;
 
-  private bleRecoveryInFlight = false;
+  private getDataConnection: DeviceConnection | null = null;
 
-  private lastBleRecoveryAttemptAtMs = 0;
+  private getDataStartPromise: Promise<void> | null = null;
+
+  private getDataStartConnection: DeviceConnection | null = null;
+
+  private authorizePromise: Promise<void> | null = null;
+
+  private authorizeConnection: DeviceConnection | null = null;
+
+  private cloudAuthorizedConnection: DeviceConnection | null = null;
 
   constructor(initialConnection: DeviceConnection) {
     this.activeConnection = initialConnection;
@@ -62,37 +90,40 @@ export class DeviceLinker {
     if (this.running) {
       return;
     }
-    let started = false;
     this.running = true;
-    try {
-      await this.bindConnection(this.activeConnection, false);
-      this.interval = setInterval(() => {
-        void this.tick();
-      }, 250);
-      void this.tick();
-      started = true;
-    } finally {
-      if (!started) {
-        this.running = false;
-      }
-    }
+    await this.bindConnection(this.activeConnection, false);
+    this.interval = setInterval(() => {
+      this.tickDeviceSummary();
+    }, 1000);
+    this.tickDeviceSummary();
   }
 
   async stop(): Promise<void> {
     this.running = false;
-
     if (this.interval) {
       clearInterval(this.interval);
       this.interval = null;
     }
-
+    await this.stopGetDataStream();
     this.clearSubscriptions();
-
     await this.activeConnection.disconnect();
   }
 
   async setConnection(next: DeviceConnection, disconnectPrevious = true): Promise<void> {
     await this.bindConnection(next, disconnectPrevious);
+  }
+
+  async request(type: Parameters<DeviceConnection["request"]>[0], data?: unknown) {
+    return await this.activeConnection.request(type, data);
+  }
+
+  async ensureRuntimeStream(): Promise<void> {
+    await this.ensureAuthorizedAndGetData(this.activeConnection);
+  }
+
+  async restartRuntimeStream(): Promise<void> {
+    await this.stopGetDataStream();
+    await this.ensureAuthorizedAndGetData(this.activeConnection);
   }
 
   private async bindConnection(next: DeviceConnection, disconnectPrevious: boolean): Promise<void> {
@@ -102,26 +133,23 @@ export class DeviceLinker {
       const switchedConnection = previous !== next;
 
       if (switchedConnection) {
+        await this.stopGetDataStream();
         this.clearSubscriptions();
-
         if (disconnectPrevious) {
           await previous.disconnect();
         }
-
         this.activeConnection = next;
         setActiveConnection(next.kind);
       }
 
-      const rebound = this.bindSubscriptions(next);
-      let shouldPrime = rebound;
+      this.bindSubscriptions(next);
 
       if (!next.isConnected()) {
         await next.connect();
-        shouldPrime = true;
       }
 
-      if (shouldPrime) {
-        void this.primeConnection(next);
+      if (next.isConnected()) {
+        await this.ensureAuthorizedAndGetData(next);
       }
     } finally {
       this.switchingConnection = false;
@@ -129,10 +157,6 @@ export class DeviceLinker {
   }
 
   private clearSubscriptions(): void {
-    if (this.unsubscribeEvents) {
-      this.unsubscribeEvents();
-      this.unsubscribeEvents = null;
-    }
     if (this.unsubscribeStatus) {
       this.unsubscribeStatus();
       this.unsubscribeStatus = null;
@@ -140,222 +164,321 @@ export class DeviceLinker {
     this.boundConnection = null;
   }
 
-  private bindSubscriptions(connection: DeviceConnection): boolean {
-    if (this.boundConnection === connection && this.unsubscribeEvents && this.unsubscribeStatus) {
-      return false;
+  private bindSubscriptions(connection: DeviceConnection): void {
+    if (this.boundConnection === connection && this.unsubscribeStatus) {
+      return;
     }
-
     this.clearSubscriptions();
-    const epoch = ++this.subscriptionEpoch;
     this.boundConnection = connection;
-
-    this.unsubscribeEvents = connection.subscribeEvents((event) => {
-      if (!this.isCurrentSubscription(connection, epoch)) {
-        return;
-      }
-      this.handleEvent(event);
-    });
-
     this.unsubscribeStatus = connection.subscribeStatus((status) => {
-      if (!this.isCurrentSubscription(connection, epoch)) {
+      if (this.boundConnection !== connection || this.activeConnection !== connection) {
         return;
       }
-      this.handleConnectionStatus(status);
+      void this.handleConnectionStatus(connection, status);
     });
-    return true;
   }
 
-  private isCurrentSubscription(connection: DeviceConnection, epoch: number): boolean {
-    return this.subscriptionEpoch === epoch
-      && this.boundConnection === connection
-      && this.activeConnection === connection;
-  }
-
-  private handleConnectionStatus(status: DeviceConnectionStatus): void {
+  private async handleConnectionStatus(connection: DeviceConnection, status: DeviceConnectionStatus): Promise<void> {
     setActiveConnectionConnected(status.connected);
 
-    if (this.activeConnection.kind === "bluetooth") {
-      setBleConnectionState(status.connected, status.deviceName || "");
+    if (connection.kind === "bluetooth") {
+      setBleConnectionState(status.connected, status.deviceName || "", status.phase ?? (status.connected ? "connected" : "disconnected"));
       setBleAuthState(status.authState ?? null);
-
       if (status.connected) {
         markConnectedViaBleOnce();
         markBleMessageSeen(Date.now());
         refreshIdentityUi();
       }
-      return;
+    } else {
+      setBleConnectionState(false, "", "disconnected");
+      setBleAuthState(null);
     }
 
-    setBleConnectionState(false, "");
-    setBleAuthState(null);
-  }
-
-  private handleEvent(event: DeviceEvent): void {
-    // If BLE payloads are flowing, the BLE link is effectively alive even if a status callback was missed.
-    if (
-      this.activeConnection.kind === "bluetooth"
-      && (event.source === "ble/eventRx" || event.source === "ble/snapshot")
-    ) {
-      if (!appState.connection.activeConnectionConnected) {
-        setActiveConnectionConnected(true);
+    if (!status.connected) {
+      if (this.getDataConnection === connection) {
+        this.getDataConnection = null;
+        this.getDataHandle = null;
       }
-      if (!appState.ble.connected) {
-        setBleConnectionState(true, appState.ble.deviceName || "");
-      }
-      markConnectedViaBleOnce();
-      markBleMessageSeen(Date.now());
-    }
-
-    if (event.boatId) {
-      setBoatId(event.boatId);
-    }
-
-    if (event.type === "state.patch") {
-      applyStatePatch(event.patch, event.source);
-      renderTelemetryFromLatestState();
-      if (event.source === "ble/eventRx" || event.source === "ble/snapshot") {
-        markBleMessageSeen(Date.now());
+      if (this.cloudAuthorizedConnection === connection) {
+        this.cloudAuthorizedConnection = null;
       }
       return;
     }
 
-    if (event.type === "state.snapshot") {
-      applyStateSnapshot(event.snapshot, event.source);
-      renderTelemetryFromLatestState();
-      if (event.source === "ble/eventRx" || event.source === "ble/snapshot") {
-        markBleMessageSeen(Date.now());
-      }
-      return;
-    }
-
-    if (event.type === "track.snapshot") {
-      if (event.points.length > 0) {
-        replaceTrackPoints(event.points);
-        logLine(`get-data track updated (${event.points.length} points)`);
-      } else {
-        logLine("get-data track updated (no valid points)");
-      }
-      return;
-    }
-
-    if (event.type === "alerts.state") {
-      const alertsPatch: Record<string, unknown> = {};
-      for (const alert of event.alerts) {
-        alertsPatch[alert.id] = {
-          state: alert.state,
-          severity: alert.severity,
-          above_threshold_since_ts: alert.aboveThresholdSinceTs,
-          alert_since_ts: alert.alertSinceTs,
-          alert_silenced_until_ts: alert.alertSilencedUntilTs,
-        };
-      }
-      applyStatePatch({ alerts: alertsPatch }, event.source);
-      if (event.source === "ble/eventRx" || event.source === "ble/snapshot") {
-        markBleMessageSeen(Date.now());
-      }
-      return;
-    }
-
-    if (event.type === "unknown") {
-      logLine(`rx ${event.msgType} (${event.source})`);
+    try {
+      await this.ensureAuthorizedAndGetData(connection, status);
+    } catch (error) {
+      logLine(`connection authorization failed: ${String(error)}`);
+      showErrorToast(error instanceof Error ? error.message : String(error));
     }
   }
 
-  private async primeConnection(connection: DeviceConnection): Promise<void> {
+  private async ensureAuthorizedAndGetData(connection: DeviceConnection, status?: DeviceConnectionStatus): Promise<void> {
+    if (connection.kind === "bluetooth") {
+      const authState = (status?.authState ?? appState.ble.authState) as Record<string, unknown> | null;
+      const boatAccessState = typeof authState?.boat_access_state === "string" ? authState.boat_access_state : "";
+      const sessionState = typeof authState?.session_state === "string" ? authState.session_state : "";
+      if (boatAccessState === "SETUP_REQUIRED") {
+        return;
+      }
+      if (sessionState !== "AUTHORIZED") {
+        await this.ensureAuthorizedSession(connection);
+        return;
+      }
+      await this.ensureGetDataStream(connection);
+      return;
+    }
+
+    await this.ensureGetDataStream(connection);
+  }
+
+  private async ensureAuthorizedSession(connection: DeviceConnection): Promise<void> {
+    if (connection.kind !== "bluetooth") {
+      this.cloudAuthorizedConnection = connection;
+      return;
+    }
+
+    const bleConnectionPin = getBleConnectionPin().trim();
+    if (!bleConnectionPin) {
+      return;
+    }
+    if (this.authorizePromise && this.authorizeConnection === connection) {
+      await this.authorizePromise;
+      return;
+    }
+
+    const run = async (): Promise<void> => {
+      const startedAt = performance.now();
+      await connection.request("AUTHORIZE_BLE_SESSION", {
+        ble_connection_pin: bleConnectionPin,
+      });
+      logLine(`session authorize: ACK via ${connection.kind} (+${Math.round(performance.now() - startedAt)}ms)`);
+      const bleConnection = connection as DeviceConnectionBleLike;
+      const authReadStartedAt = performance.now();
+      const authState = await bleConnection.refreshAuthState();
+      logLine(`session authorize: auth refresh done (+${Math.round(performance.now() - authReadStartedAt)}ms, total ${Math.round(performance.now() - startedAt)}ms)`);
+      setBleAuthState(authState);
+      if (connection.isConnected()) {
+        await this.ensureGetDataStream(connection);
+      }
+    };
+
+    this.authorizePromise = run().finally(() => {
+      if (this.authorizeConnection === connection) {
+        this.authorizePromise = null;
+        this.authorizeConnection = null;
+      }
+    });
+    this.authorizeConnection = connection;
+    await this.authorizePromise;
+  }
+
+  private async ensureGetDataStream(connection: DeviceConnection): Promise<void> {
+    if (this.getDataHandle && this.getDataConnection === connection) {
+      return;
+    }
+
+    if (this.getDataStartPromise && this.getDataStartConnection === connection) {
+      await this.getDataStartPromise;
+      return;
+    }
+
+    const startPromise = this.startGetDataStream(connection);
+    this.getDataStartPromise = startPromise;
+    this.getDataStartConnection = connection;
+    try {
+      await startPromise;
+    } finally {
+      if (this.getDataStartPromise === startPromise) {
+        this.getDataStartPromise = null;
+        this.getDataStartConnection = null;
+      }
+    }
+  }
+
+  private async stopGetDataStream(): Promise<void> {
+    const handle = this.getDataHandle;
+    this.getDataHandle = null;
+    this.getDataConnection = null;
+    if (!handle) {
+      return;
+    }
+    try {
+      await handle.cancel();
+    } catch {
+      // ignore
+    }
+  }
+
+  private async startGetDataStream(connection: DeviceConnection): Promise<void> {
+    await this.stopGetDataStream();
     if (!connection.isConnected()) {
       return;
     }
 
-    try {
-      await connection.requestStateSnapshot();
-    } catch (error) {
-      logLine(`${connection.kind} initial get-data failed: ${String(error)}`);
-    }
+    const startedAt = performance.now();
+    const handle = await connection.openStream("GET_DATA", {}, (message) => {
+      this.handleGetDataReply(connection, message);
+    });
+    logLine(`GET_DATA stream opened via ${connection.kind} (+${Math.round(performance.now() - startedAt)}ms)`);
+    this.getDataHandle = handle;
+    this.getDataConnection = connection;
+
+    void handle.done.catch((error) => {
+      if (this.getDataHandle === handle) {
+        this.getDataHandle = null;
+        this.getDataConnection = null;
+      }
+      logLine(`GET_DATA stream ended: ${String(error)}`);
+      showErrorToast(`GET_DATA failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
   }
 
-  private async tick(): Promise<void> {
-    const nowMs = performance.now();
-    if (!this.running || nowMs - this.lastTickMs < 1000) {
+  private handleGetDataReply(connection: DeviceConnection, message: DeviceStreamMessage): void {
+    if (this.activeConnection !== connection) {
       return;
     }
 
-    this.lastTickMs = nowMs;
-    await this.tickDeviceSummary(nowMs);
-  }
+    setLatestInbound(message.source);
+    if (message.source === "ble/eventRx") {
+      markBleMessageSeen(Date.now());
+    }
 
-  private readFakeSummaryPill(): { text: string; klass: PillClass } {
-    const simulation = isObject(appState.latestState.simulation) ? appState.latestState.simulation : {};
-    const stateText = typeof simulation.stateText === "string" && simulation.stateText.trim()
-      ? simulation.stateText
-      : "FAKE: MONITORING";
-    const rawClass = typeof simulation.stateClass === "string" ? simulation.stateClass : "";
-    const klass: PillClass = rawClass === "alarm" || rawClass === "warn" ? rawClass : "ok";
-    return { text: stateText, klass };
-  }
-
-  private async tickDeviceSummary(nowMs: number): Promise<void> {
-    await this.recoverBleIfStale();
-
-    if (Object.keys(appState.latestState).length > 0) {
-      renderTelemetryFromLatestState();
-      if (appState.connection.mode === "fake") {
-        const fakePill = this.readFakeSummaryPill();
-        setSummarySource(appState.latestStateSource || "fake/snapshot");
-        setSummaryState(fakePill.text, fakePill.klass);
-        return;
+    switch (message.reply.type) {
+      case "STATE_POSITION": {
+        const value = readPositionValue(message.reply.data);
+        if (value) {
+          appState.deviceData.position = value;
+        }
+        break;
       }
-      setSummarySource(appState.latestStateSource || "device/live");
+      case "STATE_DEPTH": {
+        const value = readDepthValue(message.reply.data);
+        if (value) {
+          appState.deviceData.depth = value;
+        }
+        break;
+      }
+      case "STATE_WIND": {
+        const value = readWindValue(message.reply.data);
+        if (value) {
+          appState.deviceData.wind = value;
+        }
+        break;
+      }
+      case "STATE_WLAN_STATUS": {
+        const value = readWlanStatusValue(message.reply.data);
+        if (value) {
+          appState.deviceData.wlanStatus = value;
+        }
+        break;
+      }
+      case "STATE_SYSTEM_STATUS": {
+        const value = readSystemStatusValue(message.reply.data);
+        if (value) {
+          appState.deviceData.systemStatus = value;
+        }
+        break;
+      }
+      case "STATE_ANCHOR_POSITION": {
+        const value = readAnchorPositionValue(message.reply.data);
+        if (value) {
+          appState.deviceData.anchorPosition = value;
+        }
+        break;
+      }
+      case "STATE_ALARM_STATE": {
+        const value = readAlarmStateValue(message.reply.data);
+        if (value) {
+          appState.deviceData.alarmState = value;
+        }
+        break;
+      }
+      case "CONFIG_ALARM": {
+        const value = readAlarmConfigValue(message.reply.data);
+        if (value) {
+          setAlarmConfig(value);
+        }
+        break;
+      }
+      case "CONFIG_OBSTACLES": {
+        const value = readObstaclesConfigValue(message.reply.data);
+        if (value) {
+          setObstaclesConfig(value);
+        }
+        break;
+      }
+      case "CONFIG_ANCHOR_SETTINGS": {
+        const value = readAnchorSettingsValue(message.reply.data);
+        if (value) {
+          setAnchorSettingsConfig(value);
+        }
+        break;
+      }
+      case "CONFIG_PROFILES": {
+        const value = readProfilesConfigValue(message.reply.data);
+        if (value) {
+          setProfilesConfig(value);
+        }
+        break;
+      }
+      case "CONFIG_SYSTEM": {
+        const value = readSystemConfigValue(message.reply.data);
+        if (value) {
+          setSystemConfig(value);
+        }
+        break;
+      }
+      case "CONFIG_WLAN": {
+        const value = readWlanConfigValue(message.reply.data);
+        if (value) {
+          setWlanConfig(value);
+        }
+        break;
+      }
+      case "CONFIG_CLOUD": {
+        const value = readCloudConfigValue(message.reply.data);
+        if (value) {
+          if (connection.kind === "bluetooth") {
+            if (value.boat_id.trim()) {
+              setBoatId(value.boat_id.trim());
+            }
+            if (value.cloud_secret.trim()) {
+              setCloudSecret(value.cloud_secret.trim());
+            }
+          }
+          setCloudConfig(value);
+        }
+        break;
+      }
+      case "TRACK_BACKFILL": {
+        const track = readTrackBackfill(message.reply.data);
+        if (track.length > 0) {
+          replaceTrackPoints([...appState.deviceData.track, ...track]);
+        }
+        break;
+      }
+      default:
+        break;
+    }
+
+    refreshDerivedDeviceState();
+  }
+
+  private tickDeviceSummary(): void {
+    refreshDerivedDeviceState();
+
+    if (appState.latestSource !== "--") {
+      setSummarySource(appState.latestSource);
       setSummaryState(this.activeConnection.isConnected() ? "DEVICE: LIVE" : "DEVICE: STALE DATA", this.activeConnection.isConnected() ? "ok" : "warn");
       return;
     }
 
-    const ageS = Math.floor((nowMs - appState.runtime.bootMs) / 1000);
-    setTelemetry(ageS, ageS, 0, 0);
-    if (appState.connection.mode === "fake") {
-      setSummarySource("fake");
-      setSummaryState("FAKE: WAITING DATA", "warn");
-      return;
-    }
+    const ageS = Math.floor((performance.now() - appState.runtime.bootMs) / 1000);
+    setTelemetry(ageS, ageS, Number.NaN, Number.NaN);
     setSummarySource("none");
     setSummaryState(this.activeConnection.isConnected() ? "DEVICE: WAITING DATA" : "DEVICE: NO LINK", "warn");
   }
-
-  private async recoverBleIfStale(): Promise<void> {
-    if (
-      this.switchingConnection
-      || this.bleRecoveryInFlight
-      || this.activeConnection.kind !== "bluetooth"
-      || !appState.connection.activeConnectionConnected
-    ) {
-      return;
-    }
-
-    const lastBleMessageAtMs = appState.runtime.lastBleMessageAtMs;
-    if (!lastBleMessageAtMs) {
-      return;
-    }
-
-    const now = Date.now();
-    if (now - lastBleMessageAtMs < DeviceLinker.BLE_MESSAGE_STALE_MS) {
-      return;
-    }
-    if (now - this.lastBleRecoveryAttemptAtMs < DeviceLinker.BLE_RECOVERY_COOLDOWN_MS) {
-      return;
-    }
-
-    this.bleRecoveryInFlight = true;
-    this.lastBleRecoveryAttemptAtMs = now;
-    try {
-      logLine("BLE link stale; reconnecting BLE transport");
-      await this.activeConnection.disconnect();
-      await this.activeConnection.connect();
-      await this.primeConnection(this.activeConnection);
-    } catch (error) {
-      logLine(`BLE stale-link recovery failed: ${String(error)}`);
-    } finally {
-      this.bleRecoveryInFlight = false;
-    }
-  }
 }
 
-export const deviceLinker = new DeviceLinker(defaultConnectionForMode(appState.connection.mode, appState.connection.runtimeMode));
+export const deviceLinker = new DeviceLinker(defaultConnectionForRuntimeMode(appState.connection.runtimeMode));

@@ -1,8 +1,9 @@
 # Server Functional Spec
 
 Status: active  
-Date: 2026-03-24  
-Related wire contract: [`docs/protocol-v2.md`](/home/pm/dev/anchormaster/docs/protocol-v2.md)
+Date: 2026-03-25  
+Related wire contract: [`docs/protocol-v2.md`](/home/pm/dev/anchormaster/docs/protocol-v2.md)  
+Related access lifecycle: [`docs/access-and-provisioning.md`](/home/pm/dev/anchormaster/docs/access-and-provisioning.md)
 
 ## Purpose
 
@@ -143,6 +144,41 @@ If a client wants a replacement stream, it should cancel the old one first.
 Server-wide:
 
 - at most one active `SCAN_WLAN` operation
+
+## Access Model
+
+The current access-control model is:
+
+- shared BLE-only `factory_setup_pin` for first provisioning
+- per-boat `ble_connection_pin` for normal BLE access
+- per-boat `cloud_secret` for cloud relay access
+
+The server must support these boat states:
+
+- `SETUP_REQUIRED`
+- `LOCAL_READY`
+- `CLOUD_READY`
+
+Rules:
+
+- while the boat is in `SETUP_REQUIRED`, normal boat functionality must remain blocked
+- the shared factory setup PIN must be accepted only for local BLE setup authorization
+- once the boat has left `SETUP_REQUIRED`, setup requests using the factory setup PIN must fail with `INVALID_STATE`
+- after setup is complete, the boat must use the per-boat `ble_connection_pin` for normal BLE session authorization
+- cloud relay authentication must use the per-boat `cloud_secret`
+- the server must never reveal the factory setup PIN back to clients
+- the server may reveal `cloud_secret` only to an already authorized BLE session
+
+The server must support these session states:
+
+- `UNAUTHORIZED`
+- `AUTHORIZED`
+
+Rules:
+
+- authorization is session-scoped
+- existing authorized BLE sessions should be invalidated when the `ble_connection_pin` changes
+- after BLE pin rotation, existing BLE sessions must reauthorize with the new pin
 
 ## Protocol Handling
 
@@ -287,14 +323,19 @@ Note:
 
 When the server receives `GET_DATA`, it must:
 
+- reject the request if the caller is not authorized for protected runtime access
+  - unauthorized BLE sessions must not receive runtime/config data
+  - boats still in `SETUP_REQUIRED` must not expose runtime/config data
 - open a long-lived request for that connection
 - reply with a bootstrap sequence of `ONGOING` messages on the same `req_id`
-- send current known state/config values as typed replies such as `STATE_POSITION`, `STATE_WIND`, `STATE_ANCHOR_POSITION`, `CONFIG_ALARM`, `CONFIG_OBSTACLES`, `CONFIG_SYSTEM`, or `CONFIG_CLOUD`
+- send current known state/config values as typed replies such as `STATE_POSITION`, `STATE_WIND`, `STATE_ANCHOR_POSITION`, `CONFIG_ALARM`, `CONFIG_OBSTACLES`, or `CONFIG_SYSTEM`
 - include config DTO versions inside the `data` payload of `CONFIG_*` replies
 - send retained track backfill as one or more `TRACK_BACKFILL` replies
 - not require a dedicated snapshot payload shape
 - keep the request open after bootstrap
 - stream future whole-value replacements and track backfill messages on the same request
+
+For authorized BLE sessions specifically, the bootstrap may additionally include `CONFIG_CLOUD`.
 
 Track backfill rule:
 
@@ -383,26 +424,79 @@ Each `UPDATE_CONFIG_*` request is all-or-nothing:
 - if validation fails, no change is applied
 - if the supplied config version mismatches, no change is applied
 
-`UPDATE_CLOUD_CREDENTIALS` is the special case for cloud identity and credential updates.
+`AUTHORIZE_SETUP` is the BLE-only setup authorization step.
+
+For `AUTHORIZE_SETUP`, the server must:
+
+- accept it only while the boat is in `SETUP_REQUIRED`
+- accept it only over BLE/local setup transport
+- validate the supplied shared factory setup PIN
+- mark the current BLE setup session as authorized for setup-only operations
+- reject it with `INVALID_STATE` once the boat has already left `SETUP_REQUIRED`
+
+`AUTHORIZE_BLE_SESSION` is the normal BLE session-authorization step.
+
+For `AUTHORIZE_BLE_SESSION`, the server must:
+
+- accept it only over BLE
+- accept it only while the boat is in `LOCAL_READY` or `CLOUD_READY`
+- validate the supplied `ble_connection_pin`
+- mark the current BLE session as authorized for protected operations
+
+`SET_INITIAL_BLE_PIN` is the first local activation step.
+
+For `SET_INITIAL_BLE_PIN`, the server must:
+
+- accept it only while the boat is in `SETUP_REQUIRED`
+- accept it only over BLE
+- require that the current BLE setup session is already setup-authorized
+- parse `ble_connection_pin` from request `data`
+- require it to be non-empty
+- persist the new BLE pin atomically
+- move the boat from `SETUP_REQUIRED` to `LOCAL_READY`
+- mark the current BLE session as authorized
+- reject it with `INVALID_STATE` once the boat has already left `SETUP_REQUIRED`
+
+`UPDATE_CLOUD_CREDENTIALS` is the cloud identity/config update step.
 
 For `UPDATE_CLOUD_CREDENTIALS`, the server must:
 
-- parse `version`, `boat_id`, and `boat_secret` from request `data`
-- require non-empty `boat_id` and `boat_secret`
+- parse `version`, `boat_id`, and `cloud_secret` from request `data`
+- require non-empty `boat_id` and `cloud_secret`
+- require that the current BLE session is already authorized
 - reject the request without side effects if the supplied version mismatches the current authoritative `cloud_config.version`
-- persist the new `boat_id` and `boat_secret` atomically
+- persist the new `boat_id` and `cloud_secret` atomically
+- move the boat to `CLOUD_READY`
 - increment `cloud_config.version` only after a successful write
-- emit the updated readable `CONFIG_CLOUD` value to all active streams
+- emit the updated readable `CONFIG_CLOUD` value to authorized BLE sessions
+
+This request belongs to the later WLAN/cloud-management flow, not to the first factory onboarding step.
+
+`UPDATE_BLE_PIN` is the local BLE pin rotation step.
+
+For `UPDATE_BLE_PIN`, the server must:
+
+- accept it only while the boat is in `LOCAL_READY` or `CLOUD_READY`
+- require that the current BLE session is already authorized
+- parse `old_ble_connection_pin` and `new_ble_connection_pin` from request `data`
+- require both pin values to be non-empty
+- reject the request without side effects if `old_ble_connection_pin` does not match the current authoritative BLE pin
+- persist the new BLE pin atomically
+- invalidate existing authorized BLE sessions so they must reauthorize with the new pin
 
 Rules:
 
-- `boat_secret` is write-only and must never appear in `GET_DATA`, `CONFIG_CLOUD`, `ACK`, or `ERROR` replies
-- clients may observe whether a secret is configured, but never the secret value itself
+- `cloud_secret` may appear only in `CONFIG_CLOUD` replies to an already authorized BLE session
+- `cloud_secret` must never appear in `GET_DATA` replies sent over cloud transport
+- `ble_connection_pin` must never appear in replies
 
 ### 11. `SCAN_WLAN`
 
 The server must:
 
+- accept it only over BLE
+- require that the current BLE session is already authorized
+- reject it while the boat is still in `SETUP_REQUIRED`
 - perform a WLAN scan on the local device
 - open a streamed request on the caller's `req_id`
 - emit one discovered network at a time as `type: "WLAN_NETWORK"`
@@ -482,7 +576,7 @@ The server must distinguish between:
 Expected rules:
 
 - cloud transport is authenticated before socket establishment, using short-lived WebSocket tickets
-- local BLE onboarding/configuration requires explicit pair-mode and privileged local session rules
+- local BLE onboarding/configuration requires explicit setup/session authorization rules
 - privileged mutation and onboarding commands must be rejected when the caller lacks sufficient authorization
 
 Cloud authorization direction:
@@ -491,9 +585,10 @@ Cloud authorization direction:
 - the relay should route one durable object per `boat_id`
 - only explicitly created boats are allowed to use the cloud relay
 - user-authenticated apps should obtain cloud WebSocket tickets from the control plane based on boat membership/access rights
-- the boat/server should obtain cloud WebSocket tickets using a boat-scoped server credential such as `boat_secret`
+- the boat/server should obtain cloud WebSocket tickets using the current `cloud_secret`
 - in the current pre-control-plane phase, firmware/server-side cloud credentials may be set locally through `UPDATE_CLOUD_CREDENTIALS`
-- that local credential update path must not permit reading the configured `boat_secret` back out through the protocol
+- whenever an authorized BLE session is established, the server should make the current `CONFIG_CLOUD` value available so the app can refresh its stored cloud secret
+- the shared factory setup PIN must never be accepted as a normal cloud runtime credential
 - app and server cloud connections remain separate request/reply sessions even when they target the same boat
 - duplicated streamed data across multiple app sessions is acceptable for now
 

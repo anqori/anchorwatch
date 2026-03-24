@@ -1,10 +1,11 @@
 # Server Firmware Spec
 
 Status: active  
-Date: 2026-03-24  
+Date: 2026-03-25  
 Related shared behavior spec: [`docs/server-functional-spec.md`](/home/pm/dev/anchormaster/docs/server-functional-spec.md)  
 Related implementation outline: [`docs/server-implementation-outline.md`](/home/pm/dev/anchormaster/docs/server-implementation-outline.md)  
-Related wire contract: [`docs/protocol-v2.md`](/home/pm/dev/anchormaster/docs/protocol-v2.md)
+Related wire contract: [`docs/protocol-v2.md`](/home/pm/dev/anchormaster/docs/protocol-v2.md)  
+Related access lifecycle: [`docs/access-and-provisioning.md`](/home/pm/dev/anchormaster/docs/access-and-provisioning.md)
 
 ## Purpose
 
@@ -91,8 +92,8 @@ Current bring-up mechanism:
 
 - BLE pair mode is active automatically on startup
 - automatic pair mode times out after 120 seconds
-- a local privileged session can then be confirmed
-- while pair mode and the privileged session are active, local maintenance operations are allowed
+- while pair mode is active, BLE-local setup/session authorization is allowed
+- no separate local privileged-session confirmation step is required
 
 Expected local maintenance channel:
 
@@ -107,7 +108,6 @@ Local maintenance command baseline:
 - `pair on`
 - `pair off`
 - `pair status`
-- `pair confirm`
 - `wifi status`
 - `debug on`
 - `debug off`
@@ -115,17 +115,20 @@ Local maintenance command baseline:
 Secret and identity handling baseline:
 
 - there is no secret readback path
-- the firmware must never reveal `boat_secret` over the main BLE business protocol, the local auth channel, or the serial maintenance interface
-- for the current pre-control-plane phase, the app must be able to set cloud credentials locally through the protocol
-- the readable local/runtime view may expose `boat_id` and whether a secret is configured, but never the secret value itself
+- the firmware must never reveal `factory_setup_pin` or `ble_connection_pin` over the main BLE business protocol, the local auth channel, or the serial maintenance interface
+- for the current pre-control-plane phase, the app must be able to:
+  - authorize first setup over BLE using the shared factory setup PIN
+  - set the first real per-boat `ble_connection_pin`
+  - rotate the `ble_connection_pin` later
+  - read the current `cloud_secret` only after BLE authorization succeeds
+- the readable local/runtime view may expose `boat_id`, `cloud_secret`, and whether a cloud secret is configured, but only to an authorized BLE session
 
 The `auth` characteristic may expose transport-local status such as:
 
 - `pair_mode_active`
 - `pair_mode_until_ts`
-- `privileged_session_active`
-- `privileged_session_until_ts`
 - `boat_id`
+- whether the boat is still in `SETUP_REQUIRED`
 
 This status is local onboarding state, not shared runtime state.
 
@@ -137,7 +140,8 @@ Persistent firmware-owned values:
 
 - stable `boat_id`
 - stable `device_id`
-- stable `boat_secret`
+- stable `ble_connection_pin`
+- stable `cloud_secret`
 - app-writable config DTOs:
   - `alarm_config`
   - `obstacles`
@@ -154,19 +158,24 @@ Identity defaults:
 
 - `device_id` may derive from the ESP efuse MAC
 - `boat_id` may default from the same hardware identity with a stable prefix
-- `boat_secret` may start unset
-- if `boat_secret` is unset, the firmware should expose that through `CONFIG_CLOUD.secret_configured = false` rather than inventing a hidden credential the user cannot read back
+- `ble_connection_pin` may start unset
+- `cloud_secret` may start unset
+- the shared `factory_setup_pin` is flashed into firmware for the current bring-up phase
+- if `cloud_secret` is unset, the firmware should expose that through `CONFIG_CLOUD.secret_configured = false`
 
 Cloud identity/credential update expectations:
 
 - the firmware should expose a readable `CONFIG_CLOUD` value containing:
   - `version`
   - `boat_id`
+  - `cloud_secret`
   - `secret_configured`
-- the firmware should accept local cloud identity/credential updates through `UPDATE_CLOUD_CREDENTIALS`
-- `UPDATE_CLOUD_CREDENTIALS` must accept `version`, `boat_id`, and `boat_secret`
-- successful writes must persist the new `boat_id` and `boat_secret` atomically
-- the firmware must never emit `boat_secret` back to the client after storing it
+- the firmware should accept BLE-local first setup through `AUTHORIZE_SETUP`
+- the firmware should accept the first local activation through `SET_INITIAL_BLE_PIN`
+- `SET_INITIAL_BLE_PIN` must persist the new BLE pin atomically and move the boat from `SETUP_REQUIRED` to `LOCAL_READY`
+- the firmware should accept later BLE pin rotation through `UPDATE_BLE_PIN`
+- the firmware should accept later cloud config writes through `UPDATE_CLOUD_CREDENTIALS`
+- `CONFIG_CLOUD` must be emitted only to authorized BLE sessions
 
 No backward compatibility with old persistence layout is required for the greenfield rewrite. Internal key names and storage layout may change freely if the new implementation is cleaner.
 

@@ -212,9 +212,12 @@ export function toTrackPoint(value: unknown): TrackPoint | null {
   }
 
   const ts = toFiniteNumber(value.ts) ?? Date.now();
-  const sogKn = toFiniteNumber(value.sogKn) ?? 0;
-  const cogDeg = toFiniteNumber(value.cogDeg) ?? 0;
-  const headingDeg = toFiniteNumber(value.headingDeg) ?? cogDeg;
+  const sogKn = toFiniteNumber(value.sog_kn ?? value.sogKn) ?? 0;
+  const cogDeg = toFiniteNumber(value.cog_deg ?? value.cogDeg) ?? 0;
+  const headingDeg = toFiniteNumber(value.heading_deg ?? value.headingDeg) ?? cogDeg;
+  const depthM = toFiniteNumber(value.depth_m ?? value.depthM);
+  const windKn = toFiniteNumber(value.wind_kn ?? value.windKn);
+  const windDirDeg = toFiniteNumber(value.wind_dir_deg ?? value.windDirDeg);
 
   return {
     ts,
@@ -223,6 +226,9 @@ export function toTrackPoint(value: unknown): TrackPoint | null {
     sogKn,
     cogDeg: (cogDeg + 360) % 360,
     headingDeg: (headingDeg + 360) % 360,
+    depthM,
+    windKn,
+    windDirDeg: windDirDeg === null ? null : (windDirDeg + 360) % 360,
   };
 }
 

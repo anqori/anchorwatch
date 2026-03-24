@@ -14,21 +14,29 @@
   export let availableWifiNetworks: WifiScanNetwork[] = [];
   export let configuredWifiSsid = "";
   export let configuredWifiPass = "";
+  export let configuredCloudSecret = "";
   export let configuredWifiStatusText = "Connecting";
   export let formatWifiSecurity: (security: WifiSecurity) => string = (security) => security;
+  export let disabled = false;
+  export let disabledReason = "Waiting for server config...";
 
   export let onBack: () => void = () => {};
-  export let onConnectWifiNetwork: (ssid: string, security: WifiSecurity, passphrase: string) => void = () => {};
+  export let onConnectWifiNetwork: (ssid: string, security: WifiSecurity, passphrase: string, cloudSecret: string) => void = () => {};
 
   let sheetOpened = false;
   let modalSsid = "";
   let modalSecurity: WifiSecurity = "wpa2";
   let modalPassphrase = "";
+  let modalCloudSecret = "";
 
   function openNetworkSheet(network: WifiScanNetwork): void {
+    if (disabled) {
+      return;
+    }
     modalSsid = network.ssid;
     modalSecurity = network.security === "unknown" ? "wpa2" : network.security;
     modalPassphrase = network.ssid === configuredWifiSsid ? configuredWifiPass : "";
+    modalCloudSecret = configuredCloudSecret;
     sheetOpened = true;
   }
 
@@ -37,7 +45,7 @@
   }
 
   function connectSelectedNetwork(): void {
-    onConnectWifiNetwork(modalSsid.trim(), modalSecurity, modalPassphrase);
+    onConnectWifiNetwork(modalSsid.trim(), modalSecurity, modalPassphrase, modalCloudSecret.trim());
     sheetOpened = false;
   }
 </script>
@@ -49,6 +57,10 @@
 </Navbar>
 
 <div class="space-y-3">
+  {#if disabled}
+    <div class="hint">{disabledReason}</div>
+  {/if}
+  <div class:config-disabled={disabled}>
   {#if wifiScanInFlight || wifiScanErrorText}
     <div class="internet-status-card" aria-live="polite">
       {#if wifiScanInFlight}
@@ -82,6 +94,7 @@
       {/each}
     {/if}
   </List>
+  </div>
 </div>
 
 {#if sheetOpened}
@@ -118,6 +131,13 @@
               placeholder={modalSecurity === "open" ? "No password required (open)" : "Passphrase"}
               disabled={modalSecurity === "open"}
             />
+            <ListInput
+              label="Anqori Cloud Secret"
+              type="password"
+              bind:value={modalCloudSecret}
+              placeholder="secret_..."
+              autocomplete="off"
+            />
           </List>
         </div>
         <div class="internet-sheet-actions">
@@ -128,7 +148,7 @@
             onclick={connectSelectedNetwork}
             disabled={!modalSsid.trim()}
           >
-            Connect
+            Save WLAN
           </button>
         </div>
       </div>
@@ -137,6 +157,11 @@
 {/if}
 
 <style>
+  .config-disabled {
+    opacity: 0.45;
+    pointer-events: none;
+  }
+
   .internet-status-card {
     border: 0;
     border-radius: 0.7rem;

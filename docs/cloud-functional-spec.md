@@ -1,9 +1,10 @@
 # Cloud Relay Functional Spec
 
 Status: active  
-Date: 2026-03-24  
+Date: 2026-03-25  
 Related wire contract: [`docs/protocol-v2.md`](/home/pm/dev/anchormaster/docs/protocol-v2.md)  
-Related server behavior: [`docs/server-functional-spec.md`](/home/pm/dev/anchormaster/docs/server-functional-spec.md)
+Related server behavior: [`docs/server-functional-spec.md`](/home/pm/dev/anchormaster/docs/server-functional-spec.md)  
+Related access lifecycle: [`docs/access-and-provisioning.md`](/home/pm/dev/anchormaster/docs/access-and-provisioning.md)
 
 ## Purpose
 
@@ -16,7 +17,8 @@ This is a behavior spec for the cloud relay layer. It does not define boat busin
 This document assumes:
 
 - boats are preconfigured in the cloud relay auth store
-- each allowed boat already has a configured `boat_id` and `boat_secret`
+- each allowed boat already has a configured `boat_id`
+- each boat is in either `SETUP_REQUIRED`, `LOCAL_READY`, or `CLOUD_READY`
 - there is no user/OAuth control plane in this phase
 - boat creation is out of scope for the relay in this phase
 
@@ -64,16 +66,19 @@ The relay must have a persistent registry of allowed boats.
 Each boat record must include at least:
 
 - `boat_id`
-- `boat_secret` hash
+- boat lifecycle state such as `SETUP_REQUIRED`, `LOCAL_READY`, or `CLOUD_READY`
+- runtime `cloud_secret` hash when cloud is configured
 - enabled/disabled status
 
 Rules:
 
 - `boat_id` is a non-secret routing key
-- `boat_secret` is the boat-scoped cloud credential
+- runtime `cloud_secret` is the boat-scoped cloud credential
 - only preconfigured, enabled boats are allowed to use the relay
 - unknown boats must be rejected
 - disabled boats must be rejected
+- the shared factory setup PIN is not a normal runtime cloud credential
+- initial local BLE onboarding must not go through the relay
 
 ## Connection Model
 
@@ -110,7 +115,7 @@ Request body:
 ```json
 {
   "boat_id": "BOAT_123",
-  "boat_secret": "secret",
+  "cloud_secret": "secret",
   "role": "app"
 }
 ```
@@ -123,6 +128,7 @@ Allowed roles:
 Rules:
 
 - the boat must already exist in the relay registry
+- the boat must already be in `CLOUD_READY`
 - the supplied secret must match the current boat secret
 - the relay must return a short-lived ticket bound to:
   - `boat_id`
@@ -159,7 +165,7 @@ Rules:
 
 Purpose:
 
-- rotate a preconfigured boat secret in the current bootstrap model
+- configure or rotate the per-boat cloud secret
 
 Request body:
 
@@ -174,13 +180,16 @@ Request body:
 Rules:
 
 - the boat must already exist
-- `old_secret` must match the current configured boat secret
+- if the boat is already in `CLOUD_READY`, `old_secret` must match the current configured cloud secret
+- if the boat is in `LOCAL_READY` and does not yet have a cloud secret, the relay may accept the first non-empty `new_secret` without `old_secret`
 - `new_secret` must be validated as non-empty and acceptable for storage
 - the relay must replace the stored secret atomically
+- once a cloud secret is configured, the boat becomes `CLOUD_READY`
 - tickets issued before rotation may remain valid until their normal expiry
 - tickets issued after rotation must require the new secret
+- after rotation the relay should close active sockets for that boat so all sessions must reconnect with the new secret
 
-This endpoint exists for the current preconfigured setup. A later user-account control plane may replace it.
+This endpoint is the current pre-control-plane cloud-secret management path. A later user-account control plane may replace it.
 
 ## Boat Durable Object Behavior
 

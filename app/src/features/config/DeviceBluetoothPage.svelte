@@ -14,11 +14,14 @@
   export let secretStatusText = "not stored";
   export let connectedDeviceName = "";
   export let runtimeModeText = "Remote (relay only)";
+  export let systemRuntimeMode: "LIVE" | "SIMULATION" = "LIVE";
+  export let runtimeConfigDisabled = false;
+  export let runtimeConfigDisabledReason = "Waiting for server config...";
 
   export let onBack: () => void = () => {};
   export let onSearchDevice: () => void = () => {};
   export let onOpenManualConnection: () => void = () => {};
-  export let onUseDemoData: () => void = () => {};
+  export let onSelectSystemRuntimeMode: (mode: "LIVE" | "SIMULATION") => void = () => {};
 </script>
 
 <Navbar title="Device / Boat">
@@ -37,6 +40,31 @@
     <ListItem title="BLE" after={bleStatusText} />
   </List>
 
+  <div class="device-action-card" class:config-disabled={runtimeConfigDisabled}>
+    <div class="runtime-mode-label">Server runtime</div>
+    {#if runtimeConfigDisabled}
+      <div class="hint">{runtimeConfigDisabledReason}</div>
+    {/if}
+    <div class="runtime-mode-toggle">
+      <button
+        type="button"
+        class:active-mode={systemRuntimeMode === "LIVE"}
+        disabled={runtimeConfigDisabled}
+        onclick={() => onSelectSystemRuntimeMode("LIVE")}
+      >
+        LIVE
+      </button>
+      <button
+        type="button"
+        class:active-mode={systemRuntimeMode === "SIMULATION"}
+        disabled={runtimeConfigDisabled}
+        onclick={() => onSelectSystemRuntimeMode("SIMULATION")}
+      >
+        SIMULATION
+      </button>
+    </div>
+  </div>
+
   <div class="device-action-card">
     <div class="actions">
       <KonstaButton onClick={onSearchDevice} disabled={!bleSupported}>Search for device locally</KonstaButton>
@@ -47,12 +75,6 @@
         Bluetooth is not supported in this browser/app environment. Use a supported browser with Web Bluetooth.
       </div>
     {/if}
-  </div>
-
-  <div class="device-corner-action">
-    <button type="button" class="device-demo-button" onclick={onUseDemoData}>
-      use demonstration data
-    </button>
   </div>
 </div>
 
@@ -66,5 +88,34 @@
 
   .device-action-card .actions {
     margin-top: 0;
+  }
+
+  .runtime-mode-label {
+    font-size: 0.85rem;
+    opacity: 0.7;
+    margin-bottom: 0.55rem;
+  }
+
+  .runtime-mode-toggle {
+    display: flex;
+    gap: 0.6rem;
+  }
+
+  .runtime-mode-toggle button {
+    appearance: none;
+    border: 1px solid rgba(0, 0, 0, 0.18);
+    background: rgba(255, 255, 255, 0.6);
+    border-radius: 999px;
+    padding: 0.6rem 1rem;
+    font-weight: 600;
+  }
+
+  .runtime-mode-toggle button.active-mode {
+    background: rgba(20, 110, 255, 0.14);
+    border-color: rgba(20, 110, 255, 0.45);
+  }
+
+  .config-disabled {
+    opacity: 0.45;
   }
 </style>

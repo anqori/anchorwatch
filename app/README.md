@@ -17,7 +17,6 @@ Stack:
 - config editing
 - BLE local control
 - remote relay control
-- fake mode for offline/demo use
 
 ## Connectivity strategy
 

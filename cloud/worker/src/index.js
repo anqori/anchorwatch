@@ -5,6 +5,7 @@ const INTERNAL_PIPE_PATH = "/internal/pipe";
 const INTERNAL_ISSUE_TICKET_PATH = "/internal/ws-ticket";
 const INTERNAL_REDEEM_TICKET_PATH = "/internal/redeem-ticket";
 const INTERNAL_UPDATE_SECRET_PATH = "/internal/update-boat-secret";
+const INTERNAL_SECRET_ROTATED_PATH = "/internal/secret-rotated";
 const REGISTRY_OBJECT_NAME = "boat-registry";
 const DEFAULT_WS_TICKET_TTL_MS = 60_000;
 const MAX_WS_TICKET_TTL_MS = 5 * 60_000;
@@ -12,6 +13,9 @@ const BOAT_KEY_PREFIX = "boat:";
 const TICKET_KEY_PREFIX = "ticket:";
 const ROLE_APP = "app";
 const ROLE_SERVER = "server";
+const BOAT_STATE_SETUP_REQUIRED = "SETUP_REQUIRED";
+const BOAT_STATE_LOCAL_READY = "LOCAL_READY";
+const BOAT_STATE_CLOUD_READY = "CLOUD_READY";
 const TRANSPORT_KIND_OPEN = "OPEN";
 const TRANSPORT_KIND_PAYLOAD = "PAYLOAD";
 const TRANSPORT_KIND_CLOSE = "CLOSE";
@@ -77,14 +81,14 @@ export class BoatRegistryDurableObject {
     }
 
     const boatId = requireNonEmptyString(body.value.boat_id);
-    const boatSecret = requireNonEmptyString(body.value.boat_secret);
+    const cloudSecret = requireNonEmptyString(body.value.cloud_secret);
     const role = normalizeRole(body.value.role);
 
     if (!boatId) {
       return jsonError("INVALID_REQUEST", "boat_id is required", 400);
     }
-    if (!boatSecret) {
-      return jsonError("INVALID_REQUEST", "boat_secret is required", 400);
+    if (!cloudSecret) {
+      return jsonError("INVALID_REQUEST", "cloud_secret is required", 400);
     }
     if (!role) {
       return jsonError("INVALID_REQUEST", "role must be app or server", 400);
@@ -97,8 +101,11 @@ export class BoatRegistryDurableObject {
     if (!boat.enabled) {
       return jsonError("AUTH_FAILED", "boat is disabled", 403);
     }
-    if (!(await secretMatches(boatSecret, boat.secret_hash))) {
-      return jsonError("AUTH_FAILED", "invalid boat_secret", 401);
+    if (boat.state !== BOAT_STATE_CLOUD_READY || !boat.secret_hash) {
+      return jsonError("AUTH_FAILED", "boat is not cloud-ready", 403);
+    }
+    if (!(await secretMatches(cloudSecret, boat.secret_hash))) {
+      return jsonError("AUTH_FAILED", "invalid cloud_secret", 401);
     }
 
     await this.pruneExpiredTicketIds();
@@ -148,7 +155,7 @@ export class BoatRegistryDurableObject {
     }
 
     const boat = await this.getBoatRecord(ticketRecord.boat_id, true);
-    if (!boat || !boat.enabled) {
+    if (!boat || !boat.enabled || boat.state !== BOAT_STATE_CLOUD_READY || !boat.secret_hash) {
       return jsonError("AUTH_FAILED", "boat unavailable", 401);
     }
 
@@ -168,14 +175,11 @@ export class BoatRegistryDurableObject {
     }
 
     const boatId = requireNonEmptyString(body.value.boat_id);
-    const oldSecret = requireNonEmptyString(body.value.old_secret);
+    const oldSecret = requireOptionalString(body.value.old_secret);
     const newSecret = requireNonEmptyString(body.value.new_secret);
 
     if (!boatId) {
       return jsonError("INVALID_REQUEST", "boat_id is required", 400);
-    }
-    if (!oldSecret) {
-      return jsonError("INVALID_REQUEST", "old_secret is required", 400);
     }
     if (!newSecret) {
       return jsonError("INVALID_REQUEST", "new_secret is required", 400);
@@ -188,12 +192,25 @@ export class BoatRegistryDurableObject {
     if (!boat.enabled) {
       return jsonError("AUTH_FAILED", "boat is disabled", 403);
     }
-    if (!(await secretMatches(oldSecret, boat.secret_hash))) {
-      return jsonError("AUTH_FAILED", "invalid old_secret", 401);
+    if (boat.state === BOAT_STATE_CLOUD_READY) {
+      if (!oldSecret) {
+        return jsonError("INVALID_REQUEST", "old_secret is required", 400);
+      }
+      if (!boat.secret_hash) {
+        return jsonError("AUTH_FAILED", "boat is not cloud-ready", 403);
+      }
+      if (!(await secretMatches(oldSecret, boat.secret_hash))) {
+        return jsonError("AUTH_FAILED", "invalid old_secret", 401);
+      }
+    } else {
+      if (boat.secret_hash) {
+        return jsonError("INVALID_STATE", "cloud secret already configured", 409);
+      }
     }
 
     const updatedBoat = {
       ...boat,
+      state: BOAT_STATE_CLOUD_READY,
       secret_hash: await hashSecret(newSecret),
       updated_at: Date.now(),
     };
@@ -228,7 +245,8 @@ export class BoatRegistryDurableObject {
 
     const storedRecord = {
       boat_id: seedRecord.boat_id,
-      secret_hash: await hashSecret(seedRecord.boat_secret),
+      state: seedRecord.state,
+      secret_hash: seedRecord.cloud_secret ? await hashSecret(seedRecord.cloud_secret) : null,
       enabled: seedRecord.enabled !== false,
       created_at: Date.now(),
       updated_at: Date.now(),
@@ -272,6 +290,11 @@ export class BoatPipeDurableObject {
 
   async fetch(request) {
     const url = new URL(request.url);
+    if (request.method === "POST" && url.pathname === INTERNAL_SECRET_ROTATED_PATH) {
+      this.closeEntireBoat("secret_rotated");
+      return jsonResponse({ closed: true }, 200);
+    }
+
     if (url.pathname !== INTERNAL_PIPE_PATH) {
       return jsonError("NOT_FOUND", "Boat pipe route not found", 404);
     }
@@ -497,6 +520,15 @@ export class BoatPipeDurableObject {
     }
   }
 
+  closeEntireBoat(reason) {
+    this.closeAllAppSessions(reason);
+    if (this.serverSession) {
+      const currentServer = this.serverSession;
+      this.serverSession = null;
+      closeSocket(currentServer.socket, UNAVAILABLE_CLOSE_CODE, reason);
+    }
+  }
+
   closeAppSession(
     cloudConnId,
     { close_code = NORMAL_CLOSE_CODE, close_reason = "closed", notify_server = false } = {},
@@ -578,7 +610,14 @@ async function updateBoatSecret(request, env) {
     return body.response;
   }
 
-  return postToRegistry(env, INTERNAL_UPDATE_SECRET_PATH, body.value);
+  const response = await postToRegistry(env, INTERNAL_UPDATE_SECRET_PATH, body.value);
+  if (response.ok) {
+    const boatId = requireNonEmptyString(body.value.boat_id);
+    if (boatId) {
+      await postToBoatPipe(env, boatId, INTERNAL_SECRET_ROTATED_PATH, { reason: "secret_rotated" });
+    }
+  }
+  return response;
 }
 
 async function handlePipe(request, env, cors) {
@@ -641,6 +680,19 @@ async function postToRegistry(env, path, body) {
   return stub.fetch(request);
 }
 
+async function postToBoatPipe(env, boatId, path, body) {
+  if (!hasBoatPipeBinding(env)) {
+    return null;
+  }
+  const stub = env.BOAT_PIPE.get(env.BOAT_PIPE.idFromName(boatId));
+  const request = new Request(`https://pipe${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json; charset=utf-8" },
+    body: JSON.stringify(body),
+  });
+  return stub.fetch(request);
+}
+
 function hasBoatPipeBinding(env) {
   return env.BOAT_PIPE && typeof env.BOAT_PIPE.idFromName === "function";
 }
@@ -684,13 +736,14 @@ function parsePreconfiguredBoatMap(rawValue) {
 function normalizeBoatSeedRecord(entry, boatIdHint = "") {
   if (typeof entry === "string") {
     const boatId = requireNonEmptyString(boatIdHint);
-    const boatSecret = requireNonEmptyString(entry);
-    if (!boatId || !boatSecret) {
+    const cloudSecret = requireNonEmptyString(entry);
+    if (!boatId || !cloudSecret) {
       return null;
     }
     return {
       boat_id: boatId,
-      boat_secret: boatSecret,
+      cloud_secret: cloudSecret,
+      state: BOAT_STATE_CLOUD_READY,
       enabled: true,
     };
   }
@@ -700,16 +753,27 @@ function normalizeBoatSeedRecord(entry, boatIdHint = "") {
   }
 
   const boatId = requireNonEmptyString(entry.boat_id || boatIdHint);
-  const boatSecret = requireNonEmptyString(entry.boat_secret || entry.secret);
-  if (!boatId || !boatSecret) {
+  const cloudSecret = requireNonEmptyString(entry.cloud_secret || entry.boat_secret || entry.secret);
+  const state = normalizeBoatState(entry.state, cloudSecret ? BOAT_STATE_CLOUD_READY : BOAT_STATE_LOCAL_READY);
+  if (!boatId) {
+    return null;
+  }
+  if (state === BOAT_STATE_CLOUD_READY && !cloudSecret) {
     return null;
   }
 
   return {
     boat_id: boatId,
-    boat_secret: boatSecret,
+    cloud_secret: cloudSecret || "",
+    state,
     enabled: entry.enabled !== false,
   };
+}
+
+function normalizeBoatState(value, fallback) {
+  return value === BOAT_STATE_SETUP_REQUIRED || value === BOAT_STATE_LOCAL_READY || value === BOAT_STATE_CLOUD_READY
+    ? value
+    : fallback;
 }
 
 async function hashSecret(secret) {
@@ -719,6 +783,9 @@ async function hashSecret(secret) {
 }
 
 async function secretMatches(secret, expectedHash) {
+  if (!expectedHash) {
+    return false;
+  }
   return (await hashSecret(secret)) === expectedHash;
 }
 
@@ -807,6 +874,10 @@ function normalizeRole(value) {
 
 function requireNonEmptyString(value) {
   return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
+function requireOptionalString(value) {
+  return typeof value === "string" ? value.trim() : "";
 }
 
 function isPlainObject(value) {

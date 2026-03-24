@@ -1,51 +1,62 @@
 import {
   CONNECTION_RUNTIME_MODE_REMOTE,
   CONFIG_SECTIONS,
-  MODE_FAKE,
   PWA_BUILD_VERSION,
   TRACK_MAX_POINTS,
 } from "../core/constants";
 import type {
+  AlarmConfigEntry,
+  AlertRuntime,
+  AnchorPositionValue,
+  AppConnectivityState,
+  CloudConfigValue,
+  ConfigDraftsState,
   ConnectionRuntimeMode,
   ConnectionState,
-  ConfigDraftsState,
   DebugMessageDirection,
   DebugMessageEntry,
+  DebugMessageLimit,
   DebugMessageRoute,
+  DeviceDataSlices,
   InboundSource,
   JsonRecord,
   NavigationState,
   NetworkState,
   NotificationState,
+  ObstaclesConfigValue,
   PillClass,
+  ProfilesConfigValue,
+  RuntimeMode,
+  SystemConfigValue,
   TrackPoint,
   VersionState,
+  WlanConfigValue,
   WifiScanNetwork,
 } from "../core/types";
-import { deepMerge, isObject, normalizePatch } from "../services/data-utils";
 import { maskSecret } from "../services/local-storage";
 import {
   ensurePhoneId,
   getBoatId,
-  getBoatSecret,
+  getBleConnectionPin,
+  getCloudSecret,
   getRelayBaseUrl,
   hasConnectedViaBleOnce,
   loadConnectionRuntimeMode,
-  loadMode,
   setConnectionRuntimeMode as setConnectionRuntimeModeStored,
   setBoatId as setBoatIdStored,
-  setBoatSecret as setBoatSecretStored,
-  setMode as setModeStored,
+  setBleConnectionPin as setBleConnectionPinStored,
+  setCloudSecret as setCloudSecretStored,
 } from "../services/persistence-domain";
+import type { DeviceConnectionPhase } from "../connections/device-connection";
 import {
   hasCloudCredentialsConfigured,
   hasConfiguredDevice,
 } from "../services/connectivity-derive";
-import { deriveTelemetry, readAnchorStatus } from "../services/state-derive";
 import { deriveTrackSummary, deriveRadarProjection } from "../services/track-derive";
 
 export interface BleUiState {
   connected: boolean;
+  phase: DeviceConnectionPhase;
   deviceName: string;
   authState: JsonRecord | null;
 }
@@ -79,52 +90,84 @@ export interface TrackUiState {
   radarBearingText: string;
 }
 
+export interface ToastUiState {
+  opened: boolean;
+  message: string;
+  serial: number;
+}
+
+function defaultAnchorDistanceDraft(): ConfigDraftsState["alerts"]["anchor_distance"] {
+  return {
+    type: "ANCHOR_DISTANCE",
+    enabled: true,
+    minTimeMs: "20000",
+    severity: "ALARM",
+    defaultSilenceMs: "900000",
+    maxDistanceM: "35",
+  };
+}
+
+function defaultObstacleCloseDraft(): ConfigDraftsState["alerts"]["obstacle_close"] {
+  return {
+    type: "OBSTACLE_CLOSE",
+    enabled: true,
+    minTimeMs: "10000",
+    severity: "ALARM",
+    defaultSilenceMs: "900000",
+    minDistanceM: "10",
+  };
+}
+
+function defaultWindAboveDraft(): ConfigDraftsState["alerts"]["wind_above"] {
+  return {
+    type: "WIND_ABOVE",
+    enabled: true,
+    minTimeMs: "20000",
+    severity: "WARNING",
+    defaultSilenceMs: "900000",
+    maxWindKn: "30",
+  };
+}
+
+function defaultDepthBelowDraft(): ConfigDraftsState["alerts"]["depth_below"] {
+  return {
+    type: "DEPTH_BELOW",
+    enabled: false,
+    minTimeMs: "10000",
+    severity: "ALARM",
+    defaultSilenceMs: "900000",
+    minDepthM: "2",
+  };
+}
+
+function defaultDataOutdatedDraft(): ConfigDraftsState["alerts"]["data_outdated"] {
+  return {
+    type: "DATA_OUTDATED",
+    enabled: true,
+    minTimeMs: "5000",
+    severity: "WARNING",
+    defaultSilenceMs: "900000",
+    maxAgeMs: "5000",
+  };
+}
+
 function defaultConfigDrafts(): ConfigDraftsState {
   return {
     anchor: {
-      autoModeMinForwardSogKn: "0.8",
-      autoModeStallMaxSogKn: "0.3",
-      autoModeReverseMinSogKn: "0.4",
-      autoModeConfirmSeconds: "20",
+      allowedRangeM: "35",
     },
     alerts: {
-      anchor_distance: {
-        id: "anchor_distance",
-        isEnabled: true,
-        minTimeMs: "20000",
-        severity: "ALARM",
-        maxDistanceM: "35",
-      },
-      boating_area: {
-        id: "boating_area",
-        isEnabled: true,
-        minTimeMs: "20000",
-        severity: "ALARM",
-        polygonPointsInput: "54.3194,10.1388\n54.3212,10.1388\n54.3212,10.1418\n54.3194,10.1418",
-      },
-      wind_strength: {
-        id: "wind_strength",
-        isEnabled: true,
-        minTimeMs: "20000",
-        severity: "WARNING",
-        maxTwsKn: "30.0",
-      },
-      depth: {
-        id: "depth",
-        isEnabled: false,
-        minTimeMs: "10000",
-        severity: "ALARM",
-        minDepthM: "2",
-      },
-      data_outdated: {
-        id: "data_outdated",
-        isEnabled: true,
-        minTimeMs: "5000",
-        severity: "WARNING",
-        minAgeMs: "5000",
-      },
+      anchor_distance: defaultAnchorDistanceDraft(),
+      obstacle_close: defaultObstacleCloseDraft(),
+      wind_above: defaultWindAboveDraft(),
+      depth_below: defaultDepthBelowDraft(),
+      data_outdated: defaultDataOutdatedDraft(),
+    },
+    obstacles: {
+      items: [],
     },
     profiles: {
+      version: null,
       mode: "auto",
       dayColorScheme: "full",
       dayBrightnessPct: "100",
@@ -136,6 +179,29 @@ function defaultConfigDrafts(): ConfigDraftsState {
       dayStartLocal: "07:00",
       nightStartLocal: "21:30",
     },
+    system: {
+      runtimeMode: "LIVE",
+    },
+  };
+}
+
+function defaultDeviceDataSlices(): DeviceDataSlices {
+  return {
+    position: null,
+    depth: null,
+    wind: null,
+    wlanStatus: null,
+    systemStatus: null,
+    anchorPosition: null,
+    alarmState: null,
+    alarmConfig: null,
+    obstaclesConfig: null,
+    anchorSettingsConfig: null,
+    profilesConfig: null,
+    systemConfig: null,
+    wlanConfig: null,
+    cloudConfig: null,
+    track: [],
   };
 }
 
@@ -144,8 +210,10 @@ function defaultNetworkState(): NetworkState {
     relayBaseUrlInput: "",
     wifiSsid: "",
     wifiPass: "",
+    cloudSecret: "",
     wifiSecurity: "wpa2",
     wifiCountry: "",
+    wifiHidden: false,
     wifiScanRequestId: "",
     wifiScanUpdatedAtMs: 0,
     wifiScanInFlight: false,
@@ -220,13 +288,12 @@ function defaultTrackState(): TrackUiState {
 }
 
 interface ExtendedConnectionState extends ConnectionState {
-  activeConnection: "fake" | "bluetooth" | "cloud-relay";
+  activeConnection: "bluetooth" | "cloud-relay";
   activeConnectionConnected: boolean;
 }
 
 function defaultConnectionState(): ExtendedConnectionState {
   return {
-    mode: loadMode(),
     runtimeMode: loadConnectionRuntimeMode(),
     appState: "UNCONFIGURED",
     bleSupported: false,
@@ -236,7 +303,7 @@ function defaultConnectionState(): ExtendedConnectionState {
     relayResult: "No request yet.",
     connectedDeviceName: "",
     hasConfiguredDevice: false,
-    activeConnection: "fake" as "fake" | "bluetooth" | "cloud-relay",
+    activeConnection: "cloud-relay",
     activeConnectionConnected: false,
   };
 }
@@ -246,11 +313,12 @@ export const appState = $state({
     bootMs: performance.now(),
     lastBleMessageAtMs: 0,
   } as RuntimeState,
-  latestState: {} as JsonRecord,
-  latestStateSource: "--" as InboundSource | "--",
-  latestStateUpdatedAtMs: 0,
+  deviceData: defaultDeviceDataSlices(),
+  latestSource: "--" as InboundSource | "--",
+  latestUpdatedAtMs: 0,
   ble: {
     connected: false,
+    phase: "disconnected",
     deviceName: "",
     authState: null,
   } as BleUiState,
@@ -262,7 +330,13 @@ export const appState = $state({
   network: defaultNetworkState(),
   navigation: defaultNavigationState(),
   notifications: defaultNotificationState(),
+  toast: {
+    opened: false,
+    message: "",
+    serial: 0,
+  } as ToastUiState,
   configDrafts: defaultConfigDrafts(),
+  debugMessageLimit: 1000 as DebugMessageLimit,
   logLines: [] as string[],
   debugMessages: [] as DebugMessageEntry[],
 });
@@ -274,25 +348,26 @@ export function initAppStateEnvironment(hasBluetooth: boolean, hasMaptilerKey: b
   appState.maptilerStatusText = hasMaptilerKey ? "Map ready state pending." : "MapTiler token missing.";
   refreshIdentityUi();
   appState.network.wifiSecurity = "wpa2";
+  appState.network.cloudSecret = getCloudSecret();
   appState.network.relayBaseUrlInput = getRelayBaseUrl();
   setSummarySource("--");
 }
 
 function computeConfiguredDeviceState(): boolean {
-  return hasConfiguredDevice(getBoatId(), getBoatSecret(), hasConnectedViaBleOnce());
+  return hasConfiguredDevice(getBoatId(), getBleConnectionPin(), getCloudSecret(), hasConnectedViaBleOnce());
 }
 
-export function readCloudCredentialFields(): { base: string; boatId: string; boatSecret: string } {
+export function readCloudCredentialFields(): { base: string; boatId: string; cloudSecret: string } {
   return {
     base: getRelayBaseUrl(),
     boatId: getBoatId(),
-    boatSecret: getBoatSecret(),
+    cloudSecret: getCloudSecret(),
   };
 }
 
-export function readCloudCredentials(): { base: string; boatId: string; boatSecret: string } | null {
+export function readCloudCredentials(): { base: string; boatId: string; cloudSecret: string } | null {
   const credentials = readCloudCredentialFields();
-  if (!hasCloudCredentialsConfigured(credentials.base, credentials.boatId, credentials.boatSecret)) {
+  if (!hasCloudCredentialsConfigured(credentials.base, credentials.boatId, credentials.cloudSecret)) {
     return null;
   }
   return credentials;
@@ -300,10 +375,11 @@ export function readCloudCredentials(): { base: string; boatId: string; boatSecr
 
 export function refreshIdentityUi(): void {
   const boatId = getBoatId();
-  const boatSecret = getBoatSecret();
+  const cloudSecret = getCloudSecret();
   appState.connection.hasConfiguredDevice = computeConfiguredDeviceState();
   appState.connection.boatIdText = boatId || "--";
-  appState.connection.secretStatusText = maskSecret(boatSecret);
+  appState.connection.secretStatusText = maskSecret(cloudSecret);
+  appState.network.cloudSecret = cloudSecret;
   appState.network.relayBaseUrlInput = getRelayBaseUrl();
 }
 
@@ -312,19 +388,17 @@ export function setBoatId(value: string): void {
   refreshIdentityUi();
 }
 
-export function setBoatSecret(secret: string): void {
-  setBoatSecretStored(secret);
+export function setBleConnectionPin(secret: string): void {
+  setBleConnectionPinStored(secret);
   refreshIdentityUi();
 }
 
-export function applyMode(mode: "fake" | "device", persist = true): void {
-  appState.connection.mode = mode;
-  if (persist) {
-    setModeStored(mode);
-  }
+export function setCloudSecret(secret: string): void {
+  setCloudSecretStored(secret);
+  refreshIdentityUi();
 }
 
-export function setActiveConnection(kind: "fake" | "bluetooth" | "cloud-relay"): void {
+export function setActiveConnection(kind: "bluetooth" | "cloud-relay"): void {
   appState.connection.activeConnection = kind;
   appState.connection.activeConnectionConnected = false;
 }
@@ -340,8 +414,9 @@ export function setActiveConnectionConnected(connected: boolean): void {
   appState.connection.activeConnectionConnected = connected;
 }
 
-export function setBleConnectionState(connected: boolean, deviceName = ""): void {
+export function setBleConnectionState(connected: boolean, deviceName = "", phase: DeviceConnectionPhase = connected ? "connected" : "disconnected"): void {
   appState.ble.connected = connected;
+  appState.ble.phase = phase;
   appState.ble.deviceName = deviceName;
 }
 
@@ -365,53 +440,41 @@ export function setSummarySource(text: string): void {
 export function setTelemetry(gpsAgeS: number, dataAgeS: number, depthM: number, windKn: number): void {
   appState.summary.gpsAgeText = `${Math.max(0, Math.round(gpsAgeS))}s`;
   appState.summary.dataAgeText = `${Math.max(0, Math.round(dataAgeS))}s`;
-  appState.summary.depthText = `${depthM.toFixed(1)} m`;
-  appState.summary.windText = `${windKn.toFixed(1)} kn`;
+  appState.summary.depthText = Number.isFinite(depthM) ? `${depthM.toFixed(1)} m` : "--";
+  appState.summary.windText = Number.isFinite(windKn) ? `${windKn.toFixed(1)} kn` : "--";
 }
 
-export function applyStateSnapshot(snapshot: unknown, source: InboundSource): void {
-  if (!isObject(snapshot)) {
-    return;
-  }
-  appState.latestState = snapshot;
-  appState.latestStateSource = source;
-  appState.latestStateUpdatedAtMs = Date.now();
-}
-
-export function applyStatePatch(rawPatch: unknown, source: InboundSource): void {
-  const patch = normalizePatch(rawPatch);
-  if (!patch) {
-    return;
-  }
-  appState.latestState = deepMerge(appState.latestState, patch);
-  appState.latestStateSource = source;
-  appState.latestStateUpdatedAtMs = Date.now();
+export function setLatestInbound(source: InboundSource): void {
+  appState.latestSource = source;
+  appState.latestUpdatedAtMs = Date.now();
 }
 
 export function resetLiveDataState(): void {
-  appState.latestState = {};
-  appState.latestStateSource = "--";
-  appState.latestStateUpdatedAtMs = 0;
+  appState.deviceData = defaultDeviceDataSlices();
+  appState.latestSource = "--";
+  appState.latestUpdatedAtMs = 0;
+  appState.versions.firmware = "--";
+  appState.network.onboardingWifiSsid = "--";
+  appState.network.onboardingWifiConnected = false;
+  appState.network.onboardingWifiRssiText = "--";
+  appState.network.onboardingWifiErrorText = "";
+  appState.network.onboardingWifiStateText = "Waiting for Wi-Fi status...";
+  appState.network.availableWifiNetworks = [];
+  appState.network.selectedWifiNetwork = null;
+  appState.network.selectedWifiSsid = "";
+  appState.summary = defaultSummaryState();
+  appState.track = defaultTrackState();
+}
 
-  appState.summary.gpsAgeText = "--";
-  appState.summary.dataAgeText = "--";
-  appState.summary.depthText = "--";
-  appState.summary.windText = "--";
-  appState.summary.statePillText = "BOOT";
-  appState.summary.statePillClass = "ok";
-  appState.summary.stateSourceText = "Source: --";
+export function showErrorToast(message: string): void {
+  const normalized = message.trim();
+  appState.toast.message = normalized || "Something failed.";
+  appState.toast.opened = true;
+  appState.toast.serial += 1;
+}
 
-  appState.track.points = [];
-  appState.track.statusText = "No track yet";
-  appState.track.currentLatText = "--";
-  appState.track.currentLonText = "--";
-  appState.track.currentSogText = "--";
-  appState.track.currentCogText = "--";
-  appState.track.currentHeadingText = "--";
-  appState.track.radarTargetX = 110;
-  appState.track.radarTargetY = 110;
-  appState.track.radarDistanceText = "--";
-  appState.track.radarBearingText = "--";
+export function closeErrorToast(): void {
+  appState.toast.opened = false;
 }
 
 function applyTrackDerived(points: TrackPoint[]): void {
@@ -430,8 +493,9 @@ function applyTrackDerived(points: TrackPoint[]): void {
   appState.track.statusText = trackSummary.statusText;
 }
 
-function applyLiveTrackPoint(point: TrackPoint | null): void {
-  if (!point) {
+function syncCurrentBoatDataFromPosition(): void {
+  const position = appState.deviceData.position;
+  if (!position || !position.valid) {
     appState.track.currentLatText = "--";
     appState.track.currentLonText = "--";
     appState.track.currentSogText = "--";
@@ -439,55 +503,275 @@ function applyLiveTrackPoint(point: TrackPoint | null): void {
     appState.track.currentHeadingText = "--";
     return;
   }
-
-  appState.track.currentLatText = point.lat.toFixed(5);
-  appState.track.currentLonText = point.lon.toFixed(5);
-  appState.track.currentSogText = `${point.sogKn.toFixed(2)} kn`;
-  appState.track.currentCogText = `${point.cogDeg.toFixed(0)} deg`;
-  appState.track.currentHeadingText = `${point.headingDeg.toFixed(0)} deg`;
+  appState.track.currentLatText = position.lat.toFixed(5);
+  appState.track.currentLonText = position.lon.toFixed(5);
+  appState.track.currentSogText = `${position.sog_kn.toFixed(2)} kn`;
+  appState.track.currentCogText = `${position.cog_deg.toFixed(0)} deg`;
+  appState.track.currentHeadingText = `${position.heading_deg.toFixed(0)} deg`;
 }
 
 export function appendTrackPoint(point: TrackPoint): void {
-  const previous = appState.track.points[appState.track.points.length - 1];
-  if (previous && Math.abs(previous.lat - point.lat) < 0.000001 && Math.abs(previous.lon - point.lon) < 0.000001) {
+  const previous = appState.deviceData.track[appState.deviceData.track.length - 1];
+  if (
+    previous
+    && Math.abs(previous.lat - point.lat) < 0.000001
+    && Math.abs(previous.lon - point.lon) < 0.000001
+    && Math.abs(previous.ts - point.ts) < 1000
+  ) {
     return;
   }
-  appState.track.points = [...appState.track.points, point].slice(-TRACK_MAX_POINTS);
-  applyTrackDerived(appState.track.points);
+
+  appState.deviceData.track = [...appState.deviceData.track, point].slice(-TRACK_MAX_POINTS);
+  appState.track.points = appState.deviceData.track;
+  applyTrackDerived(appState.deviceData.track);
 }
 
 export function replaceTrackPoints(points: TrackPoint[]): void {
-  appState.track.points = points.slice(-TRACK_MAX_POINTS);
-  applyTrackDerived(appState.track.points);
+  appState.deviceData.track = points.slice(-TRACK_MAX_POINTS);
+  appState.track.points = appState.deviceData.track;
+  applyTrackDerived(appState.deviceData.track);
 }
 
-export function renderTelemetryFromLatestState(): void {
-  const telemetry = deriveTelemetry(appState.latestState, Date.now());
-  setTelemetry(telemetry.gpsAgeS, telemetry.dataAgeS, telemetry.depthM, telemetry.windKn);
-  applyLiveTrackPoint(telemetry.trackPoint ?? null);
-  const anchorStatus = readAnchorStatus(appState.latestState);
-  if (telemetry.trackPoint && anchorStatus.state === "down") {
-    appendTrackPoint(telemetry.trackPoint);
+export function upsertWifiScanNetwork(network: WifiScanNetwork): void {
+  const withoutCurrent = appState.network.availableWifiNetworks.filter((candidate) => candidate.ssid !== network.ssid);
+  appState.network.availableWifiNetworks = [...withoutCurrent, network].sort((left, right) => {
+    const leftRssi = left.rssi ?? -999;
+    const rightRssi = right.rssi ?? -999;
+    if (leftRssi !== rightRssi) {
+      return rightRssi - leftRssi;
+    }
+    return left.ssid.localeCompare(right.ssid);
+  });
+  appState.network.selectedWifiNetwork =
+    appState.network.availableWifiNetworks.find((candidate) => candidate.ssid === appState.network.selectedWifiSsid) ?? null;
+}
+
+function currentDataAgeSeconds(): number {
+  const now = Date.now();
+  const ages: number[] = [];
+
+  if (appState.deviceData.position) {
+    ages.push(Math.max(0, appState.deviceData.position.gps_age_ms / 1000));
   }
+  if (appState.deviceData.depth) {
+    ages.push(Math.max(0, (now - appState.deviceData.depth.ts) / 1000));
+  }
+  if (appState.deviceData.wind) {
+    ages.push(Math.max(0, (now - appState.deviceData.wind.ts) / 1000));
+  }
+  if (!ages.length) {
+    return Math.floor((performance.now() - appState.runtime.bootMs) / 1000);
+  }
+  return Math.max(...ages);
 }
 
-export function applyFakeTelemetryTick(gpsAgeS: number, dataAgeS: number, depthM: number, windKn: number, trackPoint: TrackPoint): void {
-  setTelemetry(gpsAgeS, dataAgeS, depthM, windKn);
-  appendTrackPoint(trackPoint);
-}
+export function refreshDerivedDeviceState(): void {
+  const position = appState.deviceData.position;
+  const depth = appState.deviceData.depth;
+  const wind = appState.deviceData.wind;
+  const systemStatus = appState.deviceData.systemStatus;
+  const wlanStatus = appState.deviceData.wlanStatus;
 
-export function applyWifiScanNetworks(networks: WifiScanNetwork[]): void {
-  appState.network.availableWifiNetworks = networks;
-  if (!networks.some((wifiNetwork) => wifiNetwork.ssid === appState.network.selectedWifiSsid)) {
-    appState.network.selectedWifiSsid = "";
+  if (position) {
+    setTelemetry(
+      Math.max(0, position.gps_age_ms / 1000),
+      currentDataAgeSeconds(),
+      depth?.depth_m ?? Number.NaN,
+      wind?.wind_kn ?? Number.NaN,
+    );
+  } else {
+    const ageS = Math.floor((performance.now() - appState.runtime.bootMs) / 1000);
+    setTelemetry(ageS, ageS, Number.NaN, Number.NaN);
   }
 
-  if (appState.network.wifiSsid && !appState.network.selectedWifiSsid) {
-    const match = networks.find((wifiNetwork) => wifiNetwork.ssid === appState.network.wifiSsid);
-    if (match) {
-      appState.network.selectedWifiSsid = match.ssid;
+  appState.network.onboardingWifiConnected = wlanStatus?.wifi_connected === true;
+  appState.network.onboardingWifiSsid = wlanStatus?.wifi_ssid?.trim() || "--";
+  appState.network.onboardingWifiRssiText = wlanStatus?.wifi_rssi === null || wlanStatus?.wifi_rssi === undefined
+    ? "--"
+    : `${wlanStatus.wifi_rssi} dBm`;
+  appState.network.onboardingWifiErrorText = wlanStatus?.wifi_error ?? "";
+  if (wlanStatus?.wifi_connected) {
+    appState.network.onboardingWifiStateText = `Connected to ${appState.network.onboardingWifiSsid}`;
+  } else if (wlanStatus?.wifi_error) {
+    appState.network.onboardingWifiStateText = `Not connected (${wlanStatus.wifi_error})`;
+  } else if (wlanStatus) {
+    appState.network.onboardingWifiStateText = wlanStatus.wifi_state;
+  }
+
+  if (typeof systemStatus?.server_version === "string" && systemStatus.server_version.trim()) {
+    appState.versions.firmware = systemStatus.server_version.trim();
+  }
+
+  if (position && appState.deviceData.anchorPosition?.state === "down" && position.valid) {
+    appendTrackPoint({
+      ts: Date.now(),
+      lat: position.lat,
+      lon: position.lon,
+      sogKn: position.sog_kn,
+      cogDeg: position.cog_deg,
+      headingDeg: position.heading_deg,
+      depthM: depth?.depth_m ?? null,
+      windKn: wind?.wind_kn ?? null,
+      windDirDeg: wind?.wind_dir_deg ?? null,
+    });
+    return;
+  }
+
+  if (appState.deviceData.track.length === 0) {
+    applyTrackDerived([]);
+  }
+
+  syncCurrentBoatDataFromPosition();
+}
+
+function syncAlarmDrafts(entries: AlarmConfigEntry[]): void {
+  const defaults = defaultConfigDrafts().alerts;
+  appState.configDrafts.alerts.anchor_distance = defaults.anchor_distance;
+  appState.configDrafts.alerts.obstacle_close = defaults.obstacle_close;
+  appState.configDrafts.alerts.wind_above = defaults.wind_above;
+  appState.configDrafts.alerts.depth_below = defaults.depth_below;
+  appState.configDrafts.alerts.data_outdated = defaults.data_outdated;
+
+  for (const entry of entries) {
+    if (entry.type === "ANCHOR_DISTANCE") {
+      appState.configDrafts.alerts.anchor_distance = {
+        type: entry.type,
+        enabled: entry.enabled,
+        minTimeMs: String(entry.min_time_ms),
+        severity: entry.severity,
+        defaultSilenceMs: String(entry.default_silence_ms),
+        maxDistanceM: String(entry.data.max_distance_m),
+      };
+      continue;
+    }
+    if (entry.type === "OBSTACLE_CLOSE") {
+      appState.configDrafts.alerts.obstacle_close = {
+        type: entry.type,
+        enabled: entry.enabled,
+        minTimeMs: String(entry.min_time_ms),
+        severity: entry.severity,
+        defaultSilenceMs: String(entry.default_silence_ms),
+        minDistanceM: String(entry.data.min_distance_m),
+      };
+      continue;
+    }
+    if (entry.type === "WIND_ABOVE") {
+      appState.configDrafts.alerts.wind_above = {
+        type: entry.type,
+        enabled: entry.enabled,
+        minTimeMs: String(entry.min_time_ms),
+        severity: entry.severity,
+        defaultSilenceMs: String(entry.default_silence_ms),
+        maxWindKn: String(entry.data.max_wind_kn),
+      };
+      continue;
+    }
+    if (entry.type === "DEPTH_BELOW") {
+      appState.configDrafts.alerts.depth_below = {
+        type: entry.type,
+        enabled: entry.enabled,
+        minTimeMs: String(entry.min_time_ms),
+        severity: entry.severity,
+        defaultSilenceMs: String(entry.default_silence_ms),
+        minDepthM: String(entry.data.min_depth_m),
+      };
+      continue;
+    }
+    if (entry.type === "DATA_OUTDATED") {
+      appState.configDrafts.alerts.data_outdated = {
+        type: entry.type,
+        enabled: entry.enabled,
+        minTimeMs: String(entry.min_time_ms),
+        severity: entry.severity,
+        defaultSilenceMs: String(entry.default_silence_ms),
+        maxAgeMs: String(entry.data.max_age_ms),
+      };
     }
   }
+}
+
+function syncObstaclesDraft(config: ObstaclesConfigValue): void {
+  appState.configDrafts.obstacles.items = config.obstacles.map((obstacle) => ({
+    obstacle_id: obstacle.obstacle_id,
+    type: obstacle.type,
+    polygonInput: obstacle.polygon.map((point) => `${point.lat},${point.lon}`).join("\n"),
+  }));
+}
+
+function syncProfilesDraft(config: ProfilesConfigValue): void {
+  appState.configDrafts.profiles.version = config.version;
+  appState.configDrafts.profiles.mode = config.mode === "manual" ? "manual" : "auto";
+  appState.configDrafts.profiles.dayColorScheme = config.day.color_scheme === "red" || config.day.color_scheme === "blue" ? config.day.color_scheme : "full";
+  appState.configDrafts.profiles.dayBrightnessPct = String(config.day.brightness_pct ?? "100");
+  appState.configDrafts.profiles.dayOutputProfile = String(config.day.output_profile ?? "normal");
+  appState.configDrafts.profiles.nightColorScheme = config.night.color_scheme === "full" || config.night.color_scheme === "blue" ? config.night.color_scheme : "red";
+  appState.configDrafts.profiles.nightBrightnessPct = String(config.night.brightness_pct ?? "20");
+  appState.configDrafts.profiles.nightOutputProfile = String(config.night.output_profile ?? "night");
+  appState.configDrafts.profiles.autoSwitchSource = config.auto_switch.source === "sun" ? "sun" : "time";
+  appState.configDrafts.profiles.dayStartLocal = String(config.auto_switch.day_start_local ?? "07:00");
+  appState.configDrafts.profiles.nightStartLocal = String(config.auto_switch.night_start_local ?? "21:30");
+}
+
+function syncWlanConfig(config: WlanConfigValue): void {
+  appState.network.wifiSsid = config.ssid;
+  appState.network.wifiPass = config.passphrase;
+  appState.network.wifiSecurity = config.security;
+  appState.network.wifiCountry = config.country;
+  appState.network.wifiHidden = config.hidden;
+}
+
+function syncSystemConfig(config: SystemConfigValue): void {
+  appState.configDrafts.system.runtimeMode = config.runtime_mode;
+}
+
+function syncAnchorSettings(): void {
+  appState.configDrafts.anchor.allowedRangeM = appState.deviceData.anchorSettingsConfig?.allowed_range_m === null
+    ? ""
+    : String(appState.deviceData.anchorSettingsConfig?.allowed_range_m ?? "");
+}
+
+export function setAlarmConfig(config: DeviceDataSlices["alarmConfig"]): void {
+  appState.deviceData.alarmConfig = config;
+  if (config) {
+    syncAlarmDrafts(config.alerts);
+  }
+}
+
+export function setObstaclesConfig(config: ObstaclesConfigValue | null): void {
+  appState.deviceData.obstaclesConfig = config;
+  if (config) {
+    syncObstaclesDraft(config);
+  }
+}
+
+export function setProfilesConfig(config: ProfilesConfigValue | null): void {
+  appState.deviceData.profilesConfig = config;
+  if (config) {
+    syncProfilesDraft(config);
+  }
+}
+
+export function setSystemConfig(config: SystemConfigValue | null): void {
+  appState.deviceData.systemConfig = config;
+  if (config) {
+    syncSystemConfig(config);
+  }
+}
+
+export function setWlanConfig(config: WlanConfigValue | null): void {
+  appState.deviceData.wlanConfig = config;
+  if (config) {
+    syncWlanConfig(config);
+  }
+}
+
+export function setCloudConfig(config: CloudConfigValue | null): void {
+  appState.deviceData.cloudConfig = config;
+}
+
+export function setAnchorSettingsConfig(config: DeviceDataSlices["anchorSettingsConfig"]): void {
+  appState.deviceData.anchorSettingsConfig = config;
+  syncAnchorSettings();
 }
 
 export function logLine(message: string): void {
@@ -510,6 +794,13 @@ function debugMessageBody(value: unknown): string {
   }
 }
 
+function pruneDebugMessagesToLimit(limit: DebugMessageLimit): void {
+  if (limit === "unlimited") {
+    return;
+  }
+  appState.debugMessages = appState.debugMessages.slice(0, limit);
+}
+
 export function appendDebugMessage(input: {
   direction: DebugMessageDirection;
   route: DebugMessageRoute;
@@ -525,6 +816,12 @@ export function appendDebugMessage(input: {
     body: debugMessageBody(input.body),
   };
   appState.debugMessages = [entry, ...appState.debugMessages];
+  pruneDebugMessagesToLimit(appState.debugMessageLimit);
+}
+
+export function setDebugMessageLimit(limit: DebugMessageLimit): void {
+  appState.debugMessageLimit = limit;
+  pruneDebugMessagesToLimit(limit);
 }
 
 export function initAppStateEffects(): void {
@@ -533,8 +830,6 @@ export function initAppStateEffects(): void {
 
 refreshIdentityUi();
 ensurePhoneId();
-if (appState.connection.mode !== MODE_FAKE) {
-  appState.connection.activeConnection = appState.connection.runtimeMode === CONNECTION_RUNTIME_MODE_REMOTE
-    ? "cloud-relay"
-    : "bluetooth";
-}
+appState.connection.activeConnection = appState.connection.runtimeMode === CONNECTION_RUNTIME_MODE_REMOTE
+  ? "cloud-relay"
+  : "bluetooth";

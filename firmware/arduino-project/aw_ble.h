@@ -18,12 +18,13 @@ class BleTransport {
 
   BleTransport();
 
-  void begin(const String& device_name, BleTransportListener* listener);
+  bool begin(const String& device_name, BleTransportListener* listener);
   void loop(unsigned long now_ms);
   bool sendJson(const String& json);
   void setAuthValue(const String& value);
   void setSnapshotValue(const String& value);
   bool isConnected() const;
+  bool isReady() const;
 
  private:
   Impl* impl_;

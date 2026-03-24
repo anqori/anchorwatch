@@ -2,6 +2,7 @@ build/
 .wrangler/
 node_modules/
 .env.secret
+.tools/
 
 # Node/npm/pnpm/yarn logs
 npm-debug.log*

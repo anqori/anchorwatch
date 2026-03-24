@@ -1,27 +1,33 @@
-export type Mode = "fake" | "device";
 export type ConnectionRuntimeMode = "onboard" | "remote";
 export type AppConnectivityState = "UNCONFIGURED" | "CONFIGURED_BUT_UNCONNECTED" | "CONNECTED";
-export type InboundSource = "ble/eventRx" | "ble/snapshot" | "cloud/stream" | "fake/snapshot";
+export type InboundSource = "ble/eventRx" | "cloud/stream";
 export type DebugMessageDirection = "incoming" | "outgoing";
-export type DebugMessageRoute = "ble" | "relay" | "simulation";
+export type DebugMessageRoute = "ble" | "relay";
 export type PillClass = "ok" | "warn" | "alarm";
 export type ViewId = "summary" | "satellite" | "map" | "radar" | "config";
-export type ConfigSectionId = "device" | "internet" | "connection" | "anchor" | "alerts" | "profiles" | "debugging" | "information";
-export type ConfigViewId = "settings" | ConfigSectionId | "device_manual";
+export type ConfigSectionId =
+  | "device"
+  | "internet"
+  | "connection"
+  | "anchor"
+  | "alerts"
+  | "obstacles"
+  | "profiles"
+  | "debugging"
+  | "information";
+export type ConfigViewId = "settings" | ConfigSectionId | "device_manual" | "device_onboarding";
 export type ProfileMode = "manual" | "auto";
 export type ColorScheme = "full" | "red" | "blue";
 export type AutoSwitchSource = "time" | "sun";
 export type WifiSecurity = "open" | "wpa2" | "wpa3" | "unknown";
 export type AnchorRuntimeState = "up" | "down" | "auto-pending";
 export type AlertSeverity = "WARNING" | "ALARM";
-export type AlertRuntimeState = "DISABLED" | "WATCHING" | "TRIGGERED" | "ALERT" | "ALERT_SILENCED";
-export type AlertId = "anchor_distance" | "boating_area" | "wind_strength" | "depth" | "data_outdated";
-export type AlertConfigDraft =
-  | AnchorDistanceAlertConfigDraft
-  | BoatingAreaAlertConfigDraft
-  | WindStrengthAlertConfigDraft
-  | DepthAlertConfigDraft
-  | DataOutdatedAlertConfigDraft;
+export type AlertRuntimeState = "DISABLED" | "WATCHING" | "ALERT";
+export type AlertType = "ANCHOR_DISTANCE" | "OBSTACLE_CLOSE" | "WIND_ABOVE" | "DEPTH_BELOW" | "DATA_OUTDATED";
+export type ObstacleType = "PERMANENT" | "TEMPORARY";
+export type RuntimeMode = "LIVE" | "SIMULATION";
+
+export type JsonRecord = Record<string, unknown>;
 
 export interface ConfigSectionStatusItem {
   id: ConfigSectionId;
@@ -32,7 +38,6 @@ export interface ConfigSectionStatusItem {
 }
 
 export interface ConnectionState {
-  mode: Mode;
   runtimeMode: ConnectionRuntimeMode;
   appState: AppConnectivityState;
   bleSupported: boolean;
@@ -54,8 +59,10 @@ export interface NetworkState {
   relayBaseUrlInput: string;
   wifiSsid: string;
   wifiPass: string;
+  cloudSecret: string;
   wifiSecurity: WifiSecurity;
   wifiCountry: string;
+  wifiHidden: boolean;
   wifiScanRequestId: string;
   wifiScanUpdatedAtMs: number;
   wifiScanInFlight: boolean;
@@ -89,52 +96,69 @@ export interface NotificationState {
 }
 
 export interface AnchorConfigDraftState {
-  autoModeMinForwardSogKn: string;
-  autoModeStallMaxSogKn: string;
-  autoModeReverseMinSogKn: string;
-  autoModeConfirmSeconds: string;
+  allowedRangeM: string;
 }
 
 export interface AlertConfigDraftCommon {
-  isEnabled: boolean;
+  type: AlertType;
+  enabled: boolean;
   minTimeMs: string;
   severity: AlertSeverity;
+  defaultSilenceMs: string;
 }
 
 export interface AnchorDistanceAlertConfigDraft extends AlertConfigDraftCommon {
-  id: "anchor_distance";
+  type: "ANCHOR_DISTANCE";
   maxDistanceM: string;
 }
 
-export interface BoatingAreaAlertConfigDraft extends AlertConfigDraftCommon {
-  id: "boating_area";
-  polygonPointsInput: string;
+export interface ObstacleCloseAlertConfigDraft extends AlertConfigDraftCommon {
+  type: "OBSTACLE_CLOSE";
+  minDistanceM: string;
 }
 
-export interface WindStrengthAlertConfigDraft extends AlertConfigDraftCommon {
-  id: "wind_strength";
-  maxTwsKn: string;
+export interface WindAboveAlertConfigDraft extends AlertConfigDraftCommon {
+  type: "WIND_ABOVE";
+  maxWindKn: string;
 }
 
-export interface DepthAlertConfigDraft extends AlertConfigDraftCommon {
-  id: "depth";
+export interface DepthBelowAlertConfigDraft extends AlertConfigDraftCommon {
+  type: "DEPTH_BELOW";
   minDepthM: string;
 }
 
 export interface DataOutdatedAlertConfigDraft extends AlertConfigDraftCommon {
-  id: "data_outdated";
-  minAgeMs: string;
+  type: "DATA_OUTDATED";
+  maxAgeMs: string;
 }
+
+export type AlertConfigDraft =
+  | AnchorDistanceAlertConfigDraft
+  | ObstacleCloseAlertConfigDraft
+  | WindAboveAlertConfigDraft
+  | DepthBelowAlertConfigDraft
+  | DataOutdatedAlertConfigDraft;
 
 export interface AlertsConfigDraftState {
   anchor_distance: AnchorDistanceAlertConfigDraft;
-  boating_area: BoatingAreaAlertConfigDraft;
-  wind_strength: WindStrengthAlertConfigDraft;
-  depth: DepthAlertConfigDraft;
+  obstacle_close: ObstacleCloseAlertConfigDraft;
+  wind_above: WindAboveAlertConfigDraft;
+  depth_below: DepthBelowAlertConfigDraft;
   data_outdated: DataOutdatedAlertConfigDraft;
 }
 
+export interface ObstacleDraftEntry {
+  obstacle_id: string;
+  type: ObstacleType;
+  polygonInput: string;
+}
+
+export interface ObstaclesConfigDraftState {
+  items: ObstacleDraftEntry[];
+}
+
 export interface ProfilesConfigDraftState {
+  version: number | null;
   mode: ProfileMode;
   dayColorScheme: ColorScheme;
   dayBrightnessPct: string;
@@ -147,14 +171,20 @@ export interface ProfilesConfigDraftState {
   nightStartLocal: string;
 }
 
+export interface SystemConfigDraftState {
+  runtimeMode: RuntimeMode;
+}
+
 export interface ConfigDraftsState {
   anchor: AnchorConfigDraftState;
   alerts: AlertsConfigDraftState;
+  obstacles: ObstaclesConfigDraftState;
   profiles: ProfilesConfigDraftState;
+  system: SystemConfigDraftState;
 }
 
 export interface AlertRuntimeEntry {
-  id: AlertId;
+  alertType: AlertType;
   label: string;
   severity: AlertSeverity;
   state: AlertRuntimeState;
@@ -163,8 +193,6 @@ export interface AlertRuntimeEntry {
   alertSilencedUntilTs: number | null;
 }
 
-export type JsonRecord = Record<string, unknown>;
-
 export interface TrackPoint {
   ts: number;
   lat: number;
@@ -172,6 +200,9 @@ export interface TrackPoint {
   sogKn: number;
   cogDeg: number;
   headingDeg: number;
+  depthM: number | null;
+  windKn: number | null;
+  windDirDeg: number | null;
 }
 
 export interface WifiScanNetwork {
@@ -180,18 +211,6 @@ export interface WifiScanNetwork {
   rssi: number | null;
   channel: number | null;
   hidden: boolean;
-}
-
-export interface Envelope {
-  ver?: string;
-  msgType?: string;
-  msgId?: string;
-  boatId?: string;
-  deviceId?: string;
-  seq?: number;
-  ts?: number;
-  requiresAck?: boolean;
-  payload?: JsonRecord;
 }
 
 export interface PendingAck {
@@ -213,4 +232,183 @@ export interface DebugMessageEntry {
   route: DebugMessageRoute;
   msgType: string;
   body: string;
+}
+
+export type DebugMessageLimit = 1000 | 5000 | 10000 | "unlimited";
+
+export interface PositionValue {
+  lat: number;
+  lon: number;
+  gps_age_ms: number;
+  valid: boolean;
+  sog_kn: number;
+  cog_deg: number;
+  heading_deg: number;
+}
+
+export interface DepthValue {
+  depth_m: number;
+  ts: number;
+}
+
+export interface WindValue {
+  wind_kn: number;
+  wind_dir_deg: number;
+  ts: number;
+}
+
+export interface SystemStatusValue {
+  cloud_reachable: boolean;
+  server_version: string;
+}
+
+export interface WlanStatusValue {
+  wifi_state: "DISCONNECTED" | "CONNECTING" | "AUTHENTICATING" | "OBTAINING_IP" | "CONNECTED" | "FAILED";
+  wifi_connected: boolean;
+  wifi_ssid: string;
+  wifi_rssi: number | null;
+  wifi_error: string;
+}
+
+export interface AlertRuntime {
+  alert_type: AlertType;
+  state: AlertRuntimeState;
+  severity: AlertSeverity;
+  above_threshold_since_ts: number | null;
+  alert_since_ts: number | null;
+  alert_silenced_until_ts: number | null;
+}
+
+export interface AlarmStateValue {
+  alerts: AlertRuntime[];
+}
+
+export interface AnchorPositionValue {
+  state: AnchorRuntimeState;
+  lat: number | null;
+  lon: number | null;
+}
+
+export interface WlanConfigValue {
+  version: number;
+  ssid: string;
+  passphrase: string;
+  security: WifiSecurity;
+  country: string;
+  hidden: boolean;
+}
+
+export interface SystemConfigValue {
+  version: number;
+  runtime_mode: RuntimeMode;
+}
+
+export interface CloudConfigValue {
+  version: number;
+  boat_id: string;
+  cloud_secret: string;
+  secret_configured: boolean;
+}
+
+export interface ObstaclePoint {
+  lat: number;
+  lon: number;
+}
+
+export interface ObstaclePolygon {
+  obstacle_id: string;
+  type: ObstacleType;
+  polygon: ObstaclePoint[];
+}
+
+export interface ObstaclesConfigValue {
+  version: number;
+  obstacles: ObstaclePolygon[];
+}
+
+export interface AlarmConfigEntryBase {
+  type: AlertType;
+  enabled: boolean;
+  min_time_ms: number;
+  severity: AlertSeverity;
+  default_silence_ms: number;
+}
+
+export interface AnchorDistanceAlarmConfigEntry extends AlarmConfigEntryBase {
+  type: "ANCHOR_DISTANCE";
+  data: {
+    max_distance_m: number;
+  };
+}
+
+export interface ObstacleCloseAlarmConfigEntry extends AlarmConfigEntryBase {
+  type: "OBSTACLE_CLOSE";
+  data: {
+    min_distance_m: number;
+  };
+}
+
+export interface WindAboveAlarmConfigEntry extends AlarmConfigEntryBase {
+  type: "WIND_ABOVE";
+  data: {
+    max_wind_kn: number;
+  };
+}
+
+export interface DepthBelowAlarmConfigEntry extends AlarmConfigEntryBase {
+  type: "DEPTH_BELOW";
+  data: {
+    min_depth_m: number;
+  };
+}
+
+export interface DataOutdatedAlarmConfigEntry extends AlarmConfigEntryBase {
+  type: "DATA_OUTDATED";
+  data: {
+    max_age_ms: number;
+  };
+}
+
+export type AlarmConfigEntry =
+  | AnchorDistanceAlarmConfigEntry
+  | ObstacleCloseAlarmConfigEntry
+  | WindAboveAlarmConfigEntry
+  | DepthBelowAlarmConfigEntry
+  | DataOutdatedAlarmConfigEntry;
+
+export interface AlarmConfigValue {
+  version: number;
+  alerts: AlarmConfigEntry[];
+}
+
+export interface AnchorSettingsValue extends JsonRecord {
+  version: number;
+  allowed_range_m: number | null;
+  allowed_region: JsonRecord | null;
+}
+
+export interface ProfilesConfigValue extends JsonRecord {
+  version: number;
+  mode: ProfileMode;
+  day: JsonRecord;
+  night: JsonRecord;
+  auto_switch: JsonRecord;
+}
+
+export interface DeviceDataSlices {
+  position: PositionValue | null;
+  depth: DepthValue | null;
+  wind: WindValue | null;
+  wlanStatus: WlanStatusValue | null;
+  systemStatus: SystemStatusValue | null;
+  anchorPosition: AnchorPositionValue | null;
+  alarmState: AlarmStateValue | null;
+  alarmConfig: AlarmConfigValue | null;
+  obstaclesConfig: ObstaclesConfigValue | null;
+  anchorSettingsConfig: AnchorSettingsValue | null;
+  profilesConfig: ProfilesConfigValue | null;
+  systemConfig: SystemConfigValue | null;
+  wlanConfig: WlanConfigValue | null;
+  cloudConfig: CloudConfigValue | null;
+  track: TrackPoint[];
 }

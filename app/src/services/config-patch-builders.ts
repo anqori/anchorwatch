@@ -3,8 +3,11 @@ import type {
   AlertSeverity,
   AutoSwitchSource,
   ColorScheme,
-  JsonRecord,
+  ObstacleDraftEntry,
+  ObstacleType,
   ProfileMode,
+  RuntimeMode,
+  WifiSecurity,
 } from "../core/types";
 import {
   parseIntegerInput,
@@ -12,18 +15,23 @@ import {
   parsePolygonPoints,
 } from "./data-utils";
 
-export interface AnchorConfigInput {
-  autoModeMinForwardSogKn: string;
-  autoModeStallMaxSogKn: string;
-  autoModeReverseMinSogKn: string;
-  autoModeConfirmSeconds: string;
+export interface AnchorSettingsInput {
+  version: number;
+  allowedRangeM: string;
 }
 
-export interface AlertConfigInput {
+export interface AlarmConfigInput {
+  version: number;
   alerts: AlertConfigDraft[];
 }
 
+export interface ObstaclesConfigInput {
+  version: number;
+  items: ObstacleDraftEntry[];
+}
+
 export interface ProfilesConfigInput {
+  version: number;
   profilesMode: ProfileMode;
   profileDayColorScheme: ColorScheme;
   profileDayBrightnessPct: string;
@@ -36,70 +44,133 @@ export interface ProfilesConfigInput {
   profileNightStartLocal: string;
 }
 
-function buildAlertCommonFields(alert: AlertConfigDraft, defaultMinTimeMs: number, severity: AlertSeverity): JsonRecord {
+export interface SystemConfigInput {
+  version: number;
+  runtimeMode: RuntimeMode;
+}
+
+export interface WlanConfigInput {
+  version: number;
+  ssid: string;
+  passphrase: string;
+  security: WifiSecurity;
+  country: string;
+  hidden: boolean;
+}
+
+export interface CloudCredentialsInput {
+  version: number;
+  boatId: string;
+  cloudSecret: string;
+}
+
+export interface SetupAuthorizationInput {
+  factorySetupPin: string;
+}
+
+export interface BleSessionAuthorizationInput {
+  bleConnectionPin: string;
+}
+
+export interface SetInitialBlePinInput {
+  bleConnectionPin: string;
+}
+
+export interface UpdateBlePinInput {
+  oldBleConnectionPin: string;
+  newBleConnectionPin: string;
+}
+
+function buildAlertCommonFields(alert: AlertConfigDraft, defaultMinTimeMs: number, severity: AlertSeverity): {
+  enabled: boolean;
+  min_time_ms: number;
+  severity: AlertSeverity;
+  default_silence_ms: number;
+} {
   return {
-    is_enabled: alert.isEnabled,
+    enabled: alert.enabled,
     min_time_ms: parseIntegerInput(alert.minTimeMs, defaultMinTimeMs, 0, 600000),
     severity,
+    default_silence_ms: parseIntegerInput(alert.defaultSilenceMs, 900000, 0, 86400000),
   };
 }
 
-export function buildAnchorConfigPart(input: AnchorConfigInput): JsonRecord {
+export function buildAnchorSettingsConfig(input: AnchorSettingsInput) {
+  const allowedRange = input.allowedRangeM.trim();
   return {
-    auto_mode: {
-      min_forward_sog_kn: parseNumberInput(input.autoModeMinForwardSogKn, 0.8, 0, 20),
-      stall_max_sog_kn: parseNumberInput(input.autoModeStallMaxSogKn, 0.3, 0, 20),
-      reverse_min_sog_kn: parseNumberInput(input.autoModeReverseMinSogKn, 0.4, 0, 20),
-      confirm_seconds: parseIntegerInput(input.autoModeConfirmSeconds, 20, 1, 300),
-    },
+    version: input.version,
+    allowed_range_m: allowedRange ? parseNumberInput(allowedRange, 35, 0, 5000) : null,
+    allowed_region: null,
   };
 }
 
-export function buildAlertConfigPart(input: AlertConfigInput): JsonRecord {
-  const alarmConfig: JsonRecord = {};
-
-  for (const alert of input.alerts) {
-    if (alert.id === "anchor_distance") {
-      alarmConfig.anchor_distance = {
-        ...buildAlertCommonFields(alert, 20000, alert.severity),
-        max_distance_m: parseNumberInput(alert.maxDistanceM, 35, 0, 1000),
-      };
-      continue;
-    }
-    if (alert.id === "boating_area") {
-      alarmConfig.boating_area = {
-        ...buildAlertCommonFields(alert, 20000, alert.severity),
-        polygon: parsePolygonPoints(alert.polygonPointsInput),
-      };
-      continue;
-    }
-    if (alert.id === "wind_strength") {
-      alarmConfig.wind_strength = {
-        ...buildAlertCommonFields(alert, 20000, alert.severity),
-        max_tws: parseNumberInput(alert.maxTwsKn, 30, 0, 200),
-      };
-      continue;
-    }
-    if (alert.id === "depth") {
-      alarmConfig.depth = {
-        ...buildAlertCommonFields(alert, 10000, alert.severity),
-        min_depth: parseNumberInput(alert.minDepthM, 2, 0, 500),
-      };
-      continue;
-    }
-    if (alert.id === "data_outdated") {
-      alarmConfig.data_outdated = {
+export function buildAlarmConfig(input: AlarmConfigInput) {
+  return {
+    version: input.version,
+    alerts: input.alerts.map((alert) => {
+      if (alert.type === "ANCHOR_DISTANCE") {
+        return {
+          type: alert.type,
+          ...buildAlertCommonFields(alert, 20000, alert.severity),
+          data: {
+            max_distance_m: parseNumberInput(alert.maxDistanceM, 35, 0, 5000),
+          },
+        };
+      }
+      if (alert.type === "OBSTACLE_CLOSE") {
+        return {
+          type: alert.type,
+          ...buildAlertCommonFields(alert, 10000, alert.severity),
+          data: {
+            min_distance_m: parseNumberInput(alert.minDistanceM, 10, 0, 1000),
+          },
+        };
+      }
+      if (alert.type === "WIND_ABOVE") {
+        return {
+          type: alert.type,
+          ...buildAlertCommonFields(alert, 20000, alert.severity),
+          data: {
+            max_wind_kn: parseNumberInput(alert.maxWindKn, 30, 0, 200),
+          },
+        };
+      }
+      if (alert.type === "DEPTH_BELOW") {
+        return {
+          type: alert.type,
+          ...buildAlertCommonFields(alert, 10000, alert.severity),
+          data: {
+            min_depth_m: parseNumberInput(alert.minDepthM, 2, 0, 500),
+          },
+        };
+      }
+      return {
+        type: alert.type,
         ...buildAlertCommonFields(alert, 5000, alert.severity),
-        min_age: parseIntegerInput(alert.minAgeMs, 5000, 0, 600000),
+        data: {
+          max_age_ms: parseIntegerInput(alert.maxAgeMs, 5000, 0, 600000),
+        },
       };
-    }
-  }
-
-  return alarmConfig;
+    }),
+  };
 }
 
-export function buildProfilesConfigPart(input: ProfilesConfigInput): JsonRecord {
+export function buildObstaclesConfig(input: ObstaclesConfigInput) {
   return {
+    version: input.version,
+    obstacles: input.items
+      .map((item, index) => ({
+        obstacle_id: item.obstacle_id.trim() || `obstacle_${index + 1}`,
+        type: normalizeObstacleType(item.type),
+        polygon: parsePolygonPoints(item.polygonInput),
+      }))
+      .filter((item) => item.polygon.length >= 3),
+  };
+}
+
+export function buildProfilesConfig(input: ProfilesConfigInput) {
+  return {
+    version: input.version,
     mode: input.profilesMode,
     day: {
       color_scheme: input.profileDayColorScheme,
@@ -117,4 +188,59 @@ export function buildProfilesConfigPart(input: ProfilesConfigInput): JsonRecord 
       night_start_local: input.profileNightStartLocal,
     },
   };
+}
+
+export function buildSystemConfig(input: SystemConfigInput) {
+  return {
+    version: input.version,
+    runtime_mode: input.runtimeMode,
+  };
+}
+
+export function buildWlanConfig(input: WlanConfigInput) {
+  return {
+    version: input.version,
+    ssid: input.ssid.trim(),
+    passphrase: input.passphrase,
+    security: input.security === "unknown" ? "wpa2" : input.security,
+    country: input.country.trim().toUpperCase() || "DE",
+    hidden: input.hidden,
+  };
+}
+
+export function buildCloudCredentialsUpdate(input: CloudCredentialsInput) {
+  return {
+    version: input.version,
+    boat_id: input.boatId.trim(),
+    cloud_secret: input.cloudSecret.trim(),
+  };
+}
+
+export function buildAuthorizeSetupRequest(input: SetupAuthorizationInput) {
+  return {
+    factory_setup_pin: input.factorySetupPin.trim(),
+  };
+}
+
+export function buildAuthorizeBleSessionRequest(input: BleSessionAuthorizationInput) {
+  return {
+    ble_connection_pin: input.bleConnectionPin.trim(),
+  };
+}
+
+export function buildSetInitialBlePinRequest(input: SetInitialBlePinInput) {
+  return {
+    ble_connection_pin: input.bleConnectionPin.trim(),
+  };
+}
+
+export function buildUpdateBlePinRequest(input: UpdateBlePinInput) {
+  return {
+    old_ble_connection_pin: input.oldBleConnectionPin.trim(),
+    new_ble_connection_pin: input.newBleConnectionPin.trim(),
+  };
+}
+
+function normalizeObstacleType(type: ObstacleType): ObstacleType {
+  return type === "TEMPORARY" ? "TEMPORARY" : "PERMANENT";
 }

@@ -1,7 +1,9 @@
 # Anqori AnchorWatch Protocol v2
 
 Status: active  
-Date: 2026-03-24
+Date: 2026-03-25
+
+Related access lifecycle: [`docs/access-and-provisioning.md`](/home/pm/dev/anchormaster/docs/access-and-provisioning.md)
 
 ## Purpose
 
@@ -96,6 +98,8 @@ Rules:
 Runtime/config types:
 
 - `GET_DATA`
+- `AUTHORIZE_BLE_SESSION`
+- `SET_INITIAL_BLE_PIN`
 - `SET_ANCHOR`
 - `MOVE_ANCHOR`
 - `RAISE_ANCHOR`
@@ -108,11 +112,13 @@ Runtime/config types:
 - `UPDATE_CONFIG_SYSTEM`
 - `UPDATE_CONFIG_WLAN`
 - `UPDATE_CLOUD_CREDENTIALS`
+- `UPDATE_BLE_PIN`
+- `SCAN_WLAN`
 - `CANCEL`
 
 Onboarding types:
 
-- `SCAN_WLAN`
+- `AUTHORIZE_SETUP`
 
 ## Reply Type Catalog
 
@@ -147,15 +153,19 @@ Other reply types:
 Rules:
 
 1. Client sends one `GET_DATA` after connect.
-2. Server responds with a bootstrap sequence of `ONGOING` replies using the same `req_id`.
-3. Each bootstrap reply carries one current payload and uses a reply `type` that matches that payload shape, for example `STATE_POSITION`, `STATE_WIND`, `STATE_ANCHOR_POSITION`, or `TRACK_BACKFILL`.
-4. There is no dedicated snapshot container required by the protocol.
-5. The server should send the current known state/config values needed by the client and then any retained track backfill for the backfill window.
-6. Backfill starts at `min(last_anchor_down_ts, now - 30 minutes)`.
-7. If no anchor-down timestamp exists, backfill starts at `now - 30 minutes`.
-8. The server may split retained track backfill across multiple `TRACK_BACKFILL` replies.
-9. After bootstrap, the same request stays open and later replies continue streaming whole-value replacements and `TRACK_BACKFILL` messages.
-10. The request stays open until cancel, disconnect, or terminal error.
+2. `GET_DATA` is protected runtime access:
+   - on BLE it requires an authorized BLE session
+   - on cloud it requires an already authenticated cloud session
+   - in `SETUP_REQUIRED` or on an unauthorized BLE session it must fail instead of leaking runtime/config data
+3. Server responds with a bootstrap sequence of `ONGOING` replies using the same `req_id`.
+4. Each bootstrap reply carries one current payload and uses a reply `type` that matches that payload shape, for example `STATE_POSITION`, `STATE_WIND`, `STATE_ANCHOR_POSITION`, or `TRACK_BACKFILL`.
+5. There is no dedicated snapshot container required by the protocol.
+6. The server should send the current known state/config values needed by the client and then any retained track backfill for the backfill window.
+7. Backfill starts at `min(last_anchor_down_ts, now - 30 minutes)`.
+8. If no anchor-down timestamp exists, backfill starts at `now - 30 minutes`.
+9. The server may split retained track backfill across multiple `TRACK_BACKFILL` replies.
+10. After bootstrap, the same request stays open and later replies continue streaming whole-value replacements and `TRACK_BACKFILL` messages.
+11. The request stays open until cancel, disconnect, or terminal error.
 
 Server-side retention requirement behind this backfill:
 
@@ -175,8 +185,13 @@ Example request and bootstrap sequence:
 { "req_id": "01HZXJ0Q8J72E9K4N5P6R7S8T9", "state": "ONGOING", "type": "STATE_WLAN_STATUS", "data": { "wifi_state": "CONNECTED", "wifi_connected": true, "wifi_ssid": "Marina", "wifi_rssi": -63, "wifi_error": "" } }
 { "req_id": "01HZXJ0Q8J72E9K4N5P6R7S8T9", "state": "ONGOING", "type": "STATE_ANCHOR_POSITION", "data": { "state": "down", "lat": 54.3201, "lon": 10.1402 } }
 { "req_id": "01HZXJ0Q8J72E9K4N5P6R7S8T9", "state": "ONGOING", "type": "CONFIG_SYSTEM", "data": { "version": 2, "runtime_mode": "LIVE" } }
-{ "req_id": "01HZXJ0Q8J72E9K4N5P6R7S8T9", "state": "ONGOING", "type": "CONFIG_CLOUD", "data": { "version": 4, "boat_id": "BOAT_123", "secret_configured": true } }
 { "req_id": "01HZXJ0Q8J72E9K4N5P6R7S8T9", "state": "ONGOING", "type": "TRACK_BACKFILL", "data": [ { "ts": 1770897600000, "lat": 54.3201, "lon": 10.1402, "cog_deg": 192.3, "heading_deg": 188.0, "sog_kn": 0.42, "depth_m": 3.1, "wind_kn": 14.8, "wind_dir_deg": 205.0 } ] }
+```
+
+On an authorized BLE session, the bootstrap sequence may additionally include:
+
+```json
+{ "req_id": "01HZXJ0Q8J72E9K4N5P6R7S8T9", "state": "ONGOING", "type": "CONFIG_CLOUD", "data": { "version": 4, "boat_id": "BOAT_123", "cloud_secret": "cloud-secret", "secret_configured": true } }
 ```
 
 Example sequence updating range-related anchor settings:
@@ -217,7 +232,7 @@ Version matching is used for app-to-server config writes:
 
 - the app sends the full config DTO directly in `data`, including its current `version`
 - most config DTOs use one matching `UPDATE_CONFIG_*` request
-- `CONFIG_CLOUD` is the exception because the cloud secret is write-only and therefore uses `UPDATE_CLOUD_CREDENTIALS`
+- `CONFIG_CLOUD` is updated with `UPDATE_CLOUD_CREDENTIALS`
 - the server accepts the write only if that version matches the current authoritative version
 - on success the server increments the config DTO version and publishes the new full config DTO
 - on mismatch the server replies with `type: "ERROR"` and `CLOSED_FAILED`
@@ -488,6 +503,7 @@ Used as `data` when `type=CONFIG_CLOUD`.
 {
   "version": 4,
   "boat_id": "BOAT_123",
+  "cloud_secret": "cloud-secret",
   "secret_configured": true
 }
 ```
@@ -496,13 +512,15 @@ Fields:
 
 - `version`: config version used for credential update compare-and-swap writes
 - `boat_id`: cloud routing identifier for this boat
+- `cloud_secret`: current cloud relay secret
 - `secret_configured`: whether a cloud server credential is currently configured on the server
 
 Rules:
 
-- `CloudConfigValue` intentionally does not expose `boat_secret`
-- `boat_secret` is write-only in the protocol
-- the server must never emit `boat_secret` in `CONFIG_CLOUD`, `ACK`, `ERROR`, or any other reply payload
+- `CONFIG_CLOUD` may be emitted only to an authorized BLE session
+- `CONFIG_CLOUD` must not be emitted to unauthorized BLE sessions
+- `CONFIG_CLOUD` must not be emitted over cloud transport
+- the app should refresh its locally stored cloud secret whenever it receives `CONFIG_CLOUD` over an authorized BLE session
 
 ### `WlanNetworkValue`
 
@@ -933,13 +951,33 @@ Fields:
 - replaces `CONFIG_WLAN`
 - request `data` is the full WLAN config DTO
 
+`AUTHORIZE_BLE_SESSION`
+
+- authorizes the current BLE session using the current `ble_connection_pin`
+- used after the boat is already in `LOCAL_READY` or `CLOUD_READY`
+- required before protected BLE functionality on an unauthorized session
+
+`SET_INITIAL_BLE_PIN`
+
+- valid only while the boat is still in `SETUP_REQUIRED`
+- stores the first real per-boat BLE control pin
+- moves the boat into `LOCAL_READY`
+- authorizes the current BLE session on success
+
 `UPDATE_CLOUD_CREDENTIALS`
 
-- updates the server's cloud identity/credential pair
-- request `data` contains the current `version`, the desired `boat_id`, and the new `boat_secret`
+- updates cloud identity/config after local BLE setup already works
+- request `data` contains the current `CONFIG_CLOUD.version`, the desired `boat_id`, and the current `cloud_secret`
 - the server persists the new values atomically
-- on success the server increments `CONFIG_CLOUD.version` and publishes the new `CONFIG_CLOUD`
-- the server never echoes `boat_secret` back to the client
+- on success the server increments `CONFIG_CLOUD.version` and publishes the new readable `CONFIG_CLOUD`
+- this request is typically used from the WLAN/cloud-management flow, not from first setup
+
+`UPDATE_BLE_PIN`
+
+- rotates the current `ble_connection_pin`
+- request `data` contains the current `old_ble_connection_pin` and the desired `new_ble_connection_pin`
+- the server persists the new BLE pin atomically
+- existing BLE-authorized sessions must reauthorize after success
 
 For every `UPDATE_CONFIG_*` request:
 
@@ -956,7 +994,7 @@ Used as request `data` when `type=UPDATE_CLOUD_CREDENTIALS`.
 {
   "version": 4,
   "boat_id": "BOAT_123",
-  "boat_secret": "replace_me"
+  "cloud_secret": "replace_me"
 }
 ```
 
@@ -964,15 +1002,102 @@ Fields:
 
 - `version`: current `CONFIG_CLOUD.version`
 - `boat_id`: desired cloud routing identifier for this boat
-- `boat_secret`: new boat-scoped cloud credential
+- `cloud_secret`: cloud relay credential
 
 Rules:
 
-- both `boat_id` and `boat_secret` are required and must be non-empty
+- both `boat_id` and `cloud_secret` are required and must be non-empty
 - the server accepts the write only if `version` matches the current authoritative `CONFIG_CLOUD.version`
 - successful writes increment the stored cloud config version
 - the server publishes the updated readable `CONFIG_CLOUD` value after success
-- `boat_secret` is write-only and must never appear in any reply
+
+### `AuthorizeSetupRequest`
+
+Used as request `data` when `type=AUTHORIZE_SETUP`.
+
+```json
+{
+  "factory_setup_pin": "123456"
+}
+```
+
+Fields:
+
+- `factory_setup_pin`: shared BLE-only setup credential used only while the boat is still in setup state
+
+Rules:
+
+- this request is BLE-only
+- this request is valid only while the boat is in `SETUP_REQUIRED`
+- success authorizes the current BLE setup session
+- the shared factory setup PIN must never be accepted by the cloud relay for normal runtime access
+- after the boat has left `SETUP_REQUIRED`, this request must fail with `type: "ERROR"` and `data.code = "INVALID_STATE"`
+
+### `AuthorizeBleSessionRequest`
+
+Used as request `data` when `type=AUTHORIZE_BLE_SESSION`.
+
+```json
+{
+  "ble_connection_pin": "1234"
+}
+```
+
+Fields:
+
+- `ble_connection_pin`: current BLE control pin
+
+Rules:
+
+- this request authorizes the current BLE session
+- it is valid only when the boat is already in `LOCAL_READY` or `CLOUD_READY`
+- the server must never echo the supplied pin back in any reply
+
+### `SetInitialBlePinRequest`
+
+Used as request `data` when `type=SET_INITIAL_BLE_PIN`.
+
+```json
+{
+  "ble_connection_pin": "1234"
+}
+```
+
+Fields:
+
+- `ble_connection_pin`: first real per-boat BLE control pin
+
+Rules:
+
+- this request is valid only while the boat is still in `SETUP_REQUIRED`
+- this request is BLE-only
+- it requires prior `AUTHORIZE_SETUP`
+- on success the boat becomes `LOCAL_READY`
+- the current BLE session becomes authorized
+- after the boat has left `SETUP_REQUIRED`, this request must fail with `type: "ERROR"` and `data.code = "INVALID_STATE"`
+
+### `UpdateBlePinRequest`
+
+Used as request `data` when `type=UPDATE_BLE_PIN`.
+
+```json
+{
+  "old_ble_connection_pin": "old-pin",
+  "new_ble_connection_pin": "new-pin"
+}
+```
+
+Fields:
+
+- `old_ble_connection_pin`: current BLE control pin
+- `new_ble_connection_pin`: desired replacement BLE control pin
+
+Rules:
+
+- this request is valid only on an already authorized BLE session
+- both pin values are required and must be non-empty
+- the supplied `old_ble_connection_pin` must match the current authoritative BLE control pin
+- existing BLE-authorized sessions must be invalidated after success
 
 Example:
 
@@ -1007,12 +1132,15 @@ Example:
 `SCAN_WLAN`
 
 - streaming request
+- BLE-only request
+- valid only after local setup, on an already authorized BLE session
 - emits one discovered network at a time as `type: "WLAN_NETWORK"`
 - ends with `type: "ACK"` and `state: "CLOSED_OK"` when the scan is complete
 - the app shows incremental results while the request is open
 - if the app leaves the scan view early, it cancels the request with `CANCEL`
 - only one active `SCAN_WLAN` operation is allowed on the server at a time
 - if another scan is already active, the new request fails with `type: "ERROR"` and `state: "CLOSED_FAILED"`
+- `SCAN_WLAN` is not part of the factory setup step
 - there is no `CONNECT_WLAN` request in v2; the app updates `CONFIG_WLAN` with `UPDATE_CONFIG_WLAN` and watches `STATE_WLAN_STATUS` plus `CONFIG_WLAN` on `GET_DATA` to observe connection progress and failure state
 
 Example request and replies:
@@ -1068,7 +1196,13 @@ BLE still uses the existing GATT UUIDs:
 
 Transport framing is still BLE-chunked at the characteristic level, but the logical message payload is always the v2 JSON envelope above.
 
-The `auth` characteristic remains a separate pair/session state channel. It is not a second business protocol.
+The `auth` characteristic remains a separate pair/setup state channel. It is not a second business protocol.
+
+Access model notes:
+
+- a shared factory setup PIN may be used only for BLE-local setup authorization while the boat is still in `SETUP_REQUIRED`
+- after setup is complete, normal BLE session authorization uses `AUTHORIZE_BLE_SESSION` with the current `ble_connection_pin`
+- the shared factory setup PIN must never unlock normal runtime functionality by itself
 
 ## Cloud Relay Notes
 
@@ -1094,12 +1228,13 @@ Cloud identity and routing notes:
 
 - `boat_id` is a non-secret cloud routing key
 - only explicitly created boats are allowed to use the relay
-- cloud transport establishment does not rely on `boat_id` or `boat_secret` being present in relay-routed runtime messages
-- a local write request such as `UPDATE_CLOUD_CREDENTIALS` may carry `boat_id` and `boat_secret` between app and server, but the relay must treat them as opaque business payloads
+- cloud transport establishment does not rely on `boat_id` or `cloud_secret` being present in relay-routed runtime messages
+- a local write request such as `UPDATE_CLOUD_CREDENTIALS` may carry `boat_id` and `cloud_secret` between app and server, but the relay must treat them as opaque business payloads
 - app and server each obtain a short-lived WebSocket ticket before opening the cloud socket
 - the relay validates the ticket, resolves the authorized `boat_id`, and then attaches the socket to that boat's durable object
 - app-side ticket issuance is authorized from the logged-in user's access to the boat
-- server-side ticket issuance is authorized from a boat-scoped server credential such as `boat_secret`
+- server-side ticket issuance is authorized from a boat-scoped server credential such as `cloud_secret`
+- the shared factory setup PIN must never be accepted for normal runtime `ws-ticket` issuance
 
 Cloud session-isolation notes:
 
@@ -1116,5 +1251,5 @@ Long-term control-plane direction:
 - logged-in users explicitly create boats
 - only explicitly created boats are allowed to use the relay
 - app-side cloud access is authorized from the user session plus boat membership/access rights
-- server-side cloud access is authorized with a boat-scoped server credential such as `boat_secret`
+- server-side cloud access is authorized with a boat-scoped server credential such as `cloud_secret`
 - app and server both obtain WebSocket tickets over normal HTTPS endpoints instead of relying on custom WebSocket auth headers from the browser

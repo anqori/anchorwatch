@@ -2,30 +2,19 @@ import {
   BLE_LAST_DEVICE_ID_KEY,
   BLE_LAST_DEVICE_NAME_KEY,
   BLE_CONNECTED_ONCE_KEY,
+  BLE_CONNECTION_PIN_KEY,
   BOAT_ID_KEY,
-  BOAT_SECRET_KEY,
   CONNECTION_RUNTIME_MODE_KEY,
   CONNECTION_RUNTIME_MODE_ONBOARD,
   CONNECTION_RUNTIME_MODE_REMOTE,
+  CLOUD_SECRET_KEY,
   DEFAULT_RELAY_BASE_URL,
-  MODE_DEVICE,
-  MODE_KEY,
   PHONE_ID_KEY,
   RELAY_BASE_URL_KEY,
   WIFI_CFG_VERSION_KEY,
 } from "../core/constants";
-import type { ConnectionRuntimeMode, Mode } from "../core/types";
+import type { ConnectionRuntimeMode } from "../core/types";
 import { loadStoredString, saveStoredString } from "./local-storage";
-
-export function loadMode(): Mode {
-  const saved = loadStoredString(MODE_KEY, MODE_DEVICE);
-  // Demo/fake mode is session-only; startup defaults to device mode.
-  return saved === MODE_DEVICE ? MODE_DEVICE : MODE_DEVICE;
-}
-
-export function setMode(mode: Mode): void {
-  saveStoredString(MODE_KEY, mode);
-}
 
 export function getRelayBaseUrl(): string {
   return loadStoredString(RELAY_BASE_URL_KEY, DEFAULT_RELAY_BASE_URL).trim();
@@ -46,15 +35,26 @@ export function setBoatId(value: string): void {
   saveStoredString(BOAT_ID_KEY, value);
 }
 
-export function getBoatSecret(): string {
-  return loadStoredString(BOAT_SECRET_KEY);
+export function getBleConnectionPin(): string {
+  return loadStoredString(BLE_CONNECTION_PIN_KEY);
 }
 
-export function setBoatSecret(secret: string): void {
+export function setBleConnectionPin(secret: string): void {
   if (!secret) {
     return;
   }
-  saveStoredString(BOAT_SECRET_KEY, secret);
+  saveStoredString(BLE_CONNECTION_PIN_KEY, secret);
+}
+
+export function getCloudSecret(): string {
+  return loadStoredString(CLOUD_SECRET_KEY);
+}
+
+export function setCloudSecret(secret: string): void {
+  if (!secret) {
+    return;
+  }
+  saveStoredString(CLOUD_SECRET_KEY, secret);
 }
 
 export function ensurePhoneId(): string {
@@ -81,11 +81,12 @@ export function setConfigVersion(version: number): void {
 
 export function hasPersistedSetup(): boolean {
   const hasBoatId = getBoatId().trim().length > 0;
-  const hasBoatSecret = getBoatSecret().trim().length > 0;
+  const hasBleConnectionPin = getBleConnectionPin().trim().length > 0;
+  const hasCloudSecret = getCloudSecret().trim().length > 0;
   const hasRelayBaseUrl = getRelayBaseUrl().length > 0;
   const configVersion = Number(loadStoredString(WIFI_CFG_VERSION_KEY, "0"));
   const hasSavedConfigVersion = Number.isInteger(configVersion) && configVersion > 0;
-  return hasBoatId || hasBoatSecret || hasRelayBaseUrl || hasSavedConfigVersion;
+  return hasBoatId || hasBleConnectionPin || hasCloudSecret || hasRelayBaseUrl || hasSavedConfigVersion;
 }
 
 export function hasConnectedViaBleOnce(): boolean {

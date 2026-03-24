@@ -29,6 +29,9 @@ firmware-build:
   set -euo pipefail
   version="$(./scripts/versioning.sh firmware-id)"
   echo "Firmware build version: $version"
+  mkdir -p .tools/tmp
+  export TMPDIR="$(pwd)/.tools/tmp"
+  esptool_dir="$(pwd)/scripts"
   arduino_cli="${ARDUINO_CLI:-arduino-cli}"
   cli_config="${CLI_CONFIG:-arduino-cli.yaml}"
   fqbn="${FQBN:-esp32:esp32:esp32s3}"
@@ -37,12 +40,15 @@ firmware-build:
   sketch_dir="${SKETCH_DIR:-firmware/arduino-project}"
   board_args=()
   if [[ -n "$board_options" ]]; then board_args=(--board-options "$board_options"); fi
-  "$arduino_cli" compile --config-file "$cli_config" --fqbn "$fqbn" "${board_args[@]}" --build-property "build.extra_flags=-DANQORI_BUILD_VERSION=\"$version\"" --build-path "$build_dir" "$sketch_dir"
+  "$arduino_cli" compile --config-file "$cli_config" --fqbn "$fqbn" "${board_args[@]}" --build-property "build.extra_flags=-DANQORI_BUILD_VERSION=\"$version\"" --build-property "runtime.tools.esptool_py.path=$esptool_dir" --build-property "tools.esptool_py.path=$esptool_dir" --build-property "tools.esptool_py.cmd=arduino-esptool-wrapper" --build-path "$build_dir" "$sketch_dir"
 
 [private]
 firmware-upload:
   #!/usr/bin/env bash
   set -euo pipefail
+  mkdir -p .tools/tmp
+  export TMPDIR="$(pwd)/.tools/tmp"
+  esptool_dir="$(pwd)/scripts"
   arduino_cli="${ARDUINO_CLI:-arduino-cli}"
   cli_config="${CLI_CONFIG:-arduino-cli.yaml}"
   fqbn="${FQBN:-esp32:esp32:esp32s3}"
@@ -53,7 +59,7 @@ firmware-upload:
   if [[ -z "$port" ]]; then echo "PORT not set and no board auto-detected. Set PORT=/dev/tty..." >&2; exit 1; fi
   board_args=()
   if [[ -n "$board_options" ]]; then board_args=(--board-options "$board_options"); fi
-  "$arduino_cli" upload --config-file "$cli_config" --fqbn "$fqbn" "${board_args[@]}" --build-path "$build_dir" -p "$port" "$sketch_dir"
+  "$arduino_cli" upload --config-file "$cli_config" --fqbn "$fqbn" "${board_args[@]}" --upload-property "runtime.tools.esptool_py.path=$esptool_dir" --upload-property "tools.esptool_py.path=$esptool_dir" --upload-property "tools.esptool_py.cmd=arduino-esptool-wrapper" --build-path "$build_dir" -p "$port" "$sketch_dir"
 
 [private]
 firmware-monitor:

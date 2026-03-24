@@ -20,6 +20,12 @@ static const char* BLE_DEVICE_NAME_PREFIX = "Anqori-AnchorWatch-";
 static const char* DEFAULT_BOAT_ID_PREFIX = "boat_";
 static const char* DEFAULT_DEVICE_ID_PREFIX = "dev_";
 
+#ifndef ANQORI_FACTORY_SETUP_PIN
+#define ANQORI_FACTORY_SETUP_PIN "123456"
+#endif
+
+static const char* FACTORY_SETUP_PIN = ANQORI_FACTORY_SETUP_PIN;
+
 static const char* BLE_SERVICE_UUID = "9f2d0000-87aa-4f4a-a0ea-4d5d4f415354";
 static const char* BLE_CONTROL_TX_UUID = "9f2d0001-87aa-4f4a-a0ea-4d5d4f415354";
 static const char* BLE_EVENT_RX_UUID = "9f2d0002-87aa-4f4a-a0ea-4d5d4f415354";
@@ -43,10 +49,10 @@ static const unsigned long LOOP_IDLE_DELAY_MS = 10UL;
 static const unsigned long TELEMETRY_TICK_MS = 1000UL;
 static const unsigned long HISTORY_SAMPLE_INTERVAL_MS = 5000UL;
 static const unsigned long BLE_CHUNK_TIMEOUT_MS = 2000UL;
-static const size_t BLE_CHUNK_MAX_PAYLOAD = 120U;
-static const unsigned long BLE_NOTIFY_INTER_CHUNK_DELAY_MS = 10UL;
+static const size_t BLE_CHUNK_MAX_PAYLOAD = 80U;
+static const unsigned long BLE_NOTIFY_INTER_CHUNK_DELAY_MS = 35UL;
+static const unsigned long BLE_NOTIFY_INTER_MESSAGE_DELAY_MS = 60UL;
 static const unsigned long PAIR_MODE_TTL_MS = 120UL * 1000UL;
-static const unsigned long PRIV_SESSION_TTL_MS = 10UL * 60UL * 1000UL;
 static const unsigned long WIFI_CONNECT_TIMEOUT_MS = 20UL * 1000UL;
 static const unsigned long WIFI_RETRY_MIN_MS = 1000UL;
 static const unsigned long WIFI_RETRY_MAX_MS = 30UL * 1000UL;
@@ -72,7 +78,8 @@ static const float SIM_MAX_WIND_DELTA_DEG_PER_MIN = 20.0f;
 static const char* PREFS_NAMESPACE = "anchorwatch";
 static const char* PREF_KEY_DEVICE_ID = "device_id";
 static const char* PREF_KEY_BOAT_ID = "boat_id";
-static const char* PREF_KEY_BOAT_SECRET = "boat_secret";
+static const char* PREF_KEY_BLE_CONNECTION_PIN = "ble_pin";
+static const char* PREF_KEY_CLOUD_SECRET = "cloud_secret";
 static const char* PREF_KEY_CLOUD_VERSION = "cloud_ver";
 static const char* PREF_KEY_ALARM_CONFIG = "cfg_alarm";
 static const char* PREF_KEY_OBSTACLES = "cfg_obst";

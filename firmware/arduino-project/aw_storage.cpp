@@ -43,19 +43,21 @@ void Storage::end() {
   }
 }
 
-void Storage::loadIdentity(String& device_id, CloudConfigValue& cloud_config) {
+void Storage::loadIdentity(String& device_id, String& ble_connection_pin, CloudConfigValue& cloud_config) {
   device_id = prefs.getString(PREF_KEY_DEVICE_ID, makeDefaultDeviceId());
   cloud_config.boat_id = prefs.getString(PREF_KEY_BOAT_ID, makeDefaultBoatId());
-  cloud_config.boat_secret = prefs.getString(PREF_KEY_BOAT_SECRET, "");
-  cloud_config.secret_configured = !cloud_config.boat_secret.isEmpty();
+  ble_connection_pin = prefs.getString(PREF_KEY_BLE_CONNECTION_PIN, "");
+  cloud_config.cloud_secret = prefs.getString(PREF_KEY_CLOUD_SECRET, "");
+  cloud_config.secret_configured = !cloud_config.cloud_secret.isEmpty();
   cloud_config.version = prefs.getUInt(PREF_KEY_CLOUD_VERSION, 1U);
   prefs.putString(PREF_KEY_DEVICE_ID, device_id);
   prefs.putString(PREF_KEY_BOAT_ID, cloud_config.boat_id);
 }
 
-void Storage::saveCloudConfig(const CloudConfigValue& cloud_config) {
+void Storage::saveIdentity(const String& ble_connection_pin, const CloudConfigValue& cloud_config) {
+  prefs.putString(PREF_KEY_BLE_CONNECTION_PIN, ble_connection_pin);
   prefs.putString(PREF_KEY_BOAT_ID, cloud_config.boat_id);
-  prefs.putString(PREF_KEY_BOAT_SECRET, cloud_config.boat_secret);
+  prefs.putString(PREF_KEY_CLOUD_SECRET, cloud_config.cloud_secret);
   prefs.putUInt(PREF_KEY_CLOUD_VERSION, cloud_config.version);
 }
 

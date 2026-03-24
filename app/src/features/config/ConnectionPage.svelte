@@ -9,13 +9,11 @@
 
   export let isConfigured = false;
   export let connectionStatusText = "Not connected";
-  export let mode: "fake" | "device" = "device";
-  export let activeConnection: "fake" | "bluetooth" | "cloud-relay" = "cloud-relay";
+  export let activeConnection: "bluetooth" | "cloud-relay" = "cloud-relay";
 
   export let onBack: () => void = () => {};
   export let onSelectBluetooth: () => void = () => {};
   export let onSelectRelay: () => void = () => {};
-  export let onSelectFake: () => void = () => {};
 </script>
 
 <Navbar title="Connection">
@@ -34,14 +32,11 @@
   {:else}
     <div class="connection-actions-card">
       <div class="actions">
-        <KonstaButton onClick={onSelectBluetooth} disabled={mode === "device" && activeConnection === "bluetooth"}>
+        <KonstaButton onClick={onSelectBluetooth} disabled={activeConnection === "bluetooth"}>
           Connected via BT
         </KonstaButton>
-        <KonstaButton onClick={onSelectRelay} disabled={mode === "device" && activeConnection === "cloud-relay"}>
+        <KonstaButton onClick={onSelectRelay} disabled={activeConnection === "cloud-relay"}>
           Connected via Relay
-        </KonstaButton>
-        <KonstaButton onClick={onSelectFake} disabled={mode === "fake" && activeConnection === "fake"}>
-          Connected to Fake data
         </KonstaButton>
       </div>
     </div>

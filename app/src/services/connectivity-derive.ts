@@ -16,14 +16,15 @@ export interface RelayConnectionInput {
   nowTs?: number;
 }
 
-export function hasCloudCredentialsConfigured(relayBaseUrl: string, boatId: string, boatSecret: string): boolean {
-  return Boolean(relayBaseUrl && boatId && boatSecret);
+export function hasCloudCredentialsConfigured(relayBaseUrl: string, boatId: string, cloudSecret: string): boolean {
+  return Boolean(relayBaseUrl && boatId && cloudSecret);
 }
 
-export function hasConfiguredDevice(boatId: string, boatSecret: string, connectedViaBleOnce: boolean): boolean {
+export function hasConfiguredDevice(boatId: string, bleConnectionPin: string, cloudSecret: string, connectedViaBleOnce: boolean): boolean {
   const hasBoatId = boatId.trim().length > 0;
-  const hasManualCredentials = boatSecret.trim().length > 0;
-  return hasBoatId && (connectedViaBleOnce || hasManualCredentials);
+  const hasLocalCredentials = bleConnectionPin.trim().length > 0;
+  const hasCloudCredentials = cloudSecret.trim().length > 0;
+  return hasBoatId && (connectedViaBleOnce || hasLocalCredentials || hasCloudCredentials);
 }
 
 export function hasActiveCloudRelayConnection(input: RelayConnectionInput): boolean {

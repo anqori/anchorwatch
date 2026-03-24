@@ -1,5 +1,12 @@
-import type { AlertId, AlertRuntimeEntry, AlertRuntimeState, AlertSeverity, AnchorRuntimeState, JsonRecord, TrackPoint } from "../core/types";
-import { isObject, toFiniteNumber } from "./data-utils";
+import type {
+  AlertRuntimeEntry,
+  AnchorRuntimeState,
+  DeviceDataSlices,
+  PositionValue,
+  TrackPoint,
+  WlanStatusValue,
+} from "../core/types";
+import { readAlertRuntimeEntries as mapAlertRuntimeEntries } from "./protocol-v2-state";
 
 export interface OnboardingWifiStatus {
   connected: boolean;
@@ -26,152 +33,86 @@ export interface AnchorStatusDerived {
   position: CurrentGpsPosition | null;
 }
 
-const ALERT_LABELS: Record<AlertId, string> = {
-  anchor_distance: "Anchor Distance",
-  boating_area: "Boating Area",
-  wind_strength: "Wind Strength",
-  depth: "Depth",
-  data_outdated: "Data Outdated",
-};
-
-const ALERT_IDS: AlertId[] = [
-  "anchor_distance",
-  "boating_area",
-  "wind_strength",
-  "depth",
-  "data_outdated",
-];
-
-export function readOnboardingWifiStatus(latestState: JsonRecord): OnboardingWifiStatus {
-  const system = isObject(latestState.system) ? latestState.system : {};
-  const wifi = isObject(system.wifi) ? system.wifi : {};
-  const connected = wifi.connected === true;
-  const ssid = typeof wifi.ssid === "string" ? wifi.ssid.trim() : "";
-  const rssi = toFiniteNumber(wifi.rssi);
-  const rawError = typeof wifi.lastError === "string" ? wifi.lastError.trim() : "";
-  const error = connected || rawError.toLowerCase() === "connecting" ? "" : rawError;
-  return { connected, ssid, rssi, error };
+export function readOnboardingWifiStatus(wlanStatus: WlanStatusValue | null): OnboardingWifiStatus {
+  return {
+    connected: wlanStatus?.wifi_connected === true,
+    ssid: wlanStatus?.wifi_ssid?.trim() || "",
+    rssi: wlanStatus?.wifi_rssi ?? null,
+    error: wlanStatus?.wifi_connected ? "" : wlanStatus?.wifi_error ?? "",
+  };
 }
 
-export function readFirmwareVersionFromState(latestState: JsonRecord): string {
-  const system = isObject(latestState.system) ? latestState.system : {};
-  const firmware = isObject(system.firmware) ? system.firmware : {};
-  const version = typeof firmware.version === "string" ? firmware.version.trim() : "";
-  return version || "--";
+export function readFirmwareVersionFromState(deviceData: DeviceDataSlices): string {
+  return deviceData.systemStatus?.server_version?.trim() || "--";
 }
 
-export function readCurrentGpsPosition(latestState: JsonRecord): CurrentGpsPosition | null {
-  const telemetry = isObject(latestState.telemetry) ? latestState.telemetry : {};
-  const gps = isObject(telemetry.gps) ? telemetry.gps : {};
-  const lat = toFiniteNumber(gps.lat);
-  const lon = toFiniteNumber(gps.lon);
-  if (lat === null || lon === null) {
+export function readCurrentGpsPosition(position: PositionValue | null): CurrentGpsPosition | null {
+  if (!position || !position.valid) {
     return null;
   }
-  return { lat, lon };
+  return {
+    lat: position.lat,
+    lon: position.lon,
+  };
 }
 
-export function readAnchorStatus(latestState: JsonRecord): AnchorStatusDerived {
-  const anchor = isObject(latestState.anchor) ? latestState.anchor : {};
-  const stateRaw = typeof anchor.state === "string" ? anchor.state.trim() : "";
-  const state: AnchorRuntimeState = stateRaw === "down" || stateRaw === "auto-pending" ? stateRaw : "up";
-
-  const positionRaw = isObject(anchor.position) ? anchor.position : {};
-  const lat = toFiniteNumber(positionRaw.lat);
-  const lon = toFiniteNumber(positionRaw.lon);
-
-  if (lat === null || lon === null) {
+export function readAnchorStatus(anchorPosition: DeviceDataSlices["anchorPosition"]): AnchorStatusDerived {
+  if (!anchorPosition || anchorPosition.lat === null || anchorPosition.lon === null) {
     return {
-      state,
+      state: anchorPosition?.state ?? "up",
       position: null,
     };
   }
   return {
-    state,
-    position: { lat, lon },
-  };
-}
-
-export function deriveTelemetry(latestState: JsonRecord, nowTs = Date.now()): TelemetryDerived {
-  const telemetry = isObject(latestState.telemetry) ? latestState.telemetry : {};
-  const gps = isObject(telemetry.gps) ? telemetry.gps : {};
-  const depth = isObject(telemetry.depth) ? telemetry.depth : {};
-  const wind = isObject(telemetry.wind) ? telemetry.wind : {};
-  const motion = isObject(telemetry.motion) ? telemetry.motion : {};
-
-  const gpsAgeS = Number(gps.ageMs ?? 0) / 1000;
-  const dataAgeS = Number(depth.ageMs ?? wind.ageMs ?? gps.ageMs ?? 0) / 1000;
-  const depthM = Number(depth.meters ?? 0);
-  const windKn = Number(wind.knots ?? 0);
-
-  const lat = toFiniteNumber(gps.lat);
-  const lon = toFiniteNumber(gps.lon);
-  if (lat === null || lon === null) {
-    return {
-      gpsAgeS,
-      dataAgeS,
-      depthM,
-      windKn,
-      trackPoint: null,
-    };
-  }
-
-  const sogKn = toFiniteNumber(gps.sogKn ?? motion.sogKn) ?? 0;
-  const cogDeg = toFiniteNumber(gps.cogDeg ?? motion.cogDeg) ?? 0;
-  const headingDeg = toFiniteNumber(gps.headingDeg ?? motion.headingDeg ?? cogDeg) ?? cogDeg;
-
-  return {
-    gpsAgeS,
-    dataAgeS,
-    depthM,
-    windKn,
-    trackPoint: {
-      ts: nowTs,
-      lat,
-      lon,
-      sogKn,
-      cogDeg: (cogDeg + 360) % 360,
-      headingDeg: (headingDeg + 360) % 360,
+    state: anchorPosition.state,
+    position: {
+      lat: anchorPosition.lat,
+      lon: anchorPosition.lon,
     },
   };
 }
 
-function parseAlertSeverity(value: unknown): AlertSeverity {
-  const raw = typeof value === "string" ? value.trim().toUpperCase() : "";
-  return raw === "ALARM" ? "ALARM" : "WARNING";
+export function deriveTelemetry(deviceData: DeviceDataSlices, nowTs = Date.now()): TelemetryDerived {
+  const position = deviceData.position;
+  const depth = deviceData.depth;
+  const wind = deviceData.wind;
+
+  const gpsAgeS = position ? Math.max(0, position.gps_age_ms / 1000) : 0;
+  const dataAgeCandidates = [
+    gpsAgeS,
+    depth ? Math.max(0, (nowTs - depth.ts) / 1000) : 0,
+    wind ? Math.max(0, (nowTs - wind.ts) / 1000) : 0,
+  ];
+
+  if (!position || !position.valid) {
+    return {
+      gpsAgeS,
+      dataAgeS: Math.max(...dataAgeCandidates),
+      depthM: depth?.depth_m ?? 0,
+      windKn: wind?.wind_kn ?? 0,
+      trackPoint: null,
+    };
+  }
+
+  return {
+    gpsAgeS,
+    dataAgeS: Math.max(...dataAgeCandidates),
+    depthM: depth?.depth_m ?? 0,
+    windKn: wind?.wind_kn ?? 0,
+    trackPoint: {
+      ts: nowTs,
+      lat: position.lat,
+      lon: position.lon,
+      sogKn: position.sog_kn,
+      cogDeg: position.cog_deg,
+      headingDeg: position.heading_deg,
+      depthM: depth?.depth_m ?? null,
+      windKn: wind?.wind_kn ?? null,
+      windDirDeg: wind?.wind_dir_deg ?? null,
+    },
+  };
 }
 
-function parseAlertState(value: unknown): AlertRuntimeState {
-  const raw = typeof value === "string" ? value.trim().toUpperCase() : "";
-  if (raw === "DISABLED" || raw === "TRIGGERED" || raw === "ALERT" || raw === "ALERT_SILENCED") {
-    return raw;
-  }
-  return "WATCHING";
-}
-
-function parseAlertTs(value: unknown): number | null {
-  const numeric = toFiniteNumber(value);
-  if (numeric === null || numeric <= 0) {
-    return null;
-  }
-  return Math.floor(numeric);
-}
-
-export function readAlertRuntimeEntries(latestState: JsonRecord): AlertRuntimeEntry[] {
-  const alerts = isObject(latestState.alerts) ? latestState.alerts : {};
-  const out: AlertRuntimeEntry[] = [];
-
-  for (const id of ALERT_IDS) {
-    const raw = isObject(alerts[id]) ? alerts[id] : {};
-    out.push({
-      id,
-      label: ALERT_LABELS[id],
-      severity: parseAlertSeverity(raw.severity),
-      state: parseAlertState(raw.state),
-      aboveThresholdSinceTs: parseAlertTs(raw.above_threshold_since_ts),
-      alertSinceTs: parseAlertTs(raw.alert_since_ts),
-      alertSilencedUntilTs: parseAlertTs(raw.alert_silenced_until_ts),
-    });
-  }
-  return out;
+export function readAlertRuntimeEntries(alarmState: DeviceDataSlices["alarmState"]): AlertRuntimeEntry[] {
+  return mapAlertRuntimeEntries(alarmState);
 }

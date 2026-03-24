@@ -42,7 +42,6 @@ help
 pair on
 pair off
 pair status
-pair confirm
 wifi status
 debug on
 debug off

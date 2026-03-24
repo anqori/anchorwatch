@@ -73,7 +73,7 @@ String makeTicketRequestBody(const CloudConfigValue& config) {
   String out = "{";
   bool first = true;
   appendFieldRaw(out, first, "boat_id", jsonQuote(config.boat_id));
-  appendFieldRaw(out, first, "boat_secret", jsonQuote(config.boat_secret));
+  appendFieldRaw(out, first, "cloud_secret", jsonQuote(config.cloud_secret));
   appendFieldRaw(out, first, "role", jsonQuote("server"));
   out += "}";
   return out;
@@ -234,7 +234,7 @@ struct CloudTransport::Impl {
   bool connected = false;
   String last_error;
   String active_boat_id;
-  String active_boat_secret;
+  String active_cloud_secret;
   unsigned long next_connect_ms = 0;
   unsigned long retry_delay_ms = CLOUD_RETRY_MIN_MS;
   unsigned long last_ping_ms = 0;
@@ -246,7 +246,7 @@ struct CloudTransport::Impl {
   }
 
   bool credentialsMatch(const CloudConfigValue& config) const {
-    return active_boat_id == config.boat_id && active_boat_secret == config.boat_secret;
+    return active_boat_id == config.boat_id && active_cloud_secret == config.cloud_secret;
   }
 
   void scheduleReconnect(unsigned long now_ms) {
@@ -285,7 +285,7 @@ struct CloudTransport::Impl {
     connected = false;
     rx_buffer.clear();
     active_boat_id = "";
-    active_boat_secret = "";
+    active_cloud_secret = "";
     last_ping_ms = 0;
     last_error = reason;
     if (should_retry) {
@@ -425,7 +425,7 @@ struct CloudTransport::Impl {
 
     connected = true;
     active_boat_id = config.boat_id;
-    active_boat_secret = config.boat_secret;
+    active_cloud_secret = config.cloud_secret;
     rx_buffer.clear();
     last_ping_ms = millis();
     last_error = "";
@@ -433,7 +433,7 @@ struct CloudTransport::Impl {
   }
 
   bool ensureConnected(unsigned long now_ms, bool wlan_connected, const CloudConfigValue& config) {
-    if (!wlan_connected || !config.secret_configured || config.boat_id.isEmpty() || config.boat_secret.isEmpty()) {
+    if (!wlan_connected || !config.secret_configured || config.boat_id.isEmpty() || config.cloud_secret.isEmpty()) {
       disconnect("cloud_disabled", now_ms, false);
       return false;
     }

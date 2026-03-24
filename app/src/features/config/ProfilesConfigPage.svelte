@@ -17,6 +17,8 @@
   export let notificationPermissionText = "not checked";
   export let notificationStatusText = "No notification checks yet.";
 
+  export let disabled = false;
+  export let disabledReason = "Waiting for server config...";
   export let onBack: () => void = () => {};
   export let onRequestPermission: () => void = () => {};
   export let onSendTestNotification: () => void = () => {};
@@ -30,7 +32,11 @@
 
 <div class="space-y-3">
   <div class="hint">Day/night profile settings and local notification reliability checks.</div>
+  {#if disabled}
+    <div class="hint">{disabledReason}</div>
+  {/if}
 
+  <div class:config-disabled={disabled}>
   <List strong inset>
     <ListInput label="Profile mode" type="select" bind:value={profilesMode} dropdown>
       <option value="auto">auto</option>
@@ -76,4 +82,12 @@
     <KonstaButton onClick={onRequestPermission}>Request Permission</KonstaButton>
     <KonstaButton onClick={onSendTestNotification}>Send Test Notification</KonstaButton>
   </div>
+  </div>
 </div>
+
+<style>
+  .config-disabled {
+    opacity: 0.45;
+    pointer-events: none;
+  }
+</style>

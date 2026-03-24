@@ -9,8 +9,8 @@ class Storage {
   bool begin();
   void end();
 
-  void loadIdentity(String& device_id, CloudConfigValue& cloud_config);
-  void saveCloudConfig(const CloudConfigValue& cloud_config);
+  void loadIdentity(String& device_id, String& ble_connection_pin, CloudConfigValue& cloud_config);
+  void saveIdentity(const String& ble_connection_pin, const CloudConfigValue& cloud_config);
 
   void loadAlarmConfig(AlarmConfigValue& value);
   void saveAlarmConfig(const AlarmConfigValue& value);

@@ -144,7 +144,7 @@ struct WlanConfigValue {
 struct CloudConfigValue {
   uint32_t version = 1;
   String boat_id;
-  String boat_secret;
+  String cloud_secret;
   bool secret_configured = false;
 };
 

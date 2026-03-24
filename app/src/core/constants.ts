@@ -1,8 +1,5 @@
-import type { ConfigSectionId, ConnectionRuntimeMode, Mode, ViewId } from "./types";
+import type { ConfigSectionId, ConnectionRuntimeMode, ViewId } from "./types";
 
-export const MODE_KEY = "anchorwatch.mode";
-export const MODE_FAKE: Mode = "fake";
-export const MODE_DEVICE: Mode = "device";
 export const CONNECTION_RUNTIME_MODE_KEY = "anchorwatch.connection_runtime_mode";
 export const CONNECTION_RUNTIME_MODE_ONBOARD: ConnectionRuntimeMode = "onboard";
 export const CONNECTION_RUNTIME_MODE_REMOTE: ConnectionRuntimeMode = "remote";
@@ -10,7 +7,8 @@ export const RELAY_BASE_URL_KEY = "anchorwatch.relay_base_url";
 export const DEFAULT_RELAY_BASE_URL = (import.meta.env.VITE_RELAY_BASE_URL ?? "").trim();
 export const PWA_BUILD_VERSION = (import.meta.env.VITE_BUILD_VERSION ?? "run-unknown").trim() || "run-unknown";
 export const BOAT_ID_KEY = "anchorwatch.boat_id";
-export const BOAT_SECRET_KEY = "anchorwatch.boat_secret";
+export const BLE_CONNECTION_PIN_KEY = "anchorwatch.ble_connection_pin";
+export const CLOUD_SECRET_KEY = "anchorwatch.cloud_secret";
 export const BLE_CONNECTED_ONCE_KEY = "anchorwatch.ble_connected_once";
 export const BLE_LAST_DEVICE_ID_KEY = "anchorwatch.ble_last_device_id";
 export const BLE_LAST_DEVICE_NAME_KEY = "anchorwatch.ble_last_device_name";
@@ -56,6 +54,7 @@ export const CONFIG_SECTIONS: Array<{ id: ConfigSectionId; label: string; icon: 
   { id: "internet", label: "Device - Configure Internet", icon: "wifi" },
   { id: "anchor", label: "Anchor Automatic Placement", icon: "anchor" },
   { id: "alerts", label: "Alerts", icon: "warning" },
+  { id: "obstacles", label: "Obstacles", icon: "dangerous" },
   { id: "profiles", label: "Profiles", icon: "tune" },
   { id: "debugging", label: "Debugging", icon: "bug_report" },
   { id: "information", label: "Information / Version", icon: "info" },

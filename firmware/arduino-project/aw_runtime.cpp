@@ -1,6 +1,7 @@
 #include "aw_runtime.h"
 
 #include <WiFi.h>
+#include <Preferences.h>
 
 #include "aw_constants.h"
 #include "aw_json.h"
@@ -12,21 +13,112 @@ namespace {
 
 static const char* BLE_SESSION_ID = "ble";
 
+void clearEspWifiNvs() {
+  Preferences wifi_prefs;
+  if (!wifi_prefs.begin("wifi", false)) {
+    Serial.println("[wifi] failed to open wifi nvs namespace");
+    return;
+  }
+  wifi_prefs.clear();
+  wifi_prefs.end();
+  Serial.println("[wifi] cleared esp wifi nvs namespace");
+}
+
+void logBootstrapSend(const char* type) {
+  Serial.print("[bootstrap] ");
+  Serial.println(type);
+}
+
+bool equalPositionState(const PositionState& a, const PositionState& b) {
+  return a.valid == b.valid
+    && a.lat == b.lat
+    && a.lon == b.lon
+    && a.gps_age_ms == b.gps_age_ms
+    && a.sog_kn == b.sog_kn
+    && a.cog_deg == b.cog_deg
+    && a.heading_deg == b.heading_deg
+    && a.last_update_ts == b.last_update_ts;
+}
+
+bool equalDepthState(const DepthState& a, const DepthState& b) {
+  return a.available == b.available
+    && a.depth_m == b.depth_m
+    && a.ts == b.ts;
+}
+
+bool equalWindState(const WindState& a, const WindState& b) {
+  return a.available == b.available
+    && a.wind_kn == b.wind_kn
+    && a.wind_dir_deg == b.wind_dir_deg
+    && a.ts == b.ts;
+}
+
+bool equalAnchorPositionState(const AnchorPositionState& a, const AnchorPositionState& b) {
+  return a.state == b.state
+    && a.has_position == b.has_position
+    && a.lat == b.lat
+    && a.lon == b.lon;
+}
+
+bool equalWlanStatusState(const WlanStatusState& a, const WlanStatusState& b) {
+  return a.wifi_state == b.wifi_state
+    && a.wifi_connected == b.wifi_connected
+    && a.wifi_ssid == b.wifi_ssid
+    && a.wifi_rssi == b.wifi_rssi
+    && a.wifi_error == b.wifi_error;
+}
+
+bool equalSystemStatusState(const SystemStatusState& a, const SystemStatusState& b) {
+  return a.cloud_reachable == b.cloud_reachable
+    && a.server_version == b.server_version;
+}
+
+bool equalAlertRuntime(const AlertRuntime& a, const AlertRuntime& b) {
+  return a.alert_type == b.alert_type
+    && a.state == b.state
+    && a.severity == b.severity
+    && a.has_above_threshold_since == b.has_above_threshold_since
+    && a.above_threshold_since_ts == b.above_threshold_since_ts
+    && a.has_alert_since == b.has_alert_since
+    && a.alert_since_ts == b.alert_since_ts
+    && a.has_alert_silenced_until == b.has_alert_silenced_until
+    && a.alert_silenced_until_ts == b.alert_silenced_until_ts;
+}
+
+bool equalAlarmState(const AlarmStateValue& a, const AlarmStateValue& b) {
+  if (a.alerts.size() != b.alerts.size()) {
+    return false;
+  }
+  for (size_t index = 0; index < a.alerts.size(); index++) {
+    if (!equalAlertRuntime(a.alerts[index], b.alerts[index])) {
+      return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 void AnchorWatchRuntime::setup() {
   Serial.begin(115200);
+  Serial.printf("[mem] boot free_heap=%u\n", ESP.getFreeHeap());
   setupPins();
-  setupWifi();
   storage_.begin();
   loadState();
   system_status_.server_version = FW_VERSION;
   system_status_.cloud_reachable = false;
   pair_mode_until_ms_ = millis() + PAIR_MODE_TTL_MS;
-  privileged_until_ms_ = 0;
   last_pair_mode_active_ = isPairModeActive(millis());
   const String device_name = String(BLE_DEVICE_NAME_PREFIX) + device_id_.substring(max(0, static_cast<int>(device_id_.length()) - 6));
-  ble_.begin(device_name, this);
+  const bool ble_ready = ble_.begin(device_name, this);
+  Serial.printf("[mem] after ble begin free_heap=%u\n", ESP.getFreeHeap());
+  if (ble_ready) {
+    Serial.print("[ble] advertising as ");
+    Serial.println(device_name);
+  } else {
+    Serial.println("[ble] init failed; BLE transport unavailable");
+  }
+  setupWifi();
   cloud_.begin(this);
   if (system_config_.runtime_mode == RuntimeMode::SIMULATION) {
     simulation_.begin(millis());
@@ -35,7 +127,7 @@ void AnchorWatchRuntime::setup() {
   refreshAuthValue();
   refreshSnapshotValue();
   Serial.println("AnchorWatch firmware v2 runtime started");
-  Serial.println("Commands: help, pair on, pair off, pair status, pair confirm, wifi status, debug on, debug off");
+  Serial.println("Commands: help, pair on, pair off, pair status, wifi status, debug on, debug off");
 }
 
 void AnchorWatchRuntime::loop() {
@@ -54,16 +146,21 @@ void AnchorWatchRuntime::setupPins() {
 }
 
 void AnchorWatchRuntime::setupWifi() {
+  Serial.printf("[mem] setupWifi start free_heap=%u\n", ESP.getFreeHeap());
+  clearEspWifiNvs();
+  WiFi.useStaticBuffers(true);
+  WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
-  WiFi.disconnect(true, true);
+  WiFi.disconnect(false, false);
   WiFi.setSleep(false);
   WiFi.setHostname("anchorwatch");
   wlan_status_.wifi_state = WlanConnectionState::DISCONNECTED;
   wlan_status_.wifi_connected = false;
+  Serial.printf("[mem] setupWifi done free_heap=%u\n", ESP.getFreeHeap());
 }
 
 void AnchorWatchRuntime::loadState() {
-  storage_.loadIdentity(device_id_, cloud_config_);
+  storage_.loadIdentity(device_id_, ble_connection_pin_, cloud_config_);
   storage_.loadAlarmConfig(alarm_config_);
   storage_.loadObstaclesConfig(obstacles_);
   storage_.loadAnchorSettings(anchor_settings_);
@@ -75,28 +172,45 @@ void AnchorWatchRuntime::loadState() {
 }
 
 void AnchorWatchRuntime::refreshAuthValue() {
+  if (!ble_.isReady()) {
+    return;
+  }
   const unsigned long now_ms = millis();
+  const SessionAuthRef* ble_auth = findSessionAuth(SessionTransport::BLE, BLE_SESSION_ID);
+  const char* session_state = "UNAUTHORIZED";
+  if (ble_auth != nullptr && ble_auth->setup_authorized) {
+    session_state = "SETUP_AUTHORIZED";
+  } else if (ble_auth != nullptr && ble_auth->session_authorized) {
+    session_state = "AUTHORIZED";
+  }
   ble_.setAuthValue(buildAuthStatusJson(
     isPairModeActive(now_ms),
     pairModeUntilTs(),
-    isPrivileged(now_ms),
-    privilegedUntilTs(),
-    cloud_config_.boat_id
+    cloud_config_.boat_id,
+    cloud_config_.secret_configured,
+    cloud_config_.version,
+    boatAccessStateString(),
+    session_state
   ));
 }
 
 void AnchorWatchRuntime::refreshSnapshotValue() {
-  ble_.setSnapshotValue(buildSnapshotJson(
-    position_,
-    depth_,
-    wind_,
-    anchor_position_,
-    wlan_status_,
-    system_status_,
-    alarm_state_,
-    system_config_,
-    cloud_config_
-  ));
+  if (!ble_.isReady()) {
+    return;
+  }
+  String snapshot = "{";
+  snapshot += "\"boat_access_state\":\"";
+  snapshot += boatAccessStateString();
+  snapshot += "\",\"boat_id\":";
+  snapshot += jsonQuote(cloud_config_.boat_id);
+  snapshot += ",\"secret_configured\":";
+  snapshot += jsonBool(cloud_config_.secret_configured);
+  snapshot += ",\"cloud_config_version\":";
+  snapshot += String(cloud_config_.version);
+  snapshot += ",\"server_version\":";
+  snapshot += jsonQuote(system_status_.server_version);
+  snapshot += "}";
+  ble_.setSnapshotValue(snapshot);
 }
 
 void AnchorWatchRuntime::processSerial() {
@@ -121,7 +235,7 @@ void AnchorWatchRuntime::processSerial() {
 void AnchorWatchRuntime::handleSerialCommand(const String& line) {
   const unsigned long now_ms = millis();
   if (line == "help") {
-    Serial.println("Commands: help, pair on, pair off, pair status, pair confirm, wifi status, debug on, debug off");
+    Serial.println("Commands: help, pair on, pair off, pair status, wifi status, debug on, debug off");
     return;
   }
   if (line == "pair on") {
@@ -138,16 +252,7 @@ void AnchorWatchRuntime::handleSerialCommand(const String& line) {
     Serial.print("[pair] active=");
     Serial.print(isPairModeActive(now_ms) ? "true" : "false");
     Serial.print(" until_ts=");
-    Serial.print(static_cast<unsigned long long>(pairModeUntilTs()));
-    Serial.print(" privileged=");
-    Serial.print(isPrivileged(now_ms) ? "true" : "false");
-    Serial.print(" privileged_until_ts=");
-    Serial.println(static_cast<unsigned long long>(privilegedUntilTs()));
-    return;
-  }
-  if (line == "pair confirm") {
-    confirmPrivileged(now_ms);
-    Serial.println(isPrivileged(now_ms) ? "[pair] privileged session active" : "[pair] pair mode inactive");
+    Serial.println(static_cast<unsigned long long>(pairModeUntilTs()));
     return;
   }
   if (line == "wifi status") {
@@ -182,18 +287,18 @@ void AnchorWatchRuntime::onBleJsonMessage(const String& json) {
 
 void AnchorWatchRuntime::onBleAuthAction(const String& action) {
   if (action == "pair.confirm" || action == "PAIR_CONFIRM") {
-    confirmPrivileged(millis());
     refreshAuthValue();
+    Serial.println("[ble-auth] pair confirm ignored; pair mode alone grants BLE writes");
     return;
   }
   if (action == "pair.clear" || action == "PAIR_CLEAR") {
-    privileged_until_ms_ = 0;
     refreshAuthValue();
   }
 }
 
 void AnchorWatchRuntime::onBleConnectionChanged(bool connected) {
   if (!connected) {
+    ble_outbox_.clear();
     closeSession(SessionTransport::BLE, BLE_SESSION_ID, "ble_disconnected");
   }
 }
@@ -220,9 +325,6 @@ void AnchorWatchRuntime::onCloudSessionClosed(const String& cloud_conn_id, const
 }
 
 void AnchorWatchRuntime::updateLoopState(unsigned long now_ms) {
-  if (last_pair_mode_active_ && !isPairModeActive(now_ms)) {
-    privileged_until_ms_ = 0;
-  }
   last_pair_mode_active_ = isPairModeActive(now_ms);
   updateWlan(now_ms);
   updateCloud(now_ms);
@@ -242,13 +344,45 @@ void AnchorWatchRuntime::updateLoopState(unsigned long now_ms) {
   }
   refreshAuthValue();
   refreshSnapshotValue();
+  flushBleOutbox(now_ms);
+}
+
+void AnchorWatchRuntime::flushBleOutbox(unsigned long now_ms) {
+  if (ble_outbox_.empty() || !ble_.isReady() || !ble_.isConnected()) {
+    return;
+  }
+  if (last_ble_send_ms_ != 0 && now_ms - last_ble_send_ms_ < BLE_NOTIFY_INTER_MESSAGE_DELAY_MS) {
+    return;
+  }
+  const String json = ble_outbox_.front();
+  ble_outbox_.erase(ble_outbox_.begin());
+  if (debug_enabled_) {
+    Serial.print("[ble-outbox] sending ");
+    Serial.println(json);
+  }
+  if (ble_.sendJson(json)) {
+    last_ble_send_ms_ = now_ms;
+    return;
+  }
+  ble_outbox_.insert(ble_outbox_.begin(), json);
 }
 
 void AnchorWatchRuntime::updateTelemetry(unsigned long now_ms) {
   if (now_ms - last_telemetry_tick_ms_ < TELEMETRY_TICK_MS) {
     return;
   }
-  last_telemetry_tick_ms_ = now_ms;
+  last_telemetry_tick_ms_ += TELEMETRY_TICK_MS;
+  if (last_telemetry_tick_ms_ == 0 || last_telemetry_tick_ms_ > now_ms) {
+    last_telemetry_tick_ms_ = now_ms;
+  }
+
+  const PositionState previous_position = position_;
+  const DepthState previous_depth = depth_;
+  const WindState previous_wind = wind_;
+  const AnchorPositionState previous_anchor_position = anchor_position_;
+  const AlarmStateValue previous_alarm_state = alarm_state_;
+  const WlanStatusState previous_wlan_status = wlan_status_;
+  const SystemStatusState previous_system_status = system_status_;
 
   if (system_config_.runtime_mode == RuntimeMode::SIMULATION) {
     if (!simulation_.active()) {
@@ -261,14 +395,54 @@ void AnchorWatchRuntime::updateTelemetry(unsigned long now_ms) {
       recordTrackPoint(simulation_.currentTsMs());
     }
     updateAlarmAndOutputs(simulation_.currentTsMs());
-    publishRuntimeStateToStreams();
+    if (!equalPositionState(previous_position, position_)) {
+      publishPositionToStreams();
+    }
+    if (!equalDepthState(previous_depth, depth_)) {
+      publishDepthToStreams();
+    }
+    if (!equalWindState(previous_wind, wind_)) {
+      publishWindToStreams();
+    }
+    if (!equalWlanStatusState(previous_wlan_status, wlan_status_)) {
+      publishWlanStatusToStreams();
+    }
+    if (!equalSystemStatusState(previous_system_status, system_status_)) {
+      publishSystemStatusToStreams();
+    }
+    if (!equalAlarmState(previous_alarm_state, alarm_state_)) {
+      publishAlarmStateToStreams();
+    }
+    if (!equalAnchorPositionState(previous_anchor_position, anchor_position_)) {
+      publishAnchorPositionToStreams();
+    }
     return;
   }
 
   if (!has_real_time_) {
     clearTelemetryForLiveMode();
     updateAlarmAndOutputs(0);
-    publishRuntimeStateToStreams();
+    if (!equalPositionState(previous_position, position_)) {
+      publishPositionToStreams();
+    }
+    if (!equalDepthState(previous_depth, depth_)) {
+      publishDepthToStreams();
+    }
+    if (!equalWindState(previous_wind, wind_)) {
+      publishWindToStreams();
+    }
+    if (!equalWlanStatusState(previous_wlan_status, wlan_status_)) {
+      publishWlanStatusToStreams();
+    }
+    if (!equalSystemStatusState(previous_system_status, system_status_)) {
+      publishSystemStatusToStreams();
+    }
+    if (!equalAlarmState(previous_alarm_state, alarm_state_)) {
+      publishAlarmStateToStreams();
+    }
+    if (!equalAnchorPositionState(previous_anchor_position, anchor_position_)) {
+      publishAnchorPositionToStreams();
+    }
     return;
   }
 }
@@ -333,16 +507,8 @@ uint64_t AnchorWatchRuntime::pairModeUntilTs() const {
   return static_cast<uint64_t>(pair_mode_until_ms_);
 }
 
-uint64_t AnchorWatchRuntime::privilegedUntilTs() const {
-  return static_cast<uint64_t>(privileged_until_ms_);
-}
-
 bool AnchorWatchRuntime::isPairModeActive(unsigned long now_ms) const {
   return now_ms < pair_mode_until_ms_;
-}
-
-bool AnchorWatchRuntime::isPrivileged(unsigned long now_ms) const {
-  return isPairModeActive(now_ms) && now_ms < privileged_until_ms_;
 }
 
 void AnchorWatchRuntime::setPairMode(unsigned long now_ms, unsigned long ttl_ms) {
@@ -351,22 +517,105 @@ void AnchorWatchRuntime::setPairMode(unsigned long now_ms, unsigned long ttl_ms)
 
 void AnchorWatchRuntime::clearPairMode() {
   pair_mode_until_ms_ = 0;
-  privileged_until_ms_ = 0;
 }
 
-void AnchorWatchRuntime::confirmPrivileged(unsigned long now_ms) {
-  if (!isPairModeActive(now_ms)) {
-    privileged_until_ms_ = 0;
-    return;
-  }
-  privileged_until_ms_ = now_ms + PRIV_SESSION_TTL_MS;
+bool AnchorWatchRuntime::isSetupRequired() const {
+  return ble_connection_pin_.isEmpty();
 }
 
-bool AnchorWatchRuntime::requiresPrivilege(SessionTransport transport, const String& type) const {
-  if (transport != SessionTransport::BLE) {
-    return false;
+bool AnchorWatchRuntime::isLocalReady() const {
+  return !ble_connection_pin_.isEmpty();
+}
+
+bool AnchorWatchRuntime::isCloudReady() const {
+  return !ble_connection_pin_.isEmpty() && cloud_config_.secret_configured && !cloud_config_.cloud_secret.isEmpty();
+}
+
+const char* AnchorWatchRuntime::boatAccessStateString() const {
+  if (isSetupRequired()) {
+    return "SETUP_REQUIRED";
   }
-  return type != "GET_DATA" && type != "CANCEL";
+  if (isCloudReady()) {
+    return "CLOUD_READY";
+  }
+  return "LOCAL_READY";
+}
+
+AnchorWatchRuntime::SessionAuthRef* AnchorWatchRuntime::findSessionAuth(SessionTransport transport, const String& session_id) {
+  for (SessionAuthRef& entry : session_auth_) {
+    if (sessionMatches(entry.session, transport, session_id)) {
+      return &entry;
+    }
+  }
+  return nullptr;
+}
+
+const AnchorWatchRuntime::SessionAuthRef* AnchorWatchRuntime::findSessionAuth(SessionTransport transport, const String& session_id) const {
+  for (const SessionAuthRef& entry : session_auth_) {
+    if (sessionMatches(entry.session, transport, session_id)) {
+      return &entry;
+    }
+  }
+  return nullptr;
+}
+
+AnchorWatchRuntime::SessionAuthRef& AnchorWatchRuntime::ensureSessionAuth(SessionTransport transport, const String& session_id) {
+  SessionAuthRef* existing = findSessionAuth(transport, session_id);
+  if (existing != nullptr) {
+    return *existing;
+  }
+  session_auth_.push_back({});
+  SessionAuthRef& created = session_auth_.back();
+  created.session.transport = transport;
+  created.session.session_id = session_id;
+  return created;
+}
+
+bool AnchorWatchRuntime::isSetupAuthorized(SessionTransport transport, const String& session_id) const {
+  const SessionAuthRef* entry = findSessionAuth(transport, session_id);
+  return entry != nullptr && entry->setup_authorized;
+}
+
+bool AnchorWatchRuntime::isSessionAuthorized(SessionTransport transport, const String& session_id) const {
+  const SessionAuthRef* entry = findSessionAuth(transport, session_id);
+  return entry != nullptr && entry->session_authorized;
+}
+
+void AnchorWatchRuntime::clearAllSessionAuthorization() {
+  for (SessionAuthRef& entry : session_auth_) {
+    entry.setup_authorized = false;
+    entry.session_authorized = false;
+  }
+}
+
+void AnchorWatchRuntime::clearBleSessionAuthorization() {
+  for (SessionAuthRef& entry : session_auth_) {
+    if (entry.session.transport != SessionTransport::BLE) {
+      continue;
+    }
+    entry.setup_authorized = false;
+    entry.session_authorized = false;
+  }
+}
+
+void AnchorWatchRuntime::invalidateAuthorizedStreams(const String& code, const String& message) {
+  for (size_t index = 0; index < get_data_requests_.size();) {
+    if (get_data_requests_[index].session.transport != SessionTransport::BLE) {
+      index++;
+      continue;
+    }
+    sendError(get_data_requests_[index], code, message);
+    get_data_requests_.erase(get_data_requests_.begin() + index);
+  }
+
+  if (scan_active_ && active_scan_request_.session.transport == SessionTransport::BLE) {
+    sendError(active_scan_request_, code, message);
+    scan_active_ = false;
+    active_scan_request_ = {};
+    scan_results_.clear();
+    scan_emit_index_ = 0;
+    scan_needs_ack_ = false;
+  }
 }
 
 bool AnchorWatchRuntime::sessionMatches(const SessionRef& session, SessionTransport transport, const String& session_id) const {
@@ -375,7 +624,8 @@ bool AnchorWatchRuntime::sessionMatches(const SessionRef& session, SessionTransp
 
 void AnchorWatchRuntime::sendToSession(SessionTransport transport, const String& session_id, const String& json) {
   if (transport == SessionTransport::BLE) {
-    ble_.sendJson(json);
+    (void)session_id;
+    ble_outbox_.push_back(json);
     return;
   }
   cloud_.sendPayload(session_id, json);
@@ -394,21 +644,42 @@ void AnchorWatchRuntime::sendAck(const ActiveRequestRef& request) {
 }
 
 void AnchorWatchRuntime::publishBootstrap(const ActiveRequestRef& request) {
+  Serial.print("[bootstrap] start req_id=");
+  Serial.println(request.req_id);
+  logBootstrapSend("STATE_POSITION");
   send(request, buildPositionReply(request.req_id, "ONGOING", position_));
+  logBootstrapSend("STATE_DEPTH");
   send(request, buildDepthReply(request.req_id, "ONGOING", depth_));
+  logBootstrapSend("STATE_WIND");
   send(request, buildWindReply(request.req_id, "ONGOING", wind_));
+  logBootstrapSend("STATE_WLAN_STATUS");
   send(request, buildWlanStatusReply(request.req_id, "ONGOING", wlan_status_));
+  logBootstrapSend("STATE_SYSTEM_STATUS");
   send(request, buildSystemStatusReply(request.req_id, "ONGOING", system_status_));
+  logBootstrapSend("STATE_ANCHOR_POSITION");
   send(request, buildAnchorPositionReply(request.req_id, "ONGOING", anchor_position_));
+  logBootstrapSend("STATE_ALARM_STATE");
   send(request, buildAlarmStateReply(request.req_id, "ONGOING", alarm_state_));
+  logBootstrapSend("CONFIG_ALARM");
   send(request, buildAlarmConfigReply(request.req_id, "ONGOING", alarm_config_));
+  logBootstrapSend("CONFIG_OBSTACLES");
   send(request, buildObstaclesConfigReply(request.req_id, "ONGOING", obstacles_));
+  logBootstrapSend("CONFIG_ANCHOR_SETTINGS");
   send(request, buildRawConfigReply(request.req_id, "ONGOING", "CONFIG_ANCHOR_SETTINGS", anchor_settings_));
+  logBootstrapSend("CONFIG_PROFILES");
   send(request, buildRawConfigReply(request.req_id, "ONGOING", "CONFIG_PROFILES", profiles_));
+  logBootstrapSend("CONFIG_SYSTEM");
   send(request, buildSystemConfigReply(request.req_id, "ONGOING", system_config_));
+  logBootstrapSend("CONFIG_WLAN");
   send(request, buildWlanConfigReply(request.req_id, "ONGOING", wlan_config_));
-  send(request, buildCloudConfigReply(request.req_id, "ONGOING", cloud_config_));
+  if (request.session.transport == SessionTransport::BLE &&
+      isSessionAuthorized(request.session.transport, request.session.session_id)) {
+    logBootstrapSend("CONFIG_CLOUD");
+    send(request, buildCloudConfigReply(request.req_id, "ONGOING", cloud_config_));
+  }
+  logBootstrapSend("TRACK_BACKFILL");
   publishTrackBackfill(request);
+  Serial.println("[bootstrap] end");
 }
 
 void AnchorWatchRuntime::publishPositionToStreams() {
@@ -478,7 +749,10 @@ void AnchorWatchRuntime::publishConfigToStreams(const char* config_type) {
     } else if (String(config_type) == "CONFIG_WLAN") {
       send(request, buildWlanConfigReply(request.req_id, "ONGOING", wlan_config_));
     } else if (String(config_type) == "CONFIG_CLOUD") {
-      send(request, buildCloudConfigReply(request.req_id, "ONGOING", cloud_config_));
+      if (request.session.transport == SessionTransport::BLE &&
+          isSessionAuthorized(request.session.transport, request.session.session_id)) {
+        send(request, buildCloudConfigReply(request.req_id, "ONGOING", cloud_config_));
+      }
     }
   }
 }
@@ -513,8 +787,7 @@ void AnchorWatchRuntime::publishTrackBackfill(const ActiveRequestRef& request) {
 
 void AnchorWatchRuntime::updateWlan(unsigned long now_ms) {
   wl_status_t status = WiFi.status();
-  WlanConnectionState previous_state = wlan_status_.wifi_state;
-  String previous_error = wlan_status_.wifi_error;
+  const WlanStatusState previous_status = wlan_status_;
 
   if (status == WL_CONNECTED) {
     wlan_status_.wifi_state = WlanConnectionState::CONNECTED;
@@ -545,16 +818,16 @@ void AnchorWatchRuntime::updateWlan(unsigned long now_ms) {
     }
   }
 
-  if (previous_state != wlan_status_.wifi_state || previous_error != wlan_status_.wifi_error) {
+  if (!equalWlanStatusState(previous_status, wlan_status_)) {
     publishWlanStatusToStreams();
   }
 }
 
 void AnchorWatchRuntime::updateCloud(unsigned long now_ms) {
-  const bool previous_reachable = system_status_.cloud_reachable;
+  const SystemStatusState previous_status = system_status_;
   cloud_.loop(now_ms, wlan_status_.wifi_connected, cloud_config_);
   system_status_.cloud_reachable = cloud_.isConnected();
-  if (previous_reachable != system_status_.cloud_reachable) {
+  if (!equalSystemStatusState(previous_status, system_status_)) {
     if (debug_enabled_) {
       Serial.print("[cloud] reachable=");
       Serial.print(system_status_.cloud_reachable ? "true" : "false");
@@ -611,8 +884,8 @@ bool AnchorWatchRuntime::removeGetDataRequest(const ActiveRequestRef& request) {
   return false;
 }
 
-void AnchorWatchRuntime::closeOriginalRequestAsCanceled(const ActiveRequestRef& request) {
-  sendError(request, "CANCELED", "request canceled");
+void AnchorWatchRuntime::closeOriginalRequest(const ActiveRequestRef& request, const String& code, const String& message) {
+  sendError(request, code, message);
 }
 
 void AnchorWatchRuntime::closeSession(SessionTransport transport, const String& session_id, const String& reason) {
@@ -631,6 +904,14 @@ void AnchorWatchRuntime::closeSession(SessionTransport transport, const String& 
     scan_emit_index_ = 0;
     scan_needs_ack_ = false;
   }
+  for (size_t index = 0; index < session_auth_.size();) {
+    if (sessionMatches(session_auth_[index].session, transport, session_id)) {
+      session_auth_.erase(session_auth_.begin() + index);
+      continue;
+    }
+    index++;
+  }
+  refreshAuthValue();
 }
 
 bool AnchorWatchRuntime::handleCancel(const ActiveRequestRef& request, const RequestEnvelope& envelope) {
@@ -645,7 +926,7 @@ bool AnchorWatchRuntime::handleCancel(const ActiveRequestRef& request, const Req
     if (original.req_id == original_req_id &&
         sessionMatches(original.session, request.session.transport, request.session.session_id)) {
       get_data_requests_.erase(get_data_requests_.begin() + index);
-      closeOriginalRequestAsCanceled(original);
+      closeOriginalRequest(original, "CANCELED", "request canceled");
       sendAck(request);
       return true;
     }
@@ -659,7 +940,7 @@ bool AnchorWatchRuntime::handleCancel(const ActiveRequestRef& request, const Req
     scan_results_.clear();
     scan_emit_index_ = 0;
     scan_needs_ack_ = false;
-    closeOriginalRequestAsCanceled(original);
+    closeOriginalRequest(original, "CANCELED", "request canceled");
     sendAck(request);
     return true;
   }
@@ -685,8 +966,102 @@ void AnchorWatchRuntime::handleRequest(SessionTransport transport, const String&
     return;
   }
 
-  if (requiresPrivilege(transport, envelope.type) && !isPrivileged(millis())) {
-    sendError(request, "AUTH_FAILED", "pair mode and privileged session required");
+  if (envelope.type == "AUTHORIZE_SETUP") {
+    String factory_setup_pin;
+    if (!parseAuthorizeSetupRequest(envelope.data_raw, factory_setup_pin, error)) {
+      sendError(request, error.code, error.message);
+      return;
+    }
+    if (transport != SessionTransport::BLE) {
+      sendError(request, "AUTH_FAILED", "setup authorization is BLE-only");
+      return;
+    }
+    if (!isSetupRequired()) {
+      sendError(request, "INVALID_STATE", "boat setup already completed");
+      return;
+    }
+    if (!isPairModeActive(millis())) {
+      sendError(request, "AUTH_FAILED", "pair mode required");
+      return;
+    }
+    if (factory_setup_pin != FACTORY_SETUP_PIN) {
+      sendError(request, "AUTH_FAILED", "invalid factory_setup_pin");
+      return;
+    }
+    SessionAuthRef& auth = ensureSessionAuth(transport, session_id);
+    auth.setup_authorized = true;
+    auth.session_authorized = false;
+    sendAck(request);
+    refreshAuthValue();
+    return;
+  }
+
+  if (envelope.type == "AUTHORIZE_BLE_SESSION") {
+    String ble_connection_pin;
+    if (!parseAuthorizeBleSessionRequest(envelope.data_raw, ble_connection_pin, error)) {
+      sendError(request, error.code, error.message);
+      return;
+    }
+    if (transport != SessionTransport::BLE) {
+      sendError(request, "AUTH_FAILED", "BLE session authorization is BLE-only");
+      return;
+    }
+    if (isSetupRequired()) {
+      sendError(request, "INVALID_STATE", "boat setup required");
+      return;
+    }
+    if (ble_connection_pin != ble_connection_pin_) {
+      sendError(request, "AUTH_FAILED", "invalid ble_connection_pin");
+      return;
+    }
+    SessionAuthRef& auth = ensureSessionAuth(transport, session_id);
+    auth.setup_authorized = false;
+    auth.session_authorized = true;
+    sendAck(request);
+    refreshAuthValue();
+    return;
+  }
+
+  if (isSetupRequired()) {
+    if (envelope.type != "SET_INITIAL_BLE_PIN") {
+      sendError(request, "SETUP_REQUIRED", "boat setup required");
+      return;
+    }
+  } else {
+    if (transport == SessionTransport::BLE &&
+        envelope.type != "AUTHORIZE_BLE_SESSION" &&
+        !isSessionAuthorized(transport, session_id)) {
+      sendError(request, "AUTH_FAILED", "BLE session authorization required");
+      return;
+    }
+  }
+
+  if (envelope.type == "SET_INITIAL_BLE_PIN") {
+    String ble_connection_pin;
+    if (!parseSetInitialBlePinRequest(envelope.data_raw, ble_connection_pin, error)) {
+      sendError(request, error.code, error.message);
+      return;
+    }
+    if (transport != SessionTransport::BLE) {
+      sendError(request, "AUTH_FAILED", "initial BLE pin setup is BLE-only");
+      return;
+    }
+    if (!isSetupRequired()) {
+      sendError(request, "INVALID_STATE", "boat setup already completed");
+      return;
+    }
+    if (!isSetupAuthorized(transport, session_id)) {
+      sendError(request, "AUTH_FAILED", "setup authorization required");
+      return;
+    }
+    ble_connection_pin_ = ble_connection_pin;
+    storage_.saveIdentity(ble_connection_pin_, cloud_config_);
+    SessionAuthRef& auth = ensureSessionAuth(transport, session_id);
+    auth.setup_authorized = false;
+    auth.session_authorized = true;
+    sendAck(request);
+    refreshAuthValue();
+    refreshSnapshotValue();
     return;
   }
 
@@ -930,9 +1305,21 @@ void AnchorWatchRuntime::handleRequest(SessionTransport transport, const String&
   if (envelope.type == "UPDATE_CLOUD_CREDENTIALS") {
     uint32_t version = 0;
     String boat_id;
-    String boat_secret;
-    if (!parseCloudCredentialUpdate(envelope.data_raw, version, boat_id, boat_secret, error)) {
+    String cloud_secret;
+    if (!parseCloudCredentialUpdate(envelope.data_raw, version, boat_id, cloud_secret, error)) {
       sendError(request, error.code, error.message);
+      return;
+    }
+    if (transport != SessionTransport::BLE) {
+      sendError(request, "AUTH_FAILED", "cloud credential update is BLE-only");
+      return;
+    }
+    if (isSetupRequired()) {
+      sendError(request, "INVALID_STATE", "boat setup required");
+      return;
+    }
+    if (!isSessionAuthorized(transport, session_id)) {
+      sendError(request, "AUTH_FAILED", "BLE session authorization required");
       return;
     }
     if (version != cloud_config_.version) {
@@ -941,16 +1328,54 @@ void AnchorWatchRuntime::handleRequest(SessionTransport transport, const String&
     }
     cloud_config_.version++;
     cloud_config_.boat_id = boat_id;
-    cloud_config_.boat_secret = boat_secret;
+    cloud_config_.cloud_secret = cloud_secret;
     cloud_config_.secret_configured = true;
-    storage_.saveCloudConfig(cloud_config_);
+    storage_.saveIdentity(ble_connection_pin_, cloud_config_);
     sendAck(request);
     publishConfigToStreams("CONFIG_CLOUD");
     refreshAuthValue();
+    refreshSnapshotValue();
+    return;
+  }
+
+  if (envelope.type == "UPDATE_BLE_PIN") {
+    String old_ble_connection_pin;
+    String new_ble_connection_pin;
+    if (!parseUpdateBlePinRequest(envelope.data_raw, old_ble_connection_pin, new_ble_connection_pin, error)) {
+      sendError(request, error.code, error.message);
+      return;
+    }
+    if (transport != SessionTransport::BLE) {
+      sendError(request, "AUTH_FAILED", "BLE pin update is BLE-only");
+      return;
+    }
+    if (isSetupRequired()) {
+      sendError(request, "INVALID_STATE", "boat setup required");
+      return;
+    }
+    if (!isSessionAuthorized(transport, session_id)) {
+      sendError(request, "AUTH_FAILED", "BLE session authorization required");
+      return;
+    }
+    if (old_ble_connection_pin != ble_connection_pin_) {
+      sendError(request, "AUTH_FAILED", "invalid old_ble_connection_pin");
+      return;
+    }
+    ble_connection_pin_ = new_ble_connection_pin;
+    storage_.saveIdentity(ble_connection_pin_, cloud_config_);
+    clearBleSessionAuthorization();
+    invalidateAuthorizedStreams("AUTH_REVOKED", "BLE authorization revoked");
+    sendAck(request);
+    refreshAuthValue();
+    refreshSnapshotValue();
     return;
   }
 
   if (envelope.type == "SCAN_WLAN") {
+    if (transport != SessionTransport::BLE) {
+      sendError(request, "AUTH_FAILED", "wlan scan is BLE-only");
+      return;
+    }
     if (scan_active_) {
       sendError(request, "BUSY", "scan already active");
       return;
@@ -960,10 +1385,24 @@ void AnchorWatchRuntime::handleRequest(SessionTransport transport, const String&
       sendError(request, error.code, error.message);
       return;
     }
+    Serial.printf("[mem] scan start free_heap=%u\n", ESP.getFreeHeap());
+    WiFi.mode(WIFI_STA);
+    WiFi.enableSTA(true);
+    wifi_connect_started_ms_ = 0;
+    WiFi.disconnect(false, false);
+    delay(50);
     scan_results_.clear();
     const int found = WiFi.scanNetworks(false, parsed.include_hidden);
+    Serial.printf("[mem] scan after call free_heap=%u found=%d status=%d\n", ESP.getFreeHeap(), found, static_cast<int>(WiFi.status()));
+    if (found == WIFI_SCAN_RUNNING) {
+      sendError(request, "BUSY", "wifi scan already running");
+      return;
+    }
     if (found < 0) {
-      sendError(request, "DEVICE_FAILED", "wifi scan failed");
+      String message = "wifi scan failed rc=" + String(found) + " status=" + String(static_cast<int>(WiFi.status()));
+      Serial.print("[wifi] ");
+      Serial.println(message);
+      sendError(request, "DEVICE_FAILED", message);
       WiFi.scanDelete();
       return;
     }

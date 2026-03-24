@@ -38,6 +38,12 @@ class AnchorWatchRuntime : public BleTransportListener, public CloudTransportLis
     String req_id;
   };
 
+  struct SessionAuthRef {
+    SessionRef session;
+    bool setup_authorized = false;
+    bool session_authorized = false;
+  };
+
   Storage storage_;
   BleTransport ble_;
   CloudTransport cloud_;
@@ -45,6 +51,7 @@ class AnchorWatchRuntime : public BleTransportListener, public CloudTransportLis
   AlarmEngine alarm_engine_;
 
   String device_id_;
+  String ble_connection_pin_;
   CloudConfigValue cloud_config_;
   AlarmConfigValue alarm_config_;
   ObstaclesConfigValue obstacles_;
@@ -66,6 +73,8 @@ class AnchorWatchRuntime : public BleTransportListener, public CloudTransportLis
   size_t track_history_next_ = 0;
 
   std::vector<ActiveRequestRef> get_data_requests_;
+  std::vector<SessionAuthRef> session_auth_;
+  std::vector<String> ble_outbox_;
   bool scan_active_ = false;
   ActiveRequestRef active_scan_request_;
   std::vector<WlanNetworkValue> scan_results_;
@@ -74,8 +83,8 @@ class AnchorWatchRuntime : public BleTransportListener, public CloudTransportLis
 
   unsigned long last_telemetry_tick_ms_ = 0;
   unsigned long last_history_sample_ms_ = 0;
+  unsigned long last_ble_send_ms_ = 0;
   unsigned long pair_mode_until_ms_ = 0;
-  unsigned long privileged_until_ms_ = 0;
   unsigned long wifi_connect_started_ms_ = 0;
   unsigned long wifi_next_retry_ms_ = 0;
   unsigned long wifi_retry_delay_ms_ = WIFI_RETRY_MIN_MS;
@@ -94,6 +103,7 @@ class AnchorWatchRuntime : public BleTransportListener, public CloudTransportLis
   void handleSerialCommand(const String& line);
   void handleRequest(SessionTransport transport, const String& session_id, const String& json);
   void updateLoopState(unsigned long now_ms);
+  void flushBleOutbox(unsigned long now_ms);
   void updateTelemetry(unsigned long now_ms);
   void clearTelemetryForLiveMode();
   void recordTrackPoint(uint64_t now_ts);
@@ -117,16 +127,24 @@ class AnchorWatchRuntime : public BleTransportListener, public CloudTransportLis
   bool telemetryReady() const;
   uint64_t currentEpochMs() const;
   uint64_t pairModeUntilTs() const;
-  uint64_t privilegedUntilTs() const;
   bool isPairModeActive(unsigned long now_ms) const;
-  bool isPrivileged(unsigned long now_ms) const;
   void setPairMode(unsigned long now_ms, unsigned long ttl_ms);
   void clearPairMode();
-  void confirmPrivileged(unsigned long now_ms);
-  bool requiresPrivilege(SessionTransport transport, const String& type) const;
+  bool isSetupRequired() const;
+  bool isLocalReady() const;
+  bool isCloudReady() const;
+  const char* boatAccessStateString() const;
+  SessionAuthRef* findSessionAuth(SessionTransport transport, const String& session_id);
+  const SessionAuthRef* findSessionAuth(SessionTransport transport, const String& session_id) const;
+  SessionAuthRef& ensureSessionAuth(SessionTransport transport, const String& session_id);
+  bool isSetupAuthorized(SessionTransport transport, const String& session_id) const;
+  bool isSessionAuthorized(SessionTransport transport, const String& session_id) const;
+  void clearAllSessionAuthorization();
+  void clearBleSessionAuthorization();
+  void invalidateAuthorizedStreams(const String& code, const String& message);
   bool handleCancel(const ActiveRequestRef& request, const RequestEnvelope& envelope);
   bool removeGetDataRequest(const ActiveRequestRef& request);
-  void closeOriginalRequestAsCanceled(const ActiveRequestRef& request);
+  void closeOriginalRequest(const ActiveRequestRef& request, const String& code, const String& message);
   void closeSession(SessionTransport transport, const String& session_id, const String& reason);
   bool sessionMatches(const SessionRef& session, SessionTransport transport, const String& session_id) const;
   void sendToSession(SessionTransport transport, const String& session_id, const String& json);
