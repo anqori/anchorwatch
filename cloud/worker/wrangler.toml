@@ -7,8 +7,8 @@ routes = [{ pattern = "aw-cloud.anqori.com", custom_domain = true }]
 [vars]
 ALLOWED_ORIGIN = "*"
 BUILD_VERSION = "run-unknown"
-# Optional non-secret boat scope lock (auth still uses BOAT_SECRET secret).
-# BOAT_ID = "boat_demo_001"
+WS_TICKET_TTL_MS = "60000"
+# Configure pre-seeded boats via the PRECONFIGURED_BOATS_JSON worker secret.
 
 [env.dev]
 name = "anqori-anchorwatch-relay-dev"
@@ -18,17 +18,28 @@ routes = [{ pattern = "dev-aw-cloud.anqori.com", custom_domain = true }]
 [env.dev.vars]
 ALLOWED_ORIGIN = "*"
 BUILD_VERSION = "dev-unknown"
-# Optional non-secret boat scope lock for dev lane.
-# BOAT_ID = "boat_demo_dev_001"
+WS_TICKET_TTL_MS = "60000"
 
 [[env.dev.durable_objects.bindings]]
 name = "BOAT_PIPE"
 class_name = "BoatPipeDurableObject"
 
+[[env.dev.durable_objects.bindings]]
+name = "BOAT_REGISTRY"
+class_name = "BoatRegistryDurableObject"
+
 [[durable_objects.bindings]]
 name = "BOAT_PIPE"
 class_name = "BoatPipeDurableObject"
 
+[[durable_objects.bindings]]
+name = "BOAT_REGISTRY"
+class_name = "BoatRegistryDurableObject"
+
 [[migrations]]
 tag = "v1"
 new_classes = ["BoatPipeDurableObject"]
+
+[[migrations]]
+tag = "v2"
+new_classes = ["BoatRegistryDurableObject"]

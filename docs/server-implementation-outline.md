@@ -33,6 +33,31 @@ This document does not define:
 
 Those are implementation choices.
 
+## Code Structure Expectations
+
+The two implementations do not need to mirror each other file-for-file.
+
+However, the firmware implementation must not remain one huge sketch file.
+
+Required expectation:
+
+- firmware must be structured across multiple source files with clear responsibilities
+
+At minimum, the firmware refactor should split these concerns apart:
+
+- transport and BLE/WLAN adapters
+- protocol parsing/serialization
+- command handling
+- authoritative state/config storage
+- history retention
+- alarm evaluation and signaling
+- persistence/helpers
+
+Why this is explicit:
+
+- the ESP implementation has tighter constraints than Android, but a monolithic file still makes protocol, alarm, and persistence changes too risky
+- the firmware and Android implementations can differ internally, but both should still have separable subsystems that map cleanly to this outline
+
 ## Core Rule
 
 Both implementations must behave as if each boat is processed by one logical serialized executor.
@@ -80,7 +105,9 @@ It should have these conceptual subsystems:
    - `obstacles`
    - `anchor_settings`
    - `profiles`
+   - `system_config`
    - `wlan_config`
+   - `cloud_config`
 5. `history_store`
    - retained position/depth/wind history
    - last anchor-down timestamp
@@ -96,6 +123,23 @@ It should have these conceptual subsystems:
    - siren / local notification / other implementation outputs
 
 These are conceptual modules. Real code may combine or split them.
+
+## Shared Mode Expectations
+
+Both implementations must treat `CONFIG_SYSTEM.runtime_mode` as a first-class config domain.
+
+Required modes:
+
+- `LIVE`
+- `SIMULATION`
+
+Shared expectations:
+
+- changing `runtime_mode` is a normal config mutation and must follow the same versioned whole-value update rules as other config DTOs
+- when `runtime_mode = SIMULATION`, both implementations must synthesize the same scenario defined in [`docs/server-functional-spec.md`](/home/pm/dev/anchormaster/docs/server-functional-spec.md)
+- when `runtime_mode = LIVE`, both implementations must use real providers only
+- in `LIVE` mode, authoritative timestamped position/depth/wind telemetry, retained history, and alarm evaluation must stay gated until trustworthy GPS/GNSS-derived wall-clock time is available
+- non-telemetry control paths such as config writes, pairing, and WLAN scanning may still function before live telemetry is available
 
 ## Logical Connection Abstraction
 
@@ -134,6 +178,7 @@ External events include:
 - request cancellation
 - client disconnect
 - sensor/input sample
+- simulation tick/sample
 - timer/tick event
 - WLAN scan result
 
@@ -176,6 +221,7 @@ For every `UPDATE_CONFIG_*` request:
 Important expectation:
 
 - all successful config writes must become visible to every active `GET_DATA` stream in the same order
+- `UPDATE_CONFIG_SYSTEM` must switch runtime mode atomically from the app's point of view
 
 ## Alarm Evaluation Expectations
 

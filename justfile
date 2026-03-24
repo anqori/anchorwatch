@@ -32,7 +32,7 @@ firmware-build:
   arduino_cli="${ARDUINO_CLI:-arduino-cli}"
   cli_config="${CLI_CONFIG:-arduino-cli.yaml}"
   fqbn="${FQBN:-esp32:esp32:esp32s3}"
-  board_options="${BOARD_OPTIONS:-}"
+  board_options="${BOARD_OPTIONS:-PartitionScheme=huge_app}"
   build_dir="${BUILD_DIR:-build}"
   sketch_dir="${SKETCH_DIR:-firmware/arduino-project}"
   board_args=()
@@ -46,7 +46,7 @@ firmware-upload:
   arduino_cli="${ARDUINO_CLI:-arduino-cli}"
   cli_config="${CLI_CONFIG:-arduino-cli.yaml}"
   fqbn="${FQBN:-esp32:esp32:esp32s3}"
-  board_options="${BOARD_OPTIONS:-}"
+  board_options="${BOARD_OPTIONS:-PartitionScheme=huge_app}"
   build_dir="${BUILD_DIR:-build}"
   sketch_dir="${SKETCH_DIR:-firmware/arduino-project}"
   port="${PORT:-$($arduino_cli board list --config-file "$cli_config" | awk 'NR==2 {print $1}')}"
@@ -302,6 +302,7 @@ cloudflare-dev:
   VITE_BUILD_VERSION="$version" VITE_RELAY_BASE_URL="$dev_cloud_url" npm run build
   cd ..
   npx --yes wrangler pages deploy app/dist --project-name "$pages_project" --branch "$pages_branch" --commit-dirty=true
+  just worker-secret-put-dev
   cd cloud/worker
   npx --yes wrangler deploy --env dev --var "BUILD_VERSION:$version"
 
@@ -333,6 +334,7 @@ cloudflare-release:
   VITE_BUILD_VERSION="$version" VITE_RELAY_BASE_URL="$release_cloud_url" npm run build
   cd ..
   npx --yes wrangler pages deploy app/dist --project-name "$pages_project" --branch "$pages_branch" --commit-dirty=true
+  just worker-secret-put-release
   cd cloud/worker
   npx --yes wrangler deploy --var "BUILD_VERSION:$version"
 
@@ -349,7 +351,7 @@ worker-kv-create:
   npx --yes wrangler kv namespace create "${CF_KV_NAMESPACE_NAME:-anqori-anchorwatch-relay}" --binding "${CF_KV_BINDING:-RELAY_KV}" --update-config
   npx --yes wrangler kv namespace create "${CF_KV_NAMESPACE_NAME:-anqori-anchorwatch-relay}" --binding "${CF_KV_BINDING:-RELAY_KV}" --preview --update-config
 
-# Set BOAT_SECRET in release and dev workers.
+# Set PRECONFIGURED_BOATS_JSON in release and dev workers.
 [private]
 worker-secret-put-release:
   #!/usr/bin/env bash
@@ -358,8 +360,9 @@ worker-secret-put-release:
   if [[ -f .env.secret ]]; then set -a; source .env.secret; set +a; fi
   test -n "${CLOUDFLARE_API_TOKEN:-}" || (echo "CLOUDFLARE_API_TOKEN missing in .env.secret" && exit 1)
   test -n "${CLOUDFLARE_ACCOUNT_ID:-}" || (echo "CLOUDFLARE_ACCOUNT_ID missing in .env (get it via: npx --yes wrangler whoami)" && exit 1)
+  test -n "${PRECONFIGURED_BOATS_JSON:-}" || (echo "PRECONFIGURED_BOATS_JSON missing in .env.secret" && exit 1)
   cd cloud/worker
-  npx --yes wrangler secret put BOAT_SECRET
+  printf '%s' "$PRECONFIGURED_BOATS_JSON" | npx --yes wrangler secret put PRECONFIGURED_BOATS_JSON
 
 [private]
 worker-secret-put-dev:
@@ -369,5 +372,6 @@ worker-secret-put-dev:
   if [[ -f .env.secret ]]; then set -a; source .env.secret; set +a; fi
   test -n "${CLOUDFLARE_API_TOKEN:-}" || (echo "CLOUDFLARE_API_TOKEN missing in .env.secret" && exit 1)
   test -n "${CLOUDFLARE_ACCOUNT_ID:-}" || (echo "CLOUDFLARE_ACCOUNT_ID missing in .env (get it via: npx --yes wrangler whoami)" && exit 1)
+  test -n "${PRECONFIGURED_BOATS_JSON:-}" || (echo "PRECONFIGURED_BOATS_JSON missing in .env.secret" && exit 1)
   cd cloud/worker
-  npx --yes wrangler secret put BOAT_SECRET --env dev
+  printf '%s' "$PRECONFIGURED_BOATS_JSON" | npx --yes wrangler secret put PRECONFIGURED_BOATS_JSON --env dev

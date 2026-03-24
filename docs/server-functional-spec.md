@@ -95,8 +95,12 @@ The server owns three classes of data.
   - allowed region/range rules and other anchor-related settings
 - `profiles`
   - profile/runtime preference groups the app can edit as a whole value
+- `system_config`
+  - global server runtime mode settings such as `LIVE` versus `SIMULATION`
 - `wlan_config`
   - stored WLAN target and connection settings
+- `cloud_config`
+  - readable cloud identity metadata such as `boat_id` and whether a cloud server credential is configured; the credential itself is write-only and must never be emitted back to clients
 
 ### History
 
@@ -188,6 +192,32 @@ Input-source rules:
 - unavailable inputs must result in missing/stale runtime values rather than invented data
 - the app-facing protocol and authoritative state model must stay the same regardless of the active provider set
 
+### 1a. Shared simulation mode
+
+Both server implementations must support a shared simulation mode controlled by `CONFIG_SYSTEM.runtime_mode`.
+
+When `runtime_mode = SIMULATION`, the server must synthesize runtime data with these shared semantics:
+
+- simulation clock starts at `2025-08-01T15:00:00Z`
+- simulation center coordinate is `lat = 54.38329`, `lon = 10.16349`
+- simulated position follows a random walk constrained to a 200 meter radius around that center
+- simulated depth is `5.0 m` at the center and decreases linearly to `1.5 m` at the edge of that 200 meter circle
+- simulated wind follows a slow random walk with a maximum change rate of:
+  - `5 kn` per minute
+  - `20 deg` per minute
+
+These semantics must match for both:
+
+- firmware
+- Android app helper/device runtime
+
+When `runtime_mode = LIVE`, the server must use real input providers only.
+
+Live-mode rule:
+
+- until a trustworthy GPS/GNSS-derived timestamp is available, the server must not produce authoritative timestamped position/depth/wind runtime samples, retain runtime history from them, or evaluate alarms from them
+- config handling, WLAN handling, and other non-telemetry control behavior may still function before live time is available
+
 ### 2. Runtime data production
 
 The server must continuously produce an internal authoritative runtime view from:
@@ -259,7 +289,7 @@ When the server receives `GET_DATA`, it must:
 
 - open a long-lived request for that connection
 - reply with a bootstrap sequence of `ONGOING` messages on the same `req_id`
-- send current known state/config values as typed replies such as `STATE_POSITION`, `STATE_WIND`, `STATE_ANCHOR_POSITION`, `CONFIG_ALARM`, or `CONFIG_OBSTACLES`
+- send current known state/config values as typed replies such as `STATE_POSITION`, `STATE_WIND`, `STATE_ANCHOR_POSITION`, `CONFIG_ALARM`, `CONFIG_OBSTACLES`, `CONFIG_SYSTEM`, or `CONFIG_CLOUD`
 - include config DTO versions inside the `data` payload of `CONFIG_*` replies
 - send retained track backfill as one or more `TRACK_BACKFILL` replies
 - not require a dedicated snapshot payload shape
@@ -334,6 +364,7 @@ The server must expose separate single-payload config update requests:
 - `UPDATE_CONFIG_OBSTACLES`
 - `UPDATE_CONFIG_ANCHOR_SETTINGS`
 - `UPDATE_CONFIG_PROFILES`
+- `UPDATE_CONFIG_SYSTEM`
 - `UPDATE_CONFIG_WLAN`
 
 For every `UPDATE_CONFIG_*` request, the server must:
@@ -351,6 +382,22 @@ Each `UPDATE_CONFIG_*` request is all-or-nothing:
 
 - if validation fails, no change is applied
 - if the supplied config version mismatches, no change is applied
+
+`UPDATE_CLOUD_CREDENTIALS` is the special case for cloud identity and credential updates.
+
+For `UPDATE_CLOUD_CREDENTIALS`, the server must:
+
+- parse `version`, `boat_id`, and `boat_secret` from request `data`
+- require non-empty `boat_id` and `boat_secret`
+- reject the request without side effects if the supplied version mismatches the current authoritative `cloud_config.version`
+- persist the new `boat_id` and `boat_secret` atomically
+- increment `cloud_config.version` only after a successful write
+- emit the updated readable `CONFIG_CLOUD` value to all active streams
+
+Rules:
+
+- `boat_secret` is write-only and must never appear in `GET_DATA`, `CONFIG_CLOUD`, `ACK`, or `ERROR` replies
+- clients may observe whether a secret is configured, but never the secret value itself
 
 ### 11. `SCAN_WLAN`
 
@@ -445,6 +492,8 @@ Cloud authorization direction:
 - only explicitly created boats are allowed to use the cloud relay
 - user-authenticated apps should obtain cloud WebSocket tickets from the control plane based on boat membership/access rights
 - the boat/server should obtain cloud WebSocket tickets using a boat-scoped server credential such as `boat_secret`
+- in the current pre-control-plane phase, firmware/server-side cloud credentials may be set locally through `UPDATE_CLOUD_CREDENTIALS`
+- that local credential update path must not permit reading the configured `boat_secret` back out through the protocol
 - app and server cloud connections remain separate request/reply sessions even when they target the same boat
 - duplicated streamed data across multiple app sessions is acceptable for now
 

@@ -63,7 +63,15 @@ Create `.env.secret`:
 ```bash
 cat > .env.secret <<'EOF'
 CLOUDFLARE_API_TOKEN=replace_with_token
+PRECONFIGURED_BOATS_JSON='[]'
 EOF
+```
+
+`PRECONFIGURED_BOATS_JSON` is the JSON array that seeds the relay's allowed boat registry.
+Example value:
+
+```bash
+PRECONFIGURED_BOATS_JSON='[{"boat_id":"BOAT_123","boat_secret":"replace_me","enabled":true}]'
 ```
 
 Configure non-secret values in `.env` (defaults already point to `anqori` domains):

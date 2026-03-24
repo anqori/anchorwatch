@@ -105,7 +105,9 @@ Runtime/config types:
 - `UPDATE_CONFIG_OBSTACLES`
 - `UPDATE_CONFIG_ANCHOR_SETTINGS`
 - `UPDATE_CONFIG_PROFILES`
+- `UPDATE_CONFIG_SYSTEM`
 - `UPDATE_CONFIG_WLAN`
+- `UPDATE_CLOUD_CREDENTIALS`
 - `CANCEL`
 
 Onboarding types:
@@ -127,7 +129,9 @@ Runtime/config reply types:
 - `CONFIG_OBSTACLES`
 - `CONFIG_ANCHOR_SETTINGS`
 - `CONFIG_PROFILES`
+- `CONFIG_SYSTEM`
 - `CONFIG_WLAN`
+- `CONFIG_CLOUD`
 
 Other reply types:
 
@@ -170,6 +174,8 @@ Example request and bootstrap sequence:
 { "req_id": "01HZXJ0Q8J72E9K4N5P6R7S8T9", "state": "ONGOING", "type": "STATE_DEPTH", "data": { "depth_m": 3.1, "ts": 1770897600000 } }
 { "req_id": "01HZXJ0Q8J72E9K4N5P6R7S8T9", "state": "ONGOING", "type": "STATE_WLAN_STATUS", "data": { "wifi_state": "CONNECTED", "wifi_connected": true, "wifi_ssid": "Marina", "wifi_rssi": -63, "wifi_error": "" } }
 { "req_id": "01HZXJ0Q8J72E9K4N5P6R7S8T9", "state": "ONGOING", "type": "STATE_ANCHOR_POSITION", "data": { "state": "down", "lat": 54.3201, "lon": 10.1402 } }
+{ "req_id": "01HZXJ0Q8J72E9K4N5P6R7S8T9", "state": "ONGOING", "type": "CONFIG_SYSTEM", "data": { "version": 2, "runtime_mode": "LIVE" } }
+{ "req_id": "01HZXJ0Q8J72E9K4N5P6R7S8T9", "state": "ONGOING", "type": "CONFIG_CLOUD", "data": { "version": 4, "boat_id": "BOAT_123", "secret_configured": true } }
 { "req_id": "01HZXJ0Q8J72E9K4N5P6R7S8T9", "state": "ONGOING", "type": "TRACK_BACKFILL", "data": [ { "ts": 1770897600000, "lat": 54.3201, "lon": 10.1402, "cog_deg": 192.3, "heading_deg": 188.0, "sog_kn": 0.42, "depth_m": 3.1, "wind_kn": 14.8, "wind_dir_deg": 205.0 } ] }
 ```
 
@@ -201,14 +207,17 @@ App-writable config values use `CONFIG_*` reply types:
 - `CONFIG_OBSTACLES`
 - `CONFIG_ANCHOR_SETTINGS`
 - `CONFIG_PROFILES`
+- `CONFIG_SYSTEM`
 - `CONFIG_WLAN`
+- `CONFIG_CLOUD`
 
 Config DTOs carry a monotonic `version` field inside `data`.
 
-Version matching is only used for app-to-server config writes:
+Version matching is used for app-to-server config writes:
 
 - the app sends the full config DTO directly in `data`, including its current `version`
-- the app uses one matching `UPDATE_CONFIG_*` request per config DTO
+- most config DTOs use one matching `UPDATE_CONFIG_*` request
+- `CONFIG_CLOUD` is the exception because the cloud secret is write-only and therefore uses `UPDATE_CLOUD_CREDENTIALS`
 - the server accepts the write only if that version matches the current authoritative version
 - on success the server increments the config DTO version and publishes the new full config DTO
 - on mismatch the server replies with `type: "ERROR"` and `CLOSED_FAILED`
@@ -442,6 +451,58 @@ Fields:
 - `security`: WLAN security mode
 - `country`: WLAN regulatory country code
 - `hidden`: whether the target WLAN is hidden
+
+### `SystemConfigValue`
+
+Used as `data` when `type=CONFIG_SYSTEM`.
+
+```json
+{
+  "version": 2,
+  "runtime_mode": "LIVE"
+}
+```
+
+Fields:
+
+- `version`: config version used for compare-and-swap writes
+- `runtime_mode`: `RuntimeMode` enum value
+
+Rules:
+
+- `runtime_mode` controls whether the server uses real live inputs or the shared simulation scenario
+- both firmware and Android implementations must follow the same simulation semantics when `runtime_mode = "SIMULATION"`
+
+### `RuntimeMode`
+
+Allowed `runtime_mode` values:
+
+- `LIVE`
+- `SIMULATION`
+
+### `CloudConfigValue`
+
+Used as `data` when `type=CONFIG_CLOUD`.
+
+```json
+{
+  "version": 4,
+  "boat_id": "BOAT_123",
+  "secret_configured": true
+}
+```
+
+Fields:
+
+- `version`: config version used for credential update compare-and-swap writes
+- `boat_id`: cloud routing identifier for this boat
+- `secret_configured`: whether a cloud server credential is currently configured on the server
+
+Rules:
+
+- `CloudConfigValue` intentionally does not expose `boat_secret`
+- `boat_secret` is write-only in the protocol
+- the server must never emit `boat_secret` in `CONFIG_CLOUD`, `ACK`, `ERROR`, or any other reply payload
 
 ### `WlanNetworkValue`
 
@@ -862,10 +923,23 @@ Fields:
 - replaces `CONFIG_PROFILES`
 - request `data` is the full profiles DTO
 
+`UPDATE_CONFIG_SYSTEM`
+
+- replaces `CONFIG_SYSTEM`
+- request `data` is the full system config DTO
+
 `UPDATE_CONFIG_WLAN`
 
 - replaces `CONFIG_WLAN`
 - request `data` is the full WLAN config DTO
+
+`UPDATE_CLOUD_CREDENTIALS`
+
+- updates the server's cloud identity/credential pair
+- request `data` contains the current `version`, the desired `boat_id`, and the new `boat_secret`
+- the server persists the new values atomically
+- on success the server increments `CONFIG_CLOUD.version` and publishes the new `CONFIG_CLOUD`
+- the server never echoes `boat_secret` back to the client
 
 For every `UPDATE_CONFIG_*` request:
 
@@ -873,6 +947,32 @@ For every `UPDATE_CONFIG_*` request:
 - that DTO includes its own `version`
 - the server accepts the write only if the supplied version matches the current authoritative version
 - after success, the server increments the stored version and publishes the new config DTO
+
+### `UpdateCloudCredentialsRequest`
+
+Used as request `data` when `type=UPDATE_CLOUD_CREDENTIALS`.
+
+```json
+{
+  "version": 4,
+  "boat_id": "BOAT_123",
+  "boat_secret": "replace_me"
+}
+```
+
+Fields:
+
+- `version`: current `CONFIG_CLOUD.version`
+- `boat_id`: desired cloud routing identifier for this boat
+- `boat_secret`: new boat-scoped cloud credential
+
+Rules:
+
+- both `boat_id` and `boat_secret` are required and must be non-empty
+- the server accepts the write only if `version` matches the current authoritative `CONFIG_CLOUD.version`
+- successful writes increment the stored cloud config version
+- the server publishes the updated readable `CONFIG_CLOUD` value after success
+- `boat_secret` is write-only and must never appear in any reply
 
 Example:
 
@@ -994,7 +1094,8 @@ Cloud identity and routing notes:
 
 - `boat_id` is a non-secret cloud routing key
 - only explicitly created boats are allowed to use the relay
-- the normal v2 message envelope does not carry `boat_id` or cloud secrets
+- cloud transport establishment does not rely on `boat_id` or `boat_secret` being present in relay-routed runtime messages
+- a local write request such as `UPDATE_CLOUD_CREDENTIALS` may carry `boat_id` and `boat_secret` between app and server, but the relay must treat them as opaque business payloads
 - app and server each obtain a short-lived WebSocket ticket before opening the cloud socket
 - the relay validates the ticket, resolves the authorized `boat_id`, and then attaches the socket to that boat's durable object
 - app-side ticket issuance is authorized from the logged-in user's access to the boat

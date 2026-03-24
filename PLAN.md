@@ -22,14 +22,17 @@ The cloud worker is a dumb authenticated proxy. BLE and cloud carry the same req
    - bootstrap includes current state/config values plus anchor-track backfill from `min(last_anchor_down_ts, now - 30 minutes)`
    - later replies continue streaming whole-value replacements and track backfill messages
 3. Runtime state is server-authoritative and includes `anchor_position`.
-   - app-writable config is limited to `alarm_config`, `obstacles`, `anchor_settings`, `profiles`, and `wlan_config`
+   - app-visible config includes `alarm_config`, `obstacles`, `anchor_settings`, `profiles`, `system_config`, `wlan_config`, and readable `cloud_config`
 4. Config writes use separate single-payload commands and compare-and-swap on the config DTO's own `version` field.
    - `UPDATE_CONFIG_ALARM`
    - `UPDATE_CONFIG_OBSTACLES`
    - `UPDATE_CONFIG_ANCHOR_SETTINGS`
    - `UPDATE_CONFIG_PROFILES`
+   - `UPDATE_CONFIG_SYSTEM`
    - `UPDATE_CONFIG_WLAN`
+   - `UPDATE_CLOUD_CREDENTIALS`
    - server-to-app replies are always authoritative overrides
+   - `CONFIG_SYSTEM.runtime_mode` switches between `LIVE` and the shared `SIMULATION` scenario used by both firmware and Android server implementations
 5. Client cancellation is explicit with `type: "CANCEL"` and `data.original_req_id`.
 6. Onboarding WLAN flows use the same protocol:
    - `SCAN_WLAN` is a streamed request that emits one `WLAN_NETWORK` entry at a time and closes with `ACK`
@@ -47,7 +50,7 @@ The cloud worker is a dumb authenticated proxy. BLE and cloud carry the same req
 
 - Finish device/cloud end-to-end validation on real hardware.
 - Add the device-side WLAN/cloud uplink runtime that publishes the same v2 envelopes over the relay.
-- Decide the long-term greenfield onboarding secret exchange that replaces the old ad-hoc BLE event flow. The current code keeps pair/session state on the auth characteristic and exposes manual secret retrieval over serial while the v2 transport cleanup lands.
+- Keep cloud credentials write-only in the local protocol during the pre-control-plane phase. The server may expose readable `cloud_config` metadata such as `boat_id` and `secret_configured`, but must never echo `boat_secret` back to clients.
 - Add the long-term cloud control plane:
   - users authenticate with OAuth
   - logged-in users explicitly create boats
