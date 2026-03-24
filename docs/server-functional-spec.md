@@ -80,8 +80,6 @@ The server owns three classes of data.
   - latest wind sample
 - `wlan_status`
   - WLAN connection phase, connection result, selected SSID, signal strength, and related WLAN runtime details
-- `ble_status`
-  - local BLE pair-mode visibility and related BLE-local onboarding/runtime status
 - `system_status`
   - cloud reachability, build/version, and other non-anchor runtime metadata needed by the app
 - `alarm_state`
@@ -90,7 +88,9 @@ The server owns three classes of data.
 ### App-writable config
 
 - `alarm_config`
-  - alarm thresholds, durations, severities, and similar settings
+  - per-alert alarm settings using a common alert envelope with `type`, `enabled`, `min_time_ms`, `severity`, `default_silence_ms`, and alert-specific `data`
+- `obstacles`
+  - multiple obstacle polygons the boat must not enter, each tagged as `PERMANENT` or `TEMPORARY`
 - `anchor_settings`
   - allowed region/range rules and other anchor-related settings
 - `profiles`
@@ -223,6 +223,11 @@ The server must continuously evaluate alarm conditions from the latest:
 - configuration thresholds and rules
 - per-alert silence state
 
+For `OBSTACLE_CLOSE` specifically, the server must evaluate the alert against:
+
+- the configured obstacle polygons from `obstacles`
+- the alert's configured `min_distance_m` from `alarm_config`
+
 The server must do this even if no app is currently connected.
 
 When alarm state changes, the server must:
@@ -241,7 +246,8 @@ Signaling behavior must remain consistent with the authoritative `alarm_state`, 
 
 Note:
 
-- silence and output are per-alert concerns, not global wrapper state
+- silence is a per-alert concern, not a global wrapper state
+- output routing is not configurable through `alarm_config`; raised alerts are signaled on all outputs available on that implementation
 - `alarm_state.alerts` is an array of alert entries, not a hash/map
 - if a client wants an aggregate alarm summary, it derives that from the individual alert entries in `alarm_state`
 
@@ -253,8 +259,7 @@ When the server receives `GET_DATA`, it must:
 
 - open a long-lived request for that connection
 - reply with a bootstrap sequence of `ONGOING` messages on the same `req_id`
-- send current known state/config values as typed replies such as `STATE_POSITION`, `STATE_WIND`, `STATE_ANCHOR_POSITION`, or `CONFIG_ALARM`
-- include transport-specific status values such as `STATE_BLE_STATUS` when they are relevant on that connection
+- send current known state/config values as typed replies such as `STATE_POSITION`, `STATE_WIND`, `STATE_ANCHOR_POSITION`, `CONFIG_ALARM`, or `CONFIG_OBSTACLES`
 - include config DTO versions inside the `data` payload of `CONFIG_*` replies
 - send retained track backfill as one or more `TRACK_BACKFILL` replies
 - not require a dedicated snapshot payload shape
@@ -308,6 +313,7 @@ The server must:
 
 - validate the requested silence action
 - require `data.alert_type`
+- apply that alert type's configured `default_silence_ms`
 - update the authoritative `alarm_state`
 - emit the new `alarm_state` to active streams
 
@@ -325,6 +331,7 @@ The server must:
 The server must expose separate single-payload config update requests:
 
 - `UPDATE_CONFIG_ALARM`
+- `UPDATE_CONFIG_OBSTACLES`
 - `UPDATE_CONFIG_ANCHOR_SETTINGS`
 - `UPDATE_CONFIG_PROFILES`
 - `UPDATE_CONFIG_WLAN`

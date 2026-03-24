@@ -102,6 +102,7 @@ Runtime/config types:
 - `SILENCE_ALARM`
 - `UNSILENCE_ALARM`
 - `UPDATE_CONFIG_ALARM`
+- `UPDATE_CONFIG_OBSTACLES`
 - `UPDATE_CONFIG_ANCHOR_SETTINGS`
 - `UPDATE_CONFIG_PROFILES`
 - `UPDATE_CONFIG_WLAN`
@@ -120,10 +121,10 @@ Runtime/config reply types:
 - `STATE_DEPTH`
 - `STATE_WIND`
 - `STATE_WLAN_STATUS`
-- `STATE_BLE_STATUS`
 - `STATE_SYSTEM_STATUS`
 - `STATE_ALARM_STATE`
 - `CONFIG_ALARM`
+- `CONFIG_OBSTACLES`
 - `CONFIG_ANCHOR_SETTINGS`
 - `CONFIG_PROFILES`
 - `CONFIG_WLAN`
@@ -168,15 +169,9 @@ Example request and bootstrap sequence:
 { "req_id": "01HZXJ0Q8J72E9K4N5P6R7S8T9", "state": "ONGOING", "type": "STATE_WIND", "data": { "wind_kn": 14.8, "wind_dir_deg": 205.0, "ts": 1770897600000 } }
 { "req_id": "01HZXJ0Q8J72E9K4N5P6R7S8T9", "state": "ONGOING", "type": "STATE_DEPTH", "data": { "depth_m": 3.1, "ts": 1770897600000 } }
 { "req_id": "01HZXJ0Q8J72E9K4N5P6R7S8T9", "state": "ONGOING", "type": "STATE_WLAN_STATUS", "data": { "wifi_state": "CONNECTED", "wifi_connected": true, "wifi_ssid": "Marina", "wifi_rssi": -63, "wifi_error": "" } }
-{ "req_id": "01HZXJ0Q8J72E9K4N5P6R7S8T9", "state": "ONGOING", "type": "STATE_BLE_STATUS", "data": { "pair_mode_active": false, "pair_mode_until_ts": null } }
 { "req_id": "01HZXJ0Q8J72E9K4N5P6R7S8T9", "state": "ONGOING", "type": "STATE_ANCHOR_POSITION", "data": { "state": "down", "lat": 54.3201, "lon": 10.1402 } }
 { "req_id": "01HZXJ0Q8J72E9K4N5P6R7S8T9", "state": "ONGOING", "type": "TRACK_BACKFILL", "data": [ { "ts": 1770897600000, "lat": 54.3201, "lon": 10.1402, "cog_deg": 192.3, "heading_deg": 188.0, "sog_kn": 0.42, "depth_m": 3.1, "wind_kn": 14.8, "wind_dir_deg": 205.0 } ] }
 ```
-
-`STATE_BLE_STATUS` is transport-specific:
-
-- it is relevant on local BLE connections
-- it may be omitted on cloud-only connections
 
 Example sequence updating range-related anchor settings:
 
@@ -203,6 +198,7 @@ Runtime state values use `STATE_*` reply types.
 App-writable config values use `CONFIG_*` reply types:
 
 - `CONFIG_ALARM`
+- `CONFIG_OBSTACLES`
 - `CONFIG_ANCHOR_SETTINGS`
 - `CONFIG_PROFILES`
 - `CONFIG_WLAN`
@@ -307,28 +303,6 @@ Fields:
 - `cloud_reachable`: whether the cloud path is currently reachable
 - `server_version`: current server build/version string
 
-### `BleStatusValue`
-
-Used as `data` when `type=STATE_BLE_STATUS`.
-
-```json
-{
-  "pair_mode_active": false,
-  "pair_mode_until_ts": null
-}
-```
-
-Fields:
-
-- `pair_mode_active`: whether local BLE pair mode is active
-- `pair_mode_until_ts`: epoch-millisecond timestamp when local BLE pair mode ends, or `null` when pair mode is inactive
-
-Notes:
-
-- `STATE_BLE_STATUS` is specific to local BLE transport visibility
-- it is separate from `STATE_SYSTEM_STATUS`
-- it does not describe a privileged session state
-
 ### `WlanStatusValue`
 
 Used as `data` when `type=STATE_WLAN_STATUS`.
@@ -368,7 +342,7 @@ Used inside `AlarmStateValue.alerts[]`.
 
 ```json
 {
-  "alert_type": "WIND_STRENGTH",
+  "alert_type": "WIND_ABOVE",
   "state": "WATCHING",
   "severity": "WARNING",
   "above_threshold_since_ts": null,
@@ -391,9 +365,9 @@ Fields:
 Allowed `alert_type` values:
 
 - `ANCHOR_DISTANCE`
-- `BOATING_AREA`
-- `WIND_STRENGTH`
-- `DEPTH`
+- `OBSTACLE_CLOSE`
+- `WIND_ABOVE`
+- `DEPTH_BELOW`
 - `DATA_OUTDATED`
 
 ### `AlarmStateValue`
@@ -404,7 +378,7 @@ Used as `data` when `type=STATE_ALARM_STATE`.
 {
   "alerts": [
     {
-      "alert_type": "WIND_STRENGTH",
+      "alert_type": "WIND_ABOVE",
       "state": "ALERT",
       "severity": "WARNING",
       "above_threshold_since_ts": 1770897600000,
@@ -418,7 +392,8 @@ Used as `data` when `type=STATE_ALARM_STATE`.
 Note:
 
 - `AlarmStateValue` intentionally does not carry wrapper-level `state`, `severity`, or global silence/output fields
-- silence and output are tracked per alert, not globally
+- silence is tracked per alert, not globally
+- output routing is not configurable in the v2 protocol; raised alerts are signaled on all outputs available on that implementation
 - `alerts` is an array for direct iteration, not a hash/map
 - if the app wants an aggregate alarm summary, it derives that from the individual alert entries
 
@@ -490,11 +465,212 @@ Fields:
 - `channel`: channel when available, or `null`
 - `hidden`: whether the discovered network is hidden
 
+### `AlarmConfigValue`
+
+Used as `data` when `type=CONFIG_ALARM`.
+
+```json
+{
+  "version": 3,
+  "alerts": [
+    {
+      "type": "ANCHOR_DISTANCE",
+      "enabled": true,
+      "min_time_ms": 20000,
+      "severity": "ALARM",
+      "default_silence_ms": 900000,
+      "data": {
+        "max_distance_m": 35
+      }
+    },
+    {
+      "type": "OBSTACLE_CLOSE",
+      "enabled": true,
+      "min_time_ms": 10000,
+      "severity": "ALARM",
+      "default_silence_ms": 900000,
+      "data": {
+        "min_distance_m": 10
+      }
+    }
+  ]
+}
+```
+
+Fields:
+
+- `version`: config version used for compare-and-swap writes
+- `alerts`: array of `AlarmConfigEntry`
+
+Rules:
+
+- every alert config entry uses the same common envelope
+- `type` identifies which alert is being configured
+- `data` carries the alert-specific configuration payload for that alert type
+- each alert type should appear at most once in `alerts`
+- output routing is not configurable here; raised alerts are signaled on all outputs available on that implementation
+
+### `ObstaclesConfigValue`
+
+Used as `data` when `type=CONFIG_OBSTACLES`.
+
+```json
+{
+  "version": 2,
+  "obstacles": [
+    {
+      "obstacle_id": "breakwater_1",
+      "type": "PERMANENT",
+      "polygon": [
+        { "lat": 54.3194, "lon": 10.1388 },
+        { "lat": 54.3212, "lon": 10.1388 },
+        { "lat": 54.3212, "lon": 10.1418 }
+      ]
+    }
+  ]
+}
+```
+
+Fields:
+
+- `version`: config version used for compare-and-swap writes
+- `obstacles`: array of `ObstaclePolygon`
+
+Rules:
+
+- each obstacle defines a polygon where the boat must not go
+- multiple obstacle polygons may be configured at once
+- each obstacle should have a stable `obstacle_id` so the UI can edit/reorder them predictably
+
+### `ObstacleType`
+
+Allowed `type` values:
+
+- `PERMANENT`
+- `TEMPORARY`
+
+### `ObstaclePolygon`
+
+Used inside `ObstaclesConfigValue.obstacles`.
+
+```json
+{
+  "obstacle_id": "breakwater_1",
+  "type": "PERMANENT",
+  "polygon": [
+    { "lat": 54.3194, "lon": 10.1388 },
+    { "lat": 54.3212, "lon": 10.1388 },
+    { "lat": 54.3212, "lon": 10.1418 }
+  ]
+}
+```
+
+Fields:
+
+- `obstacle_id`: stable obstacle identifier unique within the config value
+- `type`: `ObstacleType` enum value
+- `polygon`: polygon points in WGS84 decimal degrees; minimum 3 points
+
+### `AlarmConfigEntry`
+
+Used inside `AlarmConfigValue.alerts`.
+
+```json
+{
+  "type": "DEPTH_BELOW",
+  "enabled": true,
+  "min_time_ms": 10000,
+  "severity": "ALARM",
+  "default_silence_ms": 900000,
+  "data": {
+    "min_depth_m": 2
+  }
+}
+```
+
+Fields:
+
+- `type`: `AlertType` enum value
+- `enabled`: whether this alert is evaluated
+- `min_time_ms`: minimum time the alert condition must hold before the alert becomes active
+- `severity`: configured alert severity such as `WARNING` or `ALARM`
+- `default_silence_ms`: default silence duration used when the client sends `SILENCE_ALARM` for this alert type
+- `data`: alert-specific configuration object
+
+### `AnchorDistanceAlarmConfigData`
+
+Used as `AlarmConfigEntry.data` when `type=ANCHOR_DISTANCE`.
+
+```json
+{
+  "max_distance_m": 35
+}
+```
+
+Fields:
+
+- `max_distance_m`: maximum allowed distance from anchor position in meters
+
+### `ObstacleCloseAlarmConfigData`
+
+Used as `AlarmConfigEntry.data` when `type=OBSTACLE_CLOSE`.
+
+```json
+{
+  "min_distance_m": 10
+}
+```
+
+Fields:
+
+- `min_distance_m`: minimum allowed distance to any configured obstacle polygon before the alert condition is true
+
+### `WindAboveAlarmConfigData`
+
+Used as `AlarmConfigEntry.data` when `type=WIND_ABOVE`.
+
+```json
+{
+  "max_wind_kn": 30
+}
+```
+
+Fields:
+
+- `max_wind_kn`: maximum allowed wind in knots before the alert condition is true
+
+### `DepthBelowAlarmConfigData`
+
+Used as `AlarmConfigEntry.data` when `type=DEPTH_BELOW`.
+
+```json
+{
+  "min_depth_m": 2
+}
+```
+
+Fields:
+
+- `min_depth_m`: minimum allowed depth in meters before the alert condition is true
+
+### `DataOutdatedAlarmConfigData`
+
+Used as `AlarmConfigEntry.data` when `type=DATA_OUTDATED`.
+
+```json
+{
+  "max_age_ms": 5000
+}
+```
+
+Fields:
+
+- `max_age_ms`: maximum allowed age of required runtime data before the alert condition is true
+
 ### App-defined config payloads
 
 These config payloads are intentionally whole-value and application-defined in the current version:
 
-- `alarm_config`
 - `anchor_settings`
 - `profiles`
 
@@ -636,13 +812,17 @@ Used as request `data` when `type=SILENCE_ALARM`.
 
 ```json
 {
-  "alert_type": "WIND_STRENGTH"
+  "alert_type": "WIND_ABOVE"
 }
 ```
 
 Fields:
 
 - `alert_type`: `AlertType` enum value
+
+Rule:
+
+- the server applies that alert type's configured `default_silence_ms`
 
 `UNSILENCE_ALARM`
 
@@ -654,7 +834,7 @@ Used as request `data` when `type=UNSILENCE_ALARM`.
 
 ```json
 {
-  "alert_type": "WIND_STRENGTH"
+  "alert_type": "WIND_ABOVE"
 }
 ```
 
@@ -666,6 +846,11 @@ Fields:
 
 - replaces `CONFIG_ALARM`
 - request `data` is the full alarm config DTO
+
+`UPDATE_CONFIG_OBSTACLES`
+
+- replaces `CONFIG_OBSTACLES`
+- request `data` is the full obstacles config DTO
 
 `UPDATE_CONFIG_ANCHOR_SETTINGS`
 

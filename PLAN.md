@@ -22,9 +22,10 @@ The cloud worker is a dumb authenticated proxy. BLE and cloud carry the same req
    - bootstrap includes current state/config values plus anchor-track backfill from `min(last_anchor_down_ts, now - 30 minutes)`
    - later replies continue streaming whole-value replacements and track backfill messages
 3. Runtime state is server-authoritative and includes `anchor_position`.
-   - app-writable config is limited to `alarm_config`, `anchor_settings`, `profiles`, and `wlan_config`
+   - app-writable config is limited to `alarm_config`, `obstacles`, `anchor_settings`, `profiles`, and `wlan_config`
 4. Config writes use separate single-payload commands and compare-and-swap on the config DTO's own `version` field.
    - `UPDATE_CONFIG_ALARM`
+   - `UPDATE_CONFIG_OBSTACLES`
    - `UPDATE_CONFIG_ANCHOR_SETTINGS`
    - `UPDATE_CONFIG_PROFILES`
    - `UPDATE_CONFIG_WLAN`
