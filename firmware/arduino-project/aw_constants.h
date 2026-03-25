@@ -61,7 +61,7 @@ static const unsigned long CLOUD_HTTP_TIMEOUT_MS = 10000UL;
 static const unsigned long CLOUD_RETRY_MIN_MS = 2000UL;
 static const unsigned long CLOUD_RETRY_MAX_MS = 60000UL;
 static const unsigned long CLOUD_PING_INTERVAL_MS = 25000UL;
-static const size_t TRACK_HISTORY_CAPACITY = 4096U;
+static const size_t TRACK_HISTORY_CAPACITY = 512U;
 static const size_t TRACK_BACKFILL_REPLY_POINTS = 50U;
 
 static const float SIM_CENTER_LAT_DEG = 54.38329f;

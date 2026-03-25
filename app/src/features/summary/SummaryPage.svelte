@@ -10,9 +10,15 @@
   export let anchorDistanceText = "--";
   export let anchorBearingText = "--";
   export let activeAlerts: AlertRuntimeEntry[] = [];
+  export let onDismissAlert: (alert: AlertRuntimeEntry) => void = () => {};
 
   function alertRowClass(alert: AlertRuntimeEntry): string {
     return alert.severity === "ALARM" ? "summary-alert-row alarm" : "summary-alert-row warning";
+  }
+
+  function dismissAlert(event: MouseEvent, alert: AlertRuntimeEntry): void {
+    event.stopPropagation();
+    onDismissAlert(alert);
   }
 </script>
 
@@ -41,7 +47,17 @@
           class={alertRowClass(alert)}
           title={alert.label}
           subtitle={`${alert.state} · ${alert.severity}`}
-        />
+        >
+          {#snippet after()}
+            <button
+              type="button"
+              class="summary-alert-dismiss-button"
+              onclick={(event) => dismissAlert(event, alert)}
+            >
+              Dismiss
+            </button>
+          {/snippet}
+        </ListItem>
       {/each}
     {/if}
   </List>
@@ -56,5 +72,19 @@
   :global(.summary-alert-row.warning .item-title),
   :global(.summary-alert-row.warning .item-subtitle) {
     color: #ca8a04;
+  }
+
+  .summary-alert-dismiss-button {
+    appearance: none;
+    border: 1px solid rgba(70, 70, 70, 0.3);
+    background: rgba(255, 255, 255, 0.92);
+    color: rgba(22, 22, 22, 0.95);
+    border-radius: 999px;
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 600;
+    padding: 0.28rem 0.72rem;
+    cursor: pointer;
+    white-space: nowrap;
   }
 </style>

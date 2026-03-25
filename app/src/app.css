@@ -300,8 +300,6 @@ textarea {
 
 .wifi-network-list {
   margin-top: 0.7rem;
-  max-height: 15rem;
-  overflow: auto;
 }
 
 pre {

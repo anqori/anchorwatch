@@ -70,6 +70,7 @@
     scanWifiNetworks,
     selectBluetoothConnection,
     selectRelayConnection,
+    silenceAlarm,
     searchForDeviceViaBluetooth,
     startDeviceRuntime,
     stopDeviceRuntime,
@@ -164,7 +165,6 @@
   let maptilerMap = $state<MapTilerMap | null>(null);
   let maptilerSatellite = $state<MapTilerMap | null>(null);
   let internetWifiNetworks = $state<WifiScanNetwork[]>([]);
-  let internetRescanTimer: ReturnType<typeof setTimeout> | null = null;
   let internetWasOpen = false;
   let pendingSystemRuntimeMode: "LIVE" | "SIMULATION" | null = null;
   type ConfigAutoPatchSection = "anchor" | "alerts" | "obstacles" | "profiles";
@@ -329,7 +329,6 @@
     if (!isBleSetupRequired()) {
       return;
     }
-    clearInternetRescanTimer();
     void cancelWifiScan();
     if (navigation.activeView !== "config" || navigation.activeConfigView !== "device_onboarding") {
       navigation.activeView = "config";
@@ -434,35 +433,20 @@
       }
       const boatAccessState = currentBleBoatAccessState();
       const sessionState = currentBleSessionState();
-      if (connection.activeConnection === "bluetooth" && boatAccessState !== "SETUP_REQUIRED" && sessionState === "AUTHORIZED") {
+      const shouldAutoScan = network.availableWifiNetworks.length === 0 && !network.wifiScanInFlight;
+      if (
+        shouldAutoScan
+        && connection.activeConnection === "bluetooth"
+        && boatAccessState !== "SETUP_REQUIRED"
+        && sessionState === "AUTHORIZED"
+      ) {
         void runAction("scan wlan networks", scanWifiNetworks);
       }
     }
     if (!internetOpen) {
-      clearInternetRescanTimer();
       void cancelWifiScan();
     }
     internetWasOpen = internetOpen;
-  });
-
-  $effect(() => {
-    const internetOpen = isInternetViewActive();
-    const updatedAtMs = network.wifiScanUpdatedAtMs;
-    if (!internetOpen || updatedAtMs <= 0) {
-      return;
-    }
-    const boatAccessState = currentBleBoatAccessState();
-    const sessionState = currentBleSessionState();
-    if (connection.activeConnection !== "bluetooth" || boatAccessState === "SETUP_REQUIRED" || sessionState !== "AUTHORIZED") {
-      return;
-    }
-    clearInternetRescanTimer();
-    internetRescanTimer = setTimeout(() => {
-      if (!isInternetViewActive()) {
-        return;
-      }
-      void runAction("scan wlan networks", scanWifiNetworks);
-    }, 10_000);
   });
 
   $effect(() => {
@@ -628,14 +612,6 @@
     return connection.activeConnection === "bluetooth"
       && ble.connected
       && currentBleBoatAccessState() === "SETUP_REQUIRED";
-  }
-
-  function clearInternetRescanTimer(): void {
-    if (!internetRescanTimer) {
-      return;
-    }
-    clearTimeout(internetRescanTimer);
-    internetRescanTimer = null;
   }
 
   function isConfigSectionActive(section: ConfigAutoPatchSection): boolean {
@@ -1199,7 +1175,6 @@
 
   onDestroy(() => {
     window.removeEventListener("popstate", handlePopState);
-    clearInternetRescanTimer();
     clearAllConfigAutoPatchTimers();
     stopWarningBeep();
     clearWarningAutoFallbackTimer();
@@ -1243,6 +1218,7 @@
       anchorDistanceText={anchorDistanceText}
       anchorBearingText={anchorBearingText}
       activeAlerts={activeAlerts}
+      onDismissAlert={(alert) => void runAction(`dismiss alert ${alert.alertType.toLowerCase()}`, () => silenceAlarm(alert.alertType))}
     />
   {/if}
 
@@ -1324,6 +1300,7 @@
         "connect wlan network",
         () => connectToWifiNetwork(ssid, security as WifiSecurity, passphrase, cloudSecret),
       )}
+      onScanNow={() => void runAction("scan wlan networks", scanWifiNetworks)}
       onBack={() => goToSettingsView()}
     />
   {/if}

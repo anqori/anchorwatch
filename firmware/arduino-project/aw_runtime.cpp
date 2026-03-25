@@ -2,6 +2,7 @@
 
 #include <WiFi.h>
 #include <Preferences.h>
+#include <esp_heap_caps.h>
 
 #include "aw_constants.h"
 #include "aw_json.h"
@@ -99,31 +100,108 @@ bool equalAlarmState(const AlarmStateValue& a, const AlarmStateValue& b) {
 
 }  // namespace
 
+void AnchorWatchRuntime::recordHeapCheckpoint(const char* label, bool store_for_boot_report) {
+  HeapCheckpoint checkpoint;
+  checkpoint.label = label;
+  checkpoint.free_heap = ESP.getFreeHeap();
+  checkpoint.min_free_heap = ESP.getMinFreeHeap();
+  checkpoint.free_8bit = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+  checkpoint.largest_8bit = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  checkpoint.free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+  checkpoint.largest_internal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+
+  Serial.printf(
+    "[mem] %s free_heap=%u min_free_heap=%u free_8bit=%u largest_8bit=%u free_internal=%u largest_internal=%u\n",
+    checkpoint.label.c_str(),
+    checkpoint.free_heap,
+    checkpoint.min_free_heap,
+    checkpoint.free_8bit,
+    checkpoint.largest_8bit,
+    checkpoint.free_internal,
+    checkpoint.largest_internal
+  );
+  log_e(
+    "[mem] %s free_heap=%u min_free_heap=%u free_8bit=%u largest_8bit=%u free_internal=%u largest_internal=%u",
+    checkpoint.label.c_str(),
+    checkpoint.free_heap,
+    checkpoint.min_free_heap,
+    checkpoint.free_8bit,
+    checkpoint.largest_8bit,
+    checkpoint.free_internal,
+    checkpoint.largest_internal
+  );
+
+  if (store_for_boot_report) {
+    boot_heap_checkpoints_.push_back(checkpoint);
+  }
+}
+
+void AnchorWatchRuntime::printBootHeapCheckpoints() {
+  if (boot_heap_checkpoints_.empty()) {
+    Serial.println("[mem] no deferred boot checkpoints recorded");
+    return;
+  }
+  Serial.println("[mem] deferred boot checkpoint replay start");
+  log_e("[mem] deferred boot checkpoint replay start");
+  for (const HeapCheckpoint& checkpoint : boot_heap_checkpoints_) {
+    Serial.printf(
+      "[mem][replay] %s free_heap=%u min_free_heap=%u free_8bit=%u largest_8bit=%u free_internal=%u largest_internal=%u\n",
+      checkpoint.label.c_str(),
+      checkpoint.free_heap,
+      checkpoint.min_free_heap,
+      checkpoint.free_8bit,
+      checkpoint.largest_8bit,
+      checkpoint.free_internal,
+      checkpoint.largest_internal
+    );
+    log_e(
+      "[mem][replay] %s free_heap=%u min_free_heap=%u free_8bit=%u largest_8bit=%u free_internal=%u largest_internal=%u",
+      checkpoint.label.c_str(),
+      checkpoint.free_heap,
+      checkpoint.min_free_heap,
+      checkpoint.free_8bit,
+      checkpoint.largest_8bit,
+      checkpoint.free_internal,
+      checkpoint.largest_internal
+    );
+  }
+  Serial.println("[mem] deferred boot checkpoint replay end");
+  log_e("[mem] deferred boot checkpoint replay end");
+}
+
 void AnchorWatchRuntime::setup() {
   Serial.begin(115200);
-  Serial.printf("[mem] boot free_heap=%u\n", ESP.getFreeHeap());
+  boot_heap_checkpoints_.clear();
+  recordHeapCheckpoint("boot", true);
   setupPins();
+  recordHeapCheckpoint("after setupPins", true);
   storage_.begin();
+  recordHeapCheckpoint("after storage.begin", true);
   loadState();
+  recordHeapCheckpoint("after loadState", true);
   system_status_.server_version = FW_VERSION;
   system_status_.cloud_reachable = false;
   pair_mode_until_ms_ = millis() + PAIR_MODE_TTL_MS;
   last_pair_mode_active_ = isPairModeActive(millis());
+  setupWifi();
   const String device_name = String(BLE_DEVICE_NAME_PREFIX) + device_id_.substring(max(0, static_cast<int>(device_id_.length()) - 6));
   const bool ble_ready = ble_.begin(device_name, this);
-  Serial.printf("[mem] after ble begin free_heap=%u\n", ESP.getFreeHeap());
+  recordHeapCheckpoint("after ble.begin", true);
   if (ble_ready) {
     Serial.print("[ble] advertising as ");
     Serial.println(device_name);
   } else {
     Serial.println("[ble] init failed; BLE transport unavailable");
   }
-  setupWifi();
+  recordHeapCheckpoint("before cloud.begin", true);
   cloud_.begin(this);
+  recordHeapCheckpoint("after cloud.begin", true);
   if (system_config_.runtime_mode == RuntimeMode::SIMULATION) {
     simulation_.begin(millis());
     has_real_time_ = true;
   }
+  deferred_boot_heap_report_due_ms_ = millis() + 2000UL;
+  deferred_boot_heap_report_pending_ = true;
   refreshAuthValue();
   refreshSnapshotValue();
   Serial.println("AnchorWatch firmware v2 runtime started");
@@ -132,6 +210,10 @@ void AnchorWatchRuntime::setup() {
 
 void AnchorWatchRuntime::loop() {
   const unsigned long now_ms = millis();
+  if (deferred_boot_heap_report_pending_ && now_ms >= deferred_boot_heap_report_due_ms_) {
+    printBootHeapCheckpoints();
+    deferred_boot_heap_report_pending_ = false;
+  }
   ble_.loop(now_ms);
   processSerial();
   updateLoopState(now_ms);
@@ -146,9 +228,8 @@ void AnchorWatchRuntime::setupPins() {
 }
 
 void AnchorWatchRuntime::setupWifi() {
-  Serial.printf("[mem] setupWifi start free_heap=%u\n", ESP.getFreeHeap());
+  recordHeapCheckpoint("setupWifi start", true);
   clearEspWifiNvs();
-  WiFi.useStaticBuffers(true);
   WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
   WiFi.disconnect(false, false);
@@ -156,7 +237,7 @@ void AnchorWatchRuntime::setupWifi() {
   WiFi.setHostname("anchorwatch");
   wlan_status_.wifi_state = WlanConnectionState::DISCONNECTED;
   wlan_status_.wifi_connected = false;
-  Serial.printf("[mem] setupWifi done free_heap=%u\n", ESP.getFreeHeap());
+  recordHeapCheckpoint("setupWifi done", true);
 }
 
 void AnchorWatchRuntime::loadState() {
@@ -235,7 +316,12 @@ void AnchorWatchRuntime::processSerial() {
 void AnchorWatchRuntime::handleSerialCommand(const String& line) {
   const unsigned long now_ms = millis();
   if (line == "help") {
-    Serial.println("Commands: help, pair on, pair off, pair status, wifi status, debug on, debug off");
+    Serial.println("Commands: help, mem status, pair on, pair off, pair status, wifi status, wifi scan, debug on, debug off");
+    return;
+  }
+  if (line == "mem status") {
+    recordHeapCheckpoint("serial mem status");
+    printBootHeapCheckpoints();
     return;
   }
   if (line == "pair on") {
@@ -268,6 +354,37 @@ void AnchorWatchRuntime::handleSerialCommand(const String& line) {
     Serial.println(wlan_status_.wifi_error);
     return;
   }
+  if (line == "wifi scan") {
+    if (scan_active_) {
+      Serial.println("[wifi] scan already active via protocol");
+      return;
+    }
+    std::vector<WlanNetworkValue> results;
+    String error_message;
+    if (!performWifiScan(false, 20, results, error_message)) {
+      Serial.print("[wifi] serial scan failed: ");
+      Serial.println(error_message);
+      return;
+    }
+    Serial.print("[wifi] serial scan found ");
+    Serial.println(static_cast<unsigned>(results.size()));
+    for (size_t index = 0; index < results.size(); index++) {
+      const WlanNetworkValue& network = results[index];
+      Serial.print("[wifi] ");
+      Serial.print(index);
+      Serial.print(": ssid=");
+      Serial.print(network.ssid);
+      Serial.print(" security=");
+      Serial.print(network.security);
+      Serial.print(" rssi=");
+      Serial.print(network.has_rssi ? String(network.rssi) : String("null"));
+      Serial.print(" channel=");
+      Serial.print(network.has_channel ? String(network.channel) : String("null"));
+      Serial.print(" hidden=");
+      Serial.println(network.hidden ? "true" : "false");
+    }
+    return;
+  }
   if (line == "debug on") {
     debug_enabled_ = true;
     Serial.println("[debug] enabled");
@@ -279,6 +396,55 @@ void AnchorWatchRuntime::handleSerialCommand(const String& line) {
     return;
   }
   Serial.println("[serial] unknown command");
+}
+
+bool AnchorWatchRuntime::performWifiScan(
+  bool include_hidden,
+  int max_results,
+  std::vector<WlanNetworkValue>& results,
+  String& error_message
+) {
+  recordHeapCheckpoint("scan start");
+  WiFi.mode(WIFI_STA);
+  WiFi.enableSTA(true);
+  wifi_connect_started_ms_ = 0;
+  WiFi.disconnect(false, false);
+  delay(50);
+  recordHeapCheckpoint("scan after wifi reset");
+  results.clear();
+  const int found = WiFi.scanNetworks(false, include_hidden);
+  recordHeapCheckpoint("scan after scanNetworks");
+  Serial.printf("[wifi] scan result found=%d status=%d\n", found, static_cast<int>(WiFi.status()));
+  if (found == WIFI_SCAN_RUNNING) {
+    error_message = "wifi scan already running";
+    return false;
+  }
+  if (found < 0) {
+    error_message = "wifi scan failed rc=" + String(found) + " status=" + String(static_cast<int>(WiFi.status()));
+    Serial.print("[wifi] ");
+    Serial.println(error_message);
+    WiFi.scanDelete();
+    return false;
+  }
+  const int limited_results = min(found, max_results);
+  for (int index = 0; index < limited_results; index++) {
+    WlanNetworkValue network;
+    network.ssid = WiFi.SSID(index);
+    network.security = "wpa2";
+    network.has_rssi = true;
+    network.rssi = WiFi.RSSI(index);
+    network.has_channel = true;
+    network.channel = WiFi.channel(index);
+    network.hidden = network.ssid.isEmpty();
+    if (!include_hidden && network.hidden) {
+      continue;
+    }
+    results.push_back(network);
+  }
+  WiFi.scanDelete();
+  recordHeapCheckpoint("scan after scanDelete");
+  error_message = "";
+  return true;
 }
 
 void AnchorWatchRuntime::onBleJsonMessage(const String& json) {
@@ -1385,43 +1551,12 @@ void AnchorWatchRuntime::handleRequest(SessionTransport transport, const String&
       sendError(request, error.code, error.message);
       return;
     }
-    Serial.printf("[mem] scan start free_heap=%u\n", ESP.getFreeHeap());
-    WiFi.mode(WIFI_STA);
-    WiFi.enableSTA(true);
-    wifi_connect_started_ms_ = 0;
-    WiFi.disconnect(false, false);
-    delay(50);
-    scan_results_.clear();
-    const int found = WiFi.scanNetworks(false, parsed.include_hidden);
-    Serial.printf("[mem] scan after call free_heap=%u found=%d status=%d\n", ESP.getFreeHeap(), found, static_cast<int>(WiFi.status()));
-    if (found == WIFI_SCAN_RUNNING) {
-      sendError(request, "BUSY", "wifi scan already running");
+    String error_message;
+    if (!performWifiScan(parsed.include_hidden, parsed.max_results, scan_results_, error_message)) {
+      const char* code = error_message == "wifi scan already running" ? "BUSY" : "DEVICE_FAILED";
+      sendError(request, code, error_message);
       return;
     }
-    if (found < 0) {
-      String message = "wifi scan failed rc=" + String(found) + " status=" + String(static_cast<int>(WiFi.status()));
-      Serial.print("[wifi] ");
-      Serial.println(message);
-      sendError(request, "DEVICE_FAILED", message);
-      WiFi.scanDelete();
-      return;
-    }
-    const int max_results = min(found, parsed.max_results);
-    for (int index = 0; index < max_results; index++) {
-      WlanNetworkValue network;
-      network.ssid = WiFi.SSID(index);
-      network.security = "wpa2";
-      network.has_rssi = true;
-      network.rssi = WiFi.RSSI(index);
-      network.has_channel = true;
-      network.channel = WiFi.channel(index);
-      network.hidden = network.ssid.isEmpty();
-      if (!parsed.include_hidden && network.hidden) {
-        continue;
-      }
-      scan_results_.push_back(network);
-    }
-    WiFi.scanDelete();
     scan_active_ = true;
     active_scan_request_ = request;
     scan_emit_index_ = 0;

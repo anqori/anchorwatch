@@ -39,10 +39,12 @@ The default firmware recipes now build with `PartitionScheme=huge_app`, because 
 
 ```text
 help
+mem status
 pair on
 pair off
 pair status
 wifi status
+wifi scan
 debug on
 debug off
 ```

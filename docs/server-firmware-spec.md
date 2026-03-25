@@ -105,12 +105,19 @@ Expected local maintenance channel:
 Local maintenance command baseline:
 
 - `help`
+- `mem status`
 - `pair on`
 - `pair off`
 - `pair status`
 - `wifi status`
 - `debug on`
 - `debug off`
+
+The serial maintenance path should also expose memory diagnostics during bring-up:
+
+- `mem status`
+  - prints current free heap, minimum free heap seen so far, and largest free blocks for the relevant internal heaps
+  - used to debug BLE + WLAN coexistence pressure on the ESP32-S3
 
 Secret and identity handling baseline:
 
@@ -308,6 +315,7 @@ Expected use cases:
 - enable or disable pair mode
 - confirm privileged local session
 - inspect WLAN status
+- trigger a direct diagnostic WLAN scan
 - toggle debug logging
 
 The serial console may also expose development diagnostics for:

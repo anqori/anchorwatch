@@ -21,6 +21,7 @@
   export let disabledReason = "Waiting for server config...";
 
   export let onBack: () => void = () => {};
+  export let onScanNow: () => void = () => {};
   export let onConnectWifiNetwork: (ssid: string, security: WifiSecurity, passphrase: string, cloudSecret: string) => void = () => {};
 
   let sheetOpened = false;
@@ -74,6 +75,17 @@
       {/if}
     </div>
   {/if}
+
+  <div class="internet-toolbar">
+    <button
+      type="button"
+      class="internet-scan-button"
+      onclick={onScanNow}
+      disabled={disabled || wifiScanInFlight}
+    >
+      {wifiScanInFlight ? "Scanning..." : "Scan now"}
+    </button>
+  </div>
 
   <List strong inset class="wifi-network-list" aria-label="Available WLAN networks">
     {#if availableWifiNetworks.length === 0}
@@ -169,6 +181,29 @@
     background: rgba(125, 125, 125, 0.08);
     display: grid;
     gap: 0.45rem;
+  }
+
+  .internet-toolbar {
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  .internet-scan-button {
+    appearance: none;
+    border: 1px solid rgba(70, 70, 70, 0.35);
+    background: rgba(246, 246, 246, 0.92);
+    color: rgba(22, 22, 22, 0.95);
+    min-height: 2.3rem;
+    border-radius: 0.6rem;
+    font: inherit;
+    font-weight: 600;
+    padding: 0.45rem 0.9rem;
+    cursor: pointer;
+  }
+
+  .internet-scan-button:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
   }
 
   .internet-scan-indicator {

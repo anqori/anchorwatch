@@ -44,6 +44,16 @@ class AnchorWatchRuntime : public BleTransportListener, public CloudTransportLis
     bool session_authorized = false;
   };
 
+  struct HeapCheckpoint {
+    String label;
+    uint32_t free_heap = 0;
+    uint32_t min_free_heap = 0;
+    uint32_t free_8bit = 0;
+    uint32_t largest_8bit = 0;
+    uint32_t free_internal = 0;
+    uint32_t largest_internal = 0;
+  };
+
   Storage storage_;
   BleTransport ble_;
   CloudTransport cloud_;
@@ -74,6 +84,7 @@ class AnchorWatchRuntime : public BleTransportListener, public CloudTransportLis
 
   std::vector<ActiveRequestRef> get_data_requests_;
   std::vector<SessionAuthRef> session_auth_;
+  std::vector<HeapCheckpoint> boot_heap_checkpoints_;
   std::vector<String> ble_outbox_;
   bool scan_active_ = false;
   ActiveRequestRef active_scan_request_;
@@ -88,7 +99,9 @@ class AnchorWatchRuntime : public BleTransportListener, public CloudTransportLis
   unsigned long wifi_connect_started_ms_ = 0;
   unsigned long wifi_next_retry_ms_ = 0;
   unsigned long wifi_retry_delay_ms_ = WIFI_RETRY_MIN_MS;
+  unsigned long deferred_boot_heap_report_due_ms_ = 0;
   bool debug_enabled_ = false;
+  bool deferred_boot_heap_report_pending_ = false;
   bool last_pair_mode_active_ = false;
 
   uint64_t last_anchor_down_ts_ = 0;
@@ -97,6 +110,8 @@ class AnchorWatchRuntime : public BleTransportListener, public CloudTransportLis
   void setupPins();
   void setupWifi();
   void loadState();
+  void recordHeapCheckpoint(const char* label, bool store_for_boot_report = false);
+  void printBootHeapCheckpoints();
   void refreshAuthValue();
   void refreshSnapshotValue();
   void processSerial();
@@ -109,6 +124,7 @@ class AnchorWatchRuntime : public BleTransportListener, public CloudTransportLis
   void recordTrackPoint(uint64_t now_ts);
   void updateWlan(unsigned long now_ms);
   void startWifiConnect(unsigned long now_ms);
+  bool performWifiScan(bool include_hidden, int max_results, std::vector<WlanNetworkValue>& results, String& error_message);
   void updateAlarmAndOutputs(uint64_t now_ts);
   void applyOutputs(uint64_t now_ts);
   void updateCloud(unsigned long now_ms);

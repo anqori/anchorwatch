@@ -341,7 +341,6 @@ export async function scanWifiNetworks(): Promise<void> {
   }
 
   await cancelWifiScan();
-  appState.network.availableWifiNetworks = [];
   appState.network.wifiScanErrorText = "";
   appState.network.wifiScanInFlight = true;
   appState.network.wifiScanStatusText = "Scanning nearby WLAN networks...";
