@@ -110,6 +110,9 @@ Local maintenance command baseline:
 - `pair off`
 - `pair status`
 - `wifi status`
+- `wifi scan`
+- `track status`
+- `track clear`
 - `debug on`
 - `debug off`
 
@@ -160,6 +163,7 @@ Persistent firmware-owned values:
 - any firmware markers required across reboot:
   - last anchor-down timestamp
   - last known anchor position if anchored
+- retained track history in a bounded filesystem-backed ring log
 
 Identity defaults:
 
@@ -185,6 +189,27 @@ Cloud identity/credential update expectations:
 - `CONFIG_CLOUD` must be emitted only to authorized BLE sessions
 
 No backward compatibility with old persistence layout is required for the greenfield rewrite. Internal key names and storage layout may change freely if the new implementation is cleaner.
+
+## Retained Track History
+
+The firmware must not keep the retained track log as a large fixed RAM array.
+
+Expected approach:
+
+- store retained track points in the filesystem partition as a bounded ring log
+- size the log from the actual filesystem partition size at boot
+- keep a reserved free-space margin so the log does not consume the whole filesystem
+- overwrite the oldest retained points automatically when the log reaches its configured capacity
+
+Operational expectations:
+
+- `GET_DATA` track bootstrap reads from the flash-backed retained log
+- changing from `SIMULATION` back to `LIVE` may clear retained history
+- local maintenance must provide an explicit way to inspect and clear retained history
+  - `track status`
+  - `track clear`
+
+The exact on-flash format is implementation-specific. The important behavioral requirement is bounded retained history with explicit cleanup, not unbounded append.
 
 ## Time Source Expectations
 

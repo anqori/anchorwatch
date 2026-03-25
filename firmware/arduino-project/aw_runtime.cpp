@@ -177,6 +177,8 @@ void AnchorWatchRuntime::setup() {
   recordHeapCheckpoint("after setupPins", true);
   storage_.begin();
   recordHeapCheckpoint("after storage.begin", true);
+  track_log_.begin();
+  recordHeapCheckpoint("after track_log.begin", true);
   loadState();
   recordHeapCheckpoint("after loadState", true);
   system_status_.server_version = FW_VERSION;
@@ -205,7 +207,7 @@ void AnchorWatchRuntime::setup() {
   refreshAuthValue();
   refreshSnapshotValue();
   Serial.println("AnchorWatch firmware v2 runtime started");
-  Serial.println("Commands: help, pair on, pair off, pair status, wifi status, debug on, debug off");
+  Serial.println("Commands: help, mem status, pair on, pair off, pair status, wifi status, wifi scan, track status, track clear, debug on, debug off");
 }
 
 void AnchorWatchRuntime::loop() {
@@ -316,7 +318,7 @@ void AnchorWatchRuntime::processSerial() {
 void AnchorWatchRuntime::handleSerialCommand(const String& line) {
   const unsigned long now_ms = millis();
   if (line == "help") {
-    Serial.println("Commands: help, mem status, pair on, pair off, pair status, wifi status, wifi scan, debug on, debug off");
+    Serial.println("Commands: help, mem status, pair on, pair off, pair status, wifi status, wifi scan, track status, track clear, debug on, debug off");
     return;
   }
   if (line == "mem status") {
@@ -383,6 +385,31 @@ void AnchorWatchRuntime::handleSerialCommand(const String& line) {
       Serial.print(" hidden=");
       Serial.println(network.hidden ? "true" : "false");
     }
+    return;
+  }
+  if (line == "track status") {
+    const TrackLog::Stats stats = track_log_.stats();
+    Serial.print("[track] available=");
+    Serial.print(stats.available ? "true" : "false");
+    Serial.print(" count=");
+    Serial.print(stats.count);
+    Serial.print(" capacity=");
+    Serial.print(stats.capacity);
+    Serial.print(" next_index=");
+    Serial.print(stats.next_index);
+    Serial.print(" file_bytes=");
+    Serial.print(stats.file_bytes);
+    Serial.print(" fs_used=");
+    Serial.print(stats.fs_used_bytes);
+    Serial.print(" fs_total=");
+    Serial.print(stats.fs_total_bytes);
+    Serial.print(" reserved=");
+    Serial.println(stats.reserved_bytes);
+    return;
+  }
+  if (line == "track clear") {
+    track_log_.clear();
+    Serial.println("[track] cleared");
     return;
   }
   if (line == "debug on") {
@@ -651,10 +678,8 @@ void AnchorWatchRuntime::recordTrackPoint(uint64_t now_ts) {
 }
 
 void AnchorWatchRuntime::appendTrackPoint(const TrackPoint& point) {
-  track_history_[track_history_next_] = point;
-  track_history_next_ = (track_history_next_ + 1U) % TRACK_HISTORY_CAPACITY;
-  if (track_history_count_ < TRACK_HISTORY_CAPACITY) {
-    track_history_count_++;
+  if (!track_log_.append(point)) {
+    Serial.println("[track] append failed");
   }
 }
 
@@ -925,7 +950,8 @@ void AnchorWatchRuntime::publishConfigToStreams(const char* config_type) {
 
 void AnchorWatchRuntime::publishTrackBackfill(const ActiveRequestRef& request) {
   const uint64_t now_ts = currentEpochMs();
-  if (track_history_count_ == 0 || now_ts == 0) {
+  const TrackLog::Stats stats = track_log_.stats();
+  if (stats.count == 0 || now_ts == 0) {
     return;
   }
   const uint64_t since_ts = last_anchor_down_ts_ > 0 && last_anchor_down_ts_ < now_ts - 1800000ULL
@@ -933,18 +959,17 @@ void AnchorWatchRuntime::publishTrackBackfill(const ActiveRequestRef& request) {
     : (now_ts > 1800000ULL ? now_ts - 1800000ULL : 0ULL);
   std::vector<TrackPoint> batch;
   batch.reserve(TRACK_BACKFILL_REPLY_POINTS);
-  const size_t oldest_index = track_history_count_ == TRACK_HISTORY_CAPACITY ? track_history_next_ : 0U;
-  for (size_t offset = 0; offset < track_history_count_; offset++) {
-    const size_t index = (oldest_index + offset) % TRACK_HISTORY_CAPACITY;
-    const TrackPoint& point = track_history_[index];
-    if (static_cast<uint64_t>(point.ts_sec) * 1000ULL < since_ts) {
-      continue;
-    }
+  const bool ok = track_log_.forEachSince(since_ts, [&](const TrackPoint& point) {
     batch.push_back(point);
     if (batch.size() >= TRACK_BACKFILL_REPLY_POINTS) {
       send(request, buildTrackBackfillReply(request.req_id, "ONGOING", batch));
       batch.clear();
     }
+    return true;
+  });
+  if (!ok) {
+    Serial.println("[track] backfill read failed");
+    return;
   }
   if (!batch.empty()) {
     send(request, buildTrackBackfillReply(request.req_id, "ONGOING", batch));
@@ -1436,8 +1461,7 @@ void AnchorWatchRuntime::handleRequest(SessionTransport transport, const String&
         simulation_.stop();
         has_real_time_ = false;
         clearTelemetryForLiveMode();
-        track_history_count_ = 0;
-        track_history_next_ = 0;
+        track_log_.clear();
       }
     }
     updateAlarmAndOutputs(currentEpochMs());

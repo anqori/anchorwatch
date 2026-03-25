@@ -21,6 +21,7 @@ Firmware-specific implementation target details live in [`docs/server-firmware-s
 - `SCAN_WLAN` streamed as one `WLAN_NETWORK` reply at a time and closed with `ACK`
 - explicit request cancellation with `type: "CANCEL"`
 - cloud uplink over WLAN with relay-issued WebSocket tickets and session-isolated remote app traffic
+- flash-backed retained track log with bounded on-device storage and automatic overwrite of oldest entries
 
 The `auth` characteristic is now only for local pairing/privileged-session state. The main app/runtime protocol is the v2 JSON command stream described in [`docs/protocol-v2.md`](/home/pm/dev/anchormaster/docs/protocol-v2.md).
 
@@ -35,6 +36,8 @@ just firmware-build
 
 The default firmware recipes now build with `PartitionScheme=huge_app`, because TLS + cloud uplink no longer fits in the old 1.2 MB app partition.
 
+Retained track history is stored in the filesystem partition, not in a large RAM ring. The firmware keeps a reserve margin in the filesystem and uses a bounded ring file so old points are overwritten instead of filling flash indefinitely.
+
 ## Serial helper commands
 
 ```text
@@ -45,6 +48,8 @@ pair off
 pair status
 wifi status
 wifi scan
+track status
+track clear
 debug on
 debug off
 ```

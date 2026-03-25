@@ -7,6 +7,7 @@
 #include "aw_model.h"
 #include "aw_simulation.h"
 #include "aw_storage.h"
+#include "aw_track_log.h"
 
 namespace aw {
 
@@ -55,6 +56,7 @@ class AnchorWatchRuntime : public BleTransportListener, public CloudTransportLis
   };
 
   Storage storage_;
+  TrackLog track_log_;
   BleTransport ble_;
   CloudTransport cloud_;
   SimulationEngine simulation_;
@@ -77,10 +79,6 @@ class AnchorWatchRuntime : public BleTransportListener, public CloudTransportLis
   WlanStatusState wlan_status_;
   SystemStatusState system_status_;
   AlarmStateValue alarm_state_;
-
-  TrackPoint track_history_[TRACK_HISTORY_CAPACITY];
-  size_t track_history_count_ = 0;
-  size_t track_history_next_ = 0;
 
   std::vector<ActiveRequestRef> get_data_requests_;
   std::vector<SessionAuthRef> session_auth_;
